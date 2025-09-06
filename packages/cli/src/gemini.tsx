@@ -39,8 +39,7 @@ if (wantWarningSuppression && !process.env.NODE_NO_WARNINGS) {
 import React, { ErrorInfo, useState, useEffect } from 'react';
 import { render, Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
-import { AppWrapper } from './ui/App.js';
-import { ErrorBoundary } from './ui/components/ErrorBoundary.js';
+import { AppContainer } from './ui/AppContainer.js';
 import { loadCliConfig, parseArguments } from './config/config.js';
 import { readStdin } from './utils/readStdin.js';
 import { basename } from 'node:path';
@@ -79,6 +78,10 @@ import {
   runExitCleanup,
 } from './utils/cleanup.js';
 import { getCliVersion } from './utils/version.js';
+import {
+  initializeApp,
+  type InitializationResult,
+} from './core/initializer.js';
 import { validateAuthMethod } from './config/auth.js';
 import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
 // createProviderManager removed - provider manager now created in loadCliConfig()
@@ -100,6 +103,13 @@ import {
   applyCliArgumentOverrides,
 } from './runtime/runtimeSettings.js';
 import { writeFileSync } from 'node:fs';
+import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
+import { VimModeProvider } from './ui/contexts/VimModeContext.js';
+import { KeypressProvider } from './ui/contexts/KeypressContext.js';
+import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
+import { ToolCallProvider } from './ui/contexts/ToolCallProvider.js';
+import { TodoProvider } from './ui/contexts/TodoProvider.js';
+import { RuntimeContextProvider } from './ui/contexts/RuntimeContext.js';
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -241,41 +251,54 @@ export async function startInteractiveUI(
   config: Config,
   settings: LoadedSettings,
   startupWarnings: string[],
-  workspaceRoot: string,
+  workspaceRoot: string = process.cwd(),
+  initializationResult: InitializationResult,
 ) {
   const version = await getCliVersion();
   // Detect and enable Kitty keyboard protocol once at startup
   await detectAndEnableKittyProtocol();
   setWindowTitle(basename(workspaceRoot), settings);
 
-  // Initialize authentication before rendering to ensure geminiClient is available
-  if (settings.merged.selectedAuthType) {
-    try {
-      const err = validateAuthMethod(settings.merged.selectedAuthType);
-      if (err) {
-        console.error('Error validating authentication method:', err);
-        process.exit(1);
-      }
-    } catch (err) {
-      console.error('Error authenticating:', err);
-      process.exit(1);
-    }
-  }
+  // Create wrapper component to use hooks inside render
+  const AppWrapper = () => {
+    const kittyProtocolStatus = useKittyKeyboardProtocol();
+    return (
+      <SettingsContext.Provider value={settings}>
+        <KeypressProvider
+          kittyProtocolEnabled={kittyProtocolStatus.enabled}
+          config={config}
+          debugKeystrokeLogging={settings.merged.debugKeystrokeLogging}
+        >
+          <SessionStatsProvider>
+            <VimModeProvider settings={settings}>
+              <ToolCallProvider sessionId={config.getSessionId()}>
+                <TodoProvider sessionId={config.getSessionId()}>
+                  <RuntimeContextProvider>
+                    <AppContainer
+                      config={config}
+                      settings={settings}
+                      startupWarnings={startupWarnings}
+                      version={version}
+                      initializationResult={initializationResult}
+                    />
+                  </RuntimeContextProvider>
+                </TodoProvider>
+              </ToolCallProvider>
+            </VimModeProvider>
+          </SessionStatsProvider>
+        </KeypressProvider>
+      </SettingsContext.Provider>
+    );
+  };
 
   const instance = render(
     <React.StrictMode>
-      <ErrorBoundary onError={handleError}>
-        <SettingsContext.Provider value={settings}>
-          <AppWrapper
-            config={config}
-            settings={settings}
-            startupWarnings={startupWarnings}
-            version={version}
-          />
-        </SettingsContext.Provider>
-      </ErrorBoundary>
+      <AppWrapper />
     </React.StrictMode>,
-    { exitOnCtrlC: false },
+    {
+      exitOnCtrlC: false,
+      isScreenReaderEnabled: config.getScreenReader(),
+    },
   );
 
   checkForUpdates()
@@ -506,111 +529,15 @@ export async function main() {
   // Load custom themes from settings
   themeManager.loadCustomThemes(settings.merged.customThemes);
 
-  // If a provider is specified, activate it after initialization
-  const configProvider = config.getProvider();
-  if (configProvider) {
-    try {
-      // Extract bootstrap args from config if available (for bundle compatibility)
-      const configWithBootstrapArgs = config as Config & {
-        _bootstrapArgs?: {
-          keyOverride?: string | null;
-          keyfileOverride?: string | null;
-          setOverrides?: string[] | null;
-          baseurlOverride?: string | null;
-        };
-      };
-
-      // Apply CLI argument overrides BEFORE provider switch
-      // This ensures --key, --keyfile, --baseurl, and --set are applied
-      // at the correct time and override profile settings
-      await applyCliArgumentOverrides(
-        argv,
-        configWithBootstrapArgs._bootstrapArgs,
-      );
-
-      await switchActiveProvider(configProvider);
-
-      const activeProvider = providerManager.getActiveProvider();
-      const configWithCliOverride = config as Config & {
-        _cliModelOverride?: string;
-      };
-      const cliModelFromBootstrap =
-        typeof configWithCliOverride._cliModelOverride === 'string'
-          ? configWithCliOverride._cliModelOverride.trim()
-          : undefined;
-      let configModel =
-        cliModelFromBootstrap && cliModelFromBootstrap.length > 0
-          ? cliModelFromBootstrap
-          : config.getModel();
-
-      if (
-        (!configModel || configModel === 'placeholder-model') &&
-        activeProvider.getDefaultModel
-      ) {
-        // No model specified or placeholder, get the provider's default
-        configModel = activeProvider.getDefaultModel();
-      }
-
-      if (configModel && configModel !== 'placeholder-model') {
-        await setActiveModel(configModel);
-      }
-
-      // Apply CLI and profile model params before first request
-      const configWithParams = config as Config & {
-        _profileModelParams?: Record<string, unknown>;
-        _cliModelParams?: Record<string, unknown>;
-      };
-      const mergedModelParams: Record<string, unknown> = {};
-
-      if (!argv.provider && configWithParams._profileModelParams) {
-        Object.assign(mergedModelParams, configWithParams._profileModelParams);
-      }
-
-      if (configWithParams._cliModelParams) {
-        Object.assign(mergedModelParams, configWithParams._cliModelParams);
-      }
-
-      if (activeProvider) {
-        const existingParams = getActiveModelParams();
-
-        for (const [key, value] of Object.entries(mergedModelParams)) {
-          setActiveModelParam(key, value);
-        }
-
-        for (const key of Object.keys(existingParams)) {
-          if (!(key in mergedModelParams)) {
-            clearActiveModelParam(key);
-          }
-        }
-      }
-
-      // No need to set auth type when using a provider
-      // CLI arguments have already been applied by applyCliArgumentOverrides() above
-    } catch (e) {
-      console.error(chalk.red((e as Error).message));
-      process.exit(1);
-    }
-  }
-
   if (settings.merged.theme) {
     if (!themeManager.setActiveTheme(settings.merged.theme)) {
       // If the theme is not found during initial load, log a warning and continue.
-      // The useThemeCommand hook in App.tsx will handle opening the dialog.
+      // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
       console.warn(`Warning: Theme "${settings.merged.theme}" not found.`);
     }
   }
 
-  // Verify theme colors at startup for debugging
-  if (process.env.DEBUG_THEME) {
-    const activeTheme = themeManager.getActiveTheme();
-    console.log('Active theme:', activeTheme.name);
-    console.log('Theme colors:', {
-      AccentCyan: activeTheme.colors.AccentCyan,
-      AccentBlue: activeTheme.colors.AccentBlue,
-      AccentGreen: activeTheme.colors.AccentGreen,
-      Gray: activeTheme.colors.Gray,
-    });
-  }
+  const initializationResult = await initializeApp(config, settings);
 
   // hop into sandbox if we are outside and sandboxing is enabled
   if (!process.env.SANDBOX) {
@@ -719,8 +646,16 @@ export async function main() {
   providerManager.getActiveProvider();
 
   // Render UI, passing necessary config values. Check that there is no command line question.
-  if (typeof config.isInteractive === 'function' && config.isInteractive()) {
-    await startInteractiveUI(config, settings, startupWarnings, workspaceRoot);
+  if (config.isInteractive()) {
+    // Need kitty detection to be complete before we can start the interactive UI.
+    // await kittyProtocolDetectionComplete; // Removed as it's not defined in this scope in the cherry-pick
+    await startInteractiveUI(
+      config,
+      settings,
+      startupWarnings,
+      process.cwd(),
+      initializationResult,
+    );
     return;
   }
   // If not a TTY, read from stdin

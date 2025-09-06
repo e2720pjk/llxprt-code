@@ -206,7 +206,8 @@ export function useReactToolScheduler(
         getPreferredEditor,
         config,
         onEditorClose,
-      }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any),
     [
       config,
       getPreferredEditor,
