@@ -39,6 +39,7 @@ import {
   UserTierId,
   AuthType,
   clearCachedCredentialFile,
+  ShellExecutionService,
 } from '@vybestack/llxprt-code-core';
 import { validateAuthMethod } from '../config/auth.js';
 import { loadHierarchicalLlxprtMemory } from '../config/config.js';
@@ -94,6 +95,8 @@ import { useRuntimeApi } from './contexts/RuntimeContext.js';
 import { globalOAuthUI } from '../auth/global-oauth-ui.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
+const SHELL_WIDTH_FRACTION = 0.89;
+const SHELL_HEIGHT_PADDING = 10;
 
 function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
   return pendingHistoryItems.some((item) => {
@@ -129,6 +132,7 @@ export const AppContainer = (props: AppContainerProps) => {
     initializationResult.themeError,
   );
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [shellFocused, setShellFocused] = useState(false);
   const [geminiMdFileCount, setGeminiMdFileCount] = useState<number>(
     initializationResult.geminiMdFileCount,
   );
@@ -186,6 +190,20 @@ export const AppContainer = (props: AppContainerProps) => {
   // Layout measurements
   const mainControlsRef = useRef<DOMElement>(null);
   const staticExtraHeight = 3;
+
+  useEffect(() => {
+    if (config.setShellExecutionConfig) {
+      config.setShellExecutionConfig({
+        terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
+        terminalHeight: Math.max(
+          Math.floor(terminalHeight - SHELL_HEIGHT_PADDING), // Use terminalHeight directly or availableTerminalHeight? Report said availableTerminalHeight.
+          1,
+        ),
+        // pager: settings.merged.tools?.shell?.pager,
+        // showColor: settings.merged.tools?.shell?.showColor,
+      });
+    }
+  }, [terminalWidth, terminalHeight, config]);
 
   useEffect(() => {
     registerCleanup(async () => {
@@ -1166,6 +1184,8 @@ export const AppContainer = (props: AppContainerProps) => {
       showIdeRestartPrompt,
       isRestarting,
       appState,
+      activePtyId: undefined,
+      shellFocused,
     }),
     [
       historyManager.history,
@@ -1251,6 +1271,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Quota-related dependencies
       currentModel,
       appState,
+      shellFocused,
     ],
   );
 
