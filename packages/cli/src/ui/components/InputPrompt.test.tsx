@@ -1740,6 +1740,7 @@ describe('InputPrompt', () => {
       stdin.write('\x12');
       await wait();
       expect(stdout.lastFrame()).toContain('(r:)');
+<<<<<<< HEAD
       stdin.write('\x1B');
       await wait();
       stdin.write('\u001b[27u'); // Press kitty escape key
