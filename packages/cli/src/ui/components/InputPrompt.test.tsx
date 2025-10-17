@@ -29,6 +29,7 @@ import {
   useInputHistory,
   UseInputHistoryReturn,
 } from '../hooks/useInputHistory.js';
+import { useKittyKeyboardProtocol } from '../hooks/useKittyKeyboardProtocol.js';
 import * as clipboardUtils from '../utils/clipboardUtils.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import chalk from 'chalk';
@@ -38,6 +39,7 @@ vi.mock('../hooks/useShellHistory.js');
 vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
 vi.mock('../utils/clipboardUtils.js');
+vi.mock('../hooks/useKittyKeyboardProtocol.js');
 
 const mockSlashCommands: SlashCommand[] = [
   {
@@ -98,6 +100,7 @@ describe('InputPrompt', () => {
   const mockedUseShellHistory = vi.mocked(useShellHistory);
   const mockedUseCommandCompletion = vi.mocked(useCommandCompletion);
   const mockedUseInputHistory = vi.mocked(useInputHistory);
+  const mockedUseKittyKeyboardProtocol = vi.mocked(useKittyKeyboardProtocol);
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -1389,6 +1392,130 @@ describe('InputPrompt', () => {
     });
   });
 
+  describe('paste auto-submission protection', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      mockedUseKittyKeyboardProtocol.mockReturnValue({
+        supported: false,
+        enabled: false,
+        checking: false,
+      });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('should prevent auto-submission immediately after an unsafe paste', async () => {
+      // isTerminalPasteTrusted will be false due to beforeEach setup.
+      props.buffer.text = 'some command';
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await vi.runAllTimersAsync();
+
+      // Simulate a paste operation (this should set the paste protection)
+      stdin.write(`\x1b[200~pasted content\x1b[201~`);
+      await vi.runAllTimersAsync();
+
+      // Simulate an Enter key press immediately after paste
+      stdin.write('\r');
+      await vi.runAllTimersAsync();
+
+      // Verify that onSubmit was NOT called due to recent paste protection
+      expect(props.onSubmit).not.toHaveBeenCalled();
+      // It should call newline() instead
+      expect(props.buffer.newline).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('should allow submission after unsafe paste protection timeout', async () => {
+      // isTerminalPasteTrusted will be false due to beforeEach setup.
+      props.buffer.text = 'pasted text';
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await vi.runAllTimersAsync();
+
+      // Simulate a paste operation (this sets the protection)
+      act(() => {
+        stdin.write('\x1b[200~pasted text\x1b[201~');
+      });
+      await vi.runAllTimersAsync();
+
+      // Advance timers past the protection timeout
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+
+      // Now Enter should work normally
+      stdin.write('\r');
+      await vi.runAllTimersAsync();
+
+      expect(props.onSubmit).toHaveBeenCalledWith('pasted text');
+      expect(props.buffer.newline).not.toHaveBeenCalled();
+
+      unmount();
+    });
+
+    it.each([
+      {
+        name: 'kitty',
+        setup: () =>
+          mockedUseKittyKeyboardProtocol.mockReturnValue({
+            supported: true,
+            enabled: true,
+            checking: false,
+          }),
+      },
+    ])(
+      'should allow immediate submission for a trusted paste ($name)',
+      async ({ setup }) => {
+        setup();
+        props.buffer.text = 'pasted command';
+
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} />,
+          { kittyProtocolEnabled: true },
+        );
+        await vi.runAllTimersAsync();
+
+        // Simulate a paste operation
+        stdin.write('\x1b[200~some pasted stuff\x1b[201~');
+        await vi.runAllTimersAsync();
+
+        // Simulate an Enter key press immediately after paste
+        stdin.write('\r');
+        await vi.runAllTimersAsync();
+
+        // Verify that onSubmit was called
+        expect(props.onSubmit).toHaveBeenCalledWith('pasted command');
+        unmount();
+      },
+    );
+
+    it('should not interfere with normal Enter key submission when no recent paste', async () => {
+      // Set up buffer with text before rendering to ensure submission works
+      props.buffer.text = 'normal command';
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await vi.runAllTimersAsync();
+
+      // Press Enter without any recent paste
+      stdin.write('\r');
+      await vi.runAllTimersAsync();
+
+      // Verify that onSubmit was called normally
+      expect(props.onSubmit).toHaveBeenCalledWith('normal command');
+
+      unmount();
+    });
+  });
+
   describe('enhanced input UX - double ESC clear functionality', () => {
     it('should clear buffer on second ESC press', async () => {
       const onEscapePromptChange = vi.fn();
@@ -1397,6 +1524,7 @@ describe('InputPrompt', () => {
 
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
+        { kittyProtocolEnabled: false },
       );
       await wait();
 
@@ -1418,6 +1546,7 @@ describe('InputPrompt', () => {
 
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
+        { kittyProtocolEnabled: false },
       );
 
       // Clear initial calls from mounting
@@ -1441,6 +1570,7 @@ describe('InputPrompt', () => {
 
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
+        { kittyProtocolEnabled: false },
       );
       await wait();
 
@@ -1460,6 +1590,7 @@ describe('InputPrompt', () => {
 
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
+        { kittyProtocolEnabled: false },
       );
       await wait();
 
@@ -1471,23 +1602,27 @@ describe('InputPrompt', () => {
     });
 
     it('should not call onEscapePromptChange when not provided', async () => {
+      vi.useFakeTimers();
       props.onEscapePromptChange = undefined;
       props.buffer.setText('some text');
 
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
+        { kittyProtocolEnabled: false },
       );
-      await wait();
+      await vi.runAllTimersAsync();
 
       stdin.write('\x1B');
-      await wait();
+      await vi.runAllTimersAsync();
 
+      vi.useRealTimers();
       unmount();
     });
 
     it('should not interfere with existing keyboard shortcuts', async () => {
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
+        { kittyProtocolEnabled: false },
       );
       await wait();
 
@@ -1545,6 +1680,7 @@ describe('InputPrompt', () => {
       await wait();
       stdin.write('\x1B');
       await wait();
+      stdin.write('\u001b[27u'); // Press kitty escape key
 
       expect(stdout.lastFrame()).not.toContain('(r:)');
       expect(stdout.lastFrame()).not.toContain('echo hello');
@@ -1606,6 +1742,7 @@ describe('InputPrompt', () => {
       expect(stdout.lastFrame()).toContain('(r:)');
       stdin.write('\x1B');
       await wait();
+      stdin.write('\u001b[27u'); // Press kitty escape key
 
       expect(stdout.lastFrame()).not.toContain('(r:)');
       expect(props.buffer.text).toBe('initial text');
