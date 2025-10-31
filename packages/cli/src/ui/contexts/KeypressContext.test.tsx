@@ -1,17 +1,16 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Vybestack LLC
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type React from 'react';
+import React from 'react';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import type { Mock } from 'vitest';
-import { vi } from 'vitest';
-import type { Key } from './KeypressContext.js';
+import { vi, Mock } from 'vitest';
 import {
   KeypressProvider,
   useKeypressContext,
+  Key,
   DRAG_COMPLETION_TIMEOUT_MS,
   KITTY_SEQUENCE_TIMEOUT_MS,
   // CSI_END_O,
@@ -407,6 +406,73 @@ describe('KeypressContext - Kitty Protocol', () => {
         }),
       );
     });
+
+    it('should detect bracketed paste without fallback when running under Node 24', async () => {
+      const originalNodeVersion = process.versions.node;
+      const originalEnv = process.env['PASTE_WORKAROUND'];
+      Object.defineProperty(process.versions, 'node', {
+        value: '24.1.0',
+        configurable: true,
+      });
+      delete process.env['PASTE_WORKAROUND'];
+
+      const keyHandler = vi.fn();
+      const pastedText = 'Line 1\nLine 2\nLine 3';
+
+      const { result, unmount } = renderHook(() => useKeypressContext(), {
+        wrapper,
+      });
+
+      try {
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        act(() => {
+          stdin.sendPaste(pastedText);
+        });
+
+        await waitFor(() => {
+          expect(keyHandler).toHaveBeenCalledWith(
+            expect.objectContaining({
+              paste: true,
+              sequence: pastedText,
+            }),
+          );
+        });
+      } finally {
+        unmount();
+        Object.defineProperty(process.versions, 'node', {
+          value: originalNodeVersion,
+          configurable: true,
+        });
+        if (originalEnv === undefined) {
+          delete process.env['PASTE_WORKAROUND'];
+        } else {
+          process.env['PASTE_WORKAROUND'] = originalEnv;
+        }
+      }
+    });
+
+    it('should ignore empty string data events without crashing', async () => {
+      const keyHandler = vi.fn();
+
+      const { result, unmount } = renderHook(() => useKeypressContext(), {
+        wrapper,
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      expect(() => {
+        act(() => {
+          stdin.emit('data', '');
+        });
+      }).not.toThrow();
+
+      unmount();
+    });
   });
 
   describe('debug keystroke logging', () => {
@@ -629,6 +695,13 @@ describe('KeypressContext - Kitty Protocol', () => {
       { sequence: `\x1b[1~`, expected: { name: 'home' } },
       { sequence: `\x1b[4~`, expected: { name: 'end' } },
       { sequence: `\x1b[2~`, expected: { name: 'insert' } },
+      { sequence: `\x1b[11~`, expected: { name: 'f1' } },
+      { sequence: `\x1b[17~`, expected: { name: 'f6' } },
+      { sequence: `\x1b[23~`, expected: { name: 'f11' } },
+      { sequence: `\x1b[24~`, expected: { name: 'f12' } },
+      // Reverse tabs
+      { sequence: `\x1b[Z`, expected: { name: 'tab', shift: true } },
+      { sequence: `\x1b[1;2Z`, expected: { name: 'tab', shift: true } },
       // Legacy Arrows
       {
         sequence: `\x1b[A`,
