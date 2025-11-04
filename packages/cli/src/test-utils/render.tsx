@@ -5,6 +5,7 @@
  */
 
 import { render } from 'ink-testing-library';
+export { render };
 import React from 'react';
 import { KeypressProvider } from '../ui/contexts/KeypressContext.js';
 

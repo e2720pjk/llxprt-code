@@ -164,7 +164,7 @@ function parseKittyPrefix(buffer: string): { key: Key; length: number } | null {
         shift: true,
         paste: false,
         sequence: buffer.slice(0, m[0].length),
-        kittyProtocol: true,
+        kittyProtocol: false,
       },
       length: m[0].length,
     };
