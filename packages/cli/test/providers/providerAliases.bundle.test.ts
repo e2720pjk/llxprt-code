@@ -8,20 +8,19 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 
-describe('Provider aliases bundle verification', () => {
-  describe('Bundle structure validation', () => {
-    it('should have aliases copied to bundle during build', () => {
-      const bundleAliasesDir = path.join(
+describe('Provider aliases package verification', () => {
+  describe('Package structure validation', () => {
+    it('should have aliases copied to dist during build', () => {
+      const distAliasesDir = path.join(
         process.cwd(),
-        '..',
-        '..',
-        'bundle',
+        'dist',
+        'src',
         'providers',
         'aliases',
       );
 
-      // Verify aliases directory exists in bundle
-      expect(fs.existsSync(bundleAliasesDir)).toBe(true);
+      // Verify aliases directory exists in dist (copied by copy_files.js)
+      expect(fs.existsSync(distAliasesDir)).toBe(true);
 
       // Verify all required alias files exist
       const requiredAliases = [
@@ -32,28 +31,27 @@ describe('Provider aliases bundle verification', () => {
       ];
 
       requiredAliases.forEach((alias) => {
-        const aliasPath = path.join(bundleAliasesDir, alias);
+        const aliasPath = path.join(distAliasesDir, alias);
         expect(fs.existsSync(aliasPath)).toBe(true);
       });
     });
 
-    it('should have valid alias configurations in bundle', () => {
-      const bundleAliasesDir = path.join(
+    it('should have valid alias configurations in dist', () => {
+      const distAliasesDir = path.join(
         process.cwd(),
-        '..',
-        '..',
-        'bundle',
+        'dist',
+        'src',
         'providers',
         'aliases',
       );
 
       const aliasFiles = fs
-        .readdirSync(bundleAliasesDir)
+        .readdirSync(distAliasesDir)
         .filter((f) => f.endsWith('.config'));
 
       aliasFiles.forEach((file) => {
         const content = fs.readFileSync(
-          path.join(bundleAliasesDir, file),
+          path.join(distAliasesDir, file),
           'utf-8',
         );
         const config = JSON.parse(content);
@@ -66,18 +64,17 @@ describe('Provider aliases bundle verification', () => {
   });
 
   describe('Build process validation', () => {
-    it('should copy aliases from source to bundle', () => {
+    it('should copy aliases from source to dist during build', () => {
       const sourceAliasesDir = path.join(
         process.cwd(),
         'src',
         'providers',
         'aliases',
       );
-      const bundleAliasesDir = path.join(
+      const distAliasesDir = path.join(
         process.cwd(),
-        '..',
-        '..',
-        'bundle',
+        'dist',
+        'src',
         'providers',
         'aliases',
       );
@@ -85,22 +82,22 @@ describe('Provider aliases bundle verification', () => {
       // Verify source directory exists
       expect(fs.existsSync(sourceAliasesDir)).toBe(true);
 
-      // Verify bundle directory exists
-      expect(fs.existsSync(bundleAliasesDir)).toBe(true);
+      // Verify dist directory exists (copied by copy_files.js during build)
+      expect(fs.existsSync(distAliasesDir)).toBe(true);
 
       // Verify file counts match
       const sourceFiles = fs
         .readdirSync(sourceAliasesDir)
         .filter((f) => f.endsWith('.config'));
-      const bundleFiles = fs
-        .readdirSync(bundleAliasesDir)
+      const distFiles = fs
+        .readdirSync(distAliasesDir)
         .filter((f) => f.endsWith('.config'));
 
-      expect(bundleFiles.length).toBe(sourceFiles.length);
+      expect(distFiles.length).toBe(sourceFiles.length);
 
-      // Verify all source files are in bundle
+      // Verify all source files are in dist
       sourceFiles.forEach((file) => {
-        expect(bundleFiles).toContain(file);
+        expect(distFiles).toContain(file);
       });
     });
   });

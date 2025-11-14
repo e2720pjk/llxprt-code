@@ -96,19 +96,4 @@ if (existsSync(promptManifestPath)) {
   copyFileSync(promptManifestPath, join(bundleDir, 'default-prompts.json'));
 }
 
-// Copy provider aliases to bundle
-const aliasesSourceDir = join(root, 'packages/cli/src/providers/aliases');
-const aliasesTargetDir = join(bundleDir, 'providers', 'aliases');
-if (existsSync(aliasesSourceDir)) {
-  // Create target directory structure
-  mkdirSync(aliasesTargetDir, { recursive: true });
-
-  // Copy all .config files from aliases directory
-  const aliasFiles = glob.sync('*.config', { cwd: aliasesSourceDir });
-  for (const file of aliasFiles) {
-    const sourcePath = join(aliasesSourceDir, file);
-    const targetPath = join(aliasesTargetDir, file);
-    copyFileSync(sourcePath, targetPath);
-  }
-}
 // Assets copied to bundle/

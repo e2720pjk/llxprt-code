@@ -10,11 +10,25 @@ import stripJsonComments from 'strip-json-comments';
 import { Storage } from '@vybestack/llxprt-code-core';
 import { fileURLToPath } from 'url';
 
-const SUPPORTED_EXTENSIONS = new Set(['.config', '.json']);
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const BUILTIN_ALIAS_DIR = path.join(__dirname, 'aliases');
+
+// Handle different directory structures between development and bundle environments
+// In development: packages/cli/src/providers/aliases/
+// In bundle: bundle/providers/aliases/
+let BUILTIN_ALIAS_DIR: string;
+if (
+  __dirname.includes('bundle') ||
+  fs.existsSync(path.join(__dirname, 'providers'))
+) {
+  // Bundle environment: __dirname is bundle/, aliases at providers/aliases/
+  BUILTIN_ALIAS_DIR = path.join(__dirname, 'providers', 'aliases');
+} else {
+  // Development environment: __dirname is packages/cli/src/providers/, aliases at aliases/
+  BUILTIN_ALIAS_DIR = path.join(__dirname, 'aliases');
+}
+
+const SUPPORTED_EXTENSIONS = new Set(['.config', '.json']);
 
 export type ProviderAliasSource = 'user' | 'builtin';
 
