@@ -22,9 +22,6 @@ vi.mock('ink', async (importOriginal) => {
   };
 });
 
-const _PASTE_START = '\x1B[200~';
-const _PASTE_END = '\x1B[201~';
-
 class MockStdin extends EventEmitter {
   isTTY = true;
   isRaw = false;
