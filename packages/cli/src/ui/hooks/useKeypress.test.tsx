@@ -22,8 +22,8 @@ vi.mock('ink', async (importOriginal) => {
   };
 });
 
-const PASTE_START = '\x1B[200~';
-const PASTE_END = '\x1B[201~';
+const _PASTE_START = '\x1B[200~';
+const _PASTE_END = '\x1B[201~';
 
 class MockStdin extends EventEmitter {
   isTTY = true;
@@ -61,7 +61,7 @@ describe.each([true, false])(`useKeypress with useKitty=%s`, (useKitty) => {
     vi.clearAllMocks();
     stdin = new MockStdin();
     (useStdin as Mock).mockReturnValue({
-      stdin: stdin as any,
+      stdin: stdin as unknown,
       setRawMode: mockSetRawMode,
       isRawModeSupported: true,
       internal_exitOnCtrlC: true,
