@@ -124,6 +124,7 @@ export interface Key {
   paste: boolean;
   sequence: string;
   kittyProtocol?: boolean;
+  insertable?: boolean;
 }
 
 export type KeypressHandler = (key: Key) => void;
@@ -543,6 +544,7 @@ export function KeypressProvider({
           ...key,
           shift: true,
           sequence: '\r', // Corrected escaping for newline
+          insertable: false,
         });
         return;
       }
@@ -575,7 +577,7 @@ export function KeypressProvider({
       }
 
       if (['up', 'down', 'left', 'right'].includes(key.name)) {
-        broadcast(key);
+        broadcast({ ...key, insertable: false });
         return;
       }
 
@@ -762,7 +764,13 @@ export function KeypressProvider({
       if (key.name === 'return' && key.sequence === `${ESC}\r`) {
         key.meta = true;
       }
-      broadcast({ ...key, paste: isPaste });
+
+      const shouldInsert = !key.ctrl && !key.meta && key.sequence.length > 0;
+      broadcast({
+        ...key,
+        paste: isPaste,
+        insertable: shouldInsert,
+      });
     };
 
     const handleRawKeypress = (data: Buffer) => {
