@@ -5,7 +5,7 @@
  */
 
 import { act } from 'react';
-import { render } from '../../test-utils/render.js';
+import { renderWithProviders as render } from '../../test-utils/render.js';
 import { useKeypress } from './useKeypress.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { useStdin } from 'ink';
@@ -21,9 +21,6 @@ vi.mock('ink', async (importOriginal) => {
     useStdin: vi.fn(),
   };
 });
-
-const PASTE_START = '\x1B[200~';
-const PASTE_END = '\x1B[201~';
 
 class MockStdin extends EventEmitter {
   isTTY = true;
