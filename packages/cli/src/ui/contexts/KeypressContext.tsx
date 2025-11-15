@@ -231,7 +231,7 @@ export function KeypressProvider({
             meta: false,
             shift: true,
             paste: false,
-          insertable: false,
+            insertable: false,
             sequence: buffer.slice(0, m[0].length),
             kittyProtocol: true,
           },
@@ -259,7 +259,7 @@ export function KeypressProvider({
             // Reverse tab implies Shift behavior; force shift regardless of mods
             shift: true,
             paste: false,
-          insertable: false,
+            insertable: false,
             sequence: buffer.slice(0, m[0].length),
             kittyProtocol: true,
           },
@@ -303,7 +303,7 @@ export function KeypressProvider({
             meta: alt,
             shift,
             paste: false,
-          insertable: false,
+            insertable: false,
             sequence: buffer.slice(0, m[0].length),
             kittyProtocol: true,
           },
@@ -362,7 +362,7 @@ export function KeypressProvider({
                 meta: alt,
                 shift,
                 paste: false,
-          insertable: false,
+                insertable: false,
                 sequence: buffer.slice(0, m[0].length),
                 kittyProtocol: true,
               },
@@ -388,7 +388,7 @@ export function KeypressProvider({
               meta: alt,
               shift,
               paste: false,
-          insertable: false,
+              insertable: false,
               sequence: buffer.slice(0, m[0].length),
               kittyProtocol: true,
             },
@@ -410,7 +410,7 @@ export function KeypressProvider({
               meta: alt,
               shift,
               paste: false,
-          insertable: false,
+              insertable: false,
               sequence: buffer.slice(0, m[0].length),
               kittyProtocol: true,
             },
@@ -441,7 +441,7 @@ export function KeypressProvider({
             meta: false,
             shift: false,
             paste: false,
-          insertable: false,
+            insertable: false,
             sequence: buffer.slice(0, m[0].length),
             kittyProtocol: true,
           },
@@ -582,7 +582,7 @@ export function KeypressProvider({
             meta: false,
             shift: false,
             paste: false,
-          insertable: false,
+            insertable: false,
             sequence: key.sequence,
             kittyProtocol: true,
           });
@@ -673,7 +673,7 @@ export function KeypressProvider({
                   meta: false,
                   shift: false,
                   paste: false,
-          insertable: false,
+                  insertable: false,
                   sequence: remainingBuffer,
                 });
                 remainingBuffer = '';
@@ -700,7 +700,7 @@ export function KeypressProvider({
                   meta: false,
                   shift: false,
                   paste: false,
-          insertable: false,
+                  insertable: false,
                   sequence: remainingBuffer,
                 });
                 remainingBuffer = '';
@@ -727,7 +727,7 @@ export function KeypressProvider({
                       meta: false,
                       shift: false,
                       paste: false,
-          insertable: false,
+                      insertable: false,
                       sequence: kittySequenceBuffer,
                     });
                     kittySequenceBuffer = '';
@@ -756,7 +756,7 @@ export function KeypressProvider({
       meta: false,
       shift: false,
       paste: false,
-          insertable: false,
+      insertable: false,
       sequence: '',
     });
 
@@ -862,34 +862,6 @@ export function KeypressProvider({
       if (kittySequenceTimeout) {
         clearTimeout(kittySequenceTimeout);
         kittySequenceTimeout = null;
-      }
-
-      // Flush any pending kitty sequence data to avoid data loss on exit.
-      if (kittySequenceBuffer) {
-        broadcast({
-          name: '',
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: false,
-          insertable: false,
-          sequence: kittySequenceBuffer,
-        });
-        kittySequenceBuffer = '';
-      }
-
-      // Flush any pending paste data to avoid data loss on exit.
-      if (isPaste) {
-        broadcast({
-          name: '',
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: true,
-          insertable: true,
-          sequence: pasteBuffer.toString(),
-        });
-        pasteBuffer = Buffer.alloc(0);
       }
     };
 
