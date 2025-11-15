@@ -16,6 +16,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
 } from 'react';
 import readline from 'node:readline';
@@ -621,7 +622,7 @@ export function KeypressProvider({
         }
 
         // Check if this could start a kitty sequence
-        const startsWithEsc = key.sequence.startsWith(ESC);
+        const shouldBuffer = couldBeKittySequence(key.sequence);
         const isExcluded = [
           PASTE_MODE_PREFIX,
           PASTE_MODE_SUFFIX,
@@ -629,7 +630,7 @@ export function KeypressProvider({
           FOCUS_OUT,
         ].some((prefix) => key.sequence.startsWith(prefix));
 
-        if (kittySequenceBuffer || (startsWithEsc && !isExcluded)) {
+        if (kittySequenceBuffer || (shouldBuffer && !isExcluded)) {
           kittySequenceBuffer += key.sequence;
 
           if (debugKeystrokeLogging) {
@@ -921,8 +922,13 @@ export function KeypressProvider({
     // Refresh implementation - currently a no-op but can be extended
   };
 
+  const contextValue = useMemo(
+    () => ({ subscribe, unsubscribe, refresh }),
+    [subscribe, unsubscribe],
+  );
+
   return (
-    <KeypressContext.Provider value={{ subscribe, unsubscribe, refresh }}>
+    <KeypressContext.Provider value={contextValue}>
       {children}
     </KeypressContext.Provider>
   );

@@ -58,7 +58,7 @@ describe.each([true, false])(`useKeypress with useKitty=%s`, (useKitty) => {
     vi.clearAllMocks();
     stdin = new MockStdin();
     (useStdin as Mock).mockReturnValue({
-      stdin: stdin as any,
+      stdin: stdin as unknown as NodeJS.ReadStream,
       setRawMode: mockSetRawMode,
       isRawModeSupported: true,
       internal_exitOnCtrlC: true,

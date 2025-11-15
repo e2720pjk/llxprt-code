@@ -1793,6 +1793,7 @@ export function useTextBuffer({
       shift: boolean;
       paste: boolean;
       sequence: string;
+      insertable?: boolean;
     }): void => {
       const { sequence: input } = key;
 
@@ -1840,7 +1841,7 @@ export function useTextBuffer({
       )
         backspace();
       else if (key.name === 'delete' || (key.ctrl && key.name === 'd')) del();
-      else if (input && !key.ctrl && !key.meta) {
+      else if (input && !key.ctrl && !key.meta && key.insertable !== false) {
         insert(input, { paste: key.paste });
       }
     },
