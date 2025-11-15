@@ -19,7 +19,7 @@ import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
 import { useKeypress, Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
-import type { Config } from '@vybestack/llxprt-code-core';
+import type { Config, ApprovalMode } from '@vybestack/llxprt-code-core';
 import { parseInputForHighlighting } from '../utils/highlight.js';
 import {
   clipboardHasImage,
@@ -62,6 +62,9 @@ export interface InputPromptProps {
   setShellModeActive: (value: boolean) => void;
   onEscapePromptChange?: (showPrompt: boolean) => void;
   vimHandleInput?: (key: Key) => boolean;
+  approvalMode?: ApprovalMode;
+  popAllMessages?: (callback: (messages: string) => void) => void;
+  vimModeEnabled?: boolean;
 }
 
 export const InputPrompt: React.FC<InputPromptProps> = ({
