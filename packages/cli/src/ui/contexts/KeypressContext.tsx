@@ -46,6 +46,7 @@ export const PASTE_MODE_END = `${ESC}[201~`;
 export const PASTE_CODE_TIMEOUT_MS = 50; // Flush incomplete paste code after 50ms
 export const DRAG_COMPLETION_TIMEOUT_MS = 100; // Broadcast full path after 100ms if no more input
 export const KITTY_SEQUENCE_TIMEOUT_MS = 50; // Flush incomplete kitty sequences after 50ms
+export const PASTE_TIMEOUT = 30_000;
 export const SINGLE_QUOTE = "'";
 export const DOUBLE_QUOTE = '"';
 
