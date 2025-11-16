@@ -20,6 +20,7 @@ import { useKeypress, Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { Config, ApprovalMode } from '@vybestack/llxprt-code-core';
+import { StreamingState } from '../types.js';
 import { parseInputForHighlighting } from '../utils/highlight.js';
 import {
   clipboardHasImage,
@@ -65,6 +66,9 @@ export interface InputPromptProps {
   approvalMode?: ApprovalMode;
   popAllMessages?: (callback: (messages: string) => void) => void;
   vimModeEnabled?: boolean;
+  isEmbeddedShellFocused?: boolean;
+  setQueueErrorMessage?: (message: string) => void;
+  streamingState?: StreamingState;
 }
 
 export const InputPrompt: React.FC<InputPromptProps> = ({
