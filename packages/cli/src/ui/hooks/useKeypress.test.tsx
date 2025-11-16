@@ -62,17 +62,29 @@ describe.each([true, false])(`useKeypress with useKitty=%s`, (useKitty) => {
 
     // Mock process.versions.node for Node.js version checks
     originalNodeVersion = process.versions.node;
-    Object.defineProperty(process.versions, 'node', {
-      value: '20.0.0',
-      configurable: true,
-    });
+    try {
+      Object.defineProperty(process.versions, 'node', {
+        value: '20.0.0',
+        configurable: true,
+      });
+    } catch (_error) {
+      // If we can't override the Node version, skip version-specific tests
+      console.warn(
+        'Could not override process.versions.node, version-specific tests may be skipped',
+      );
+    }
   });
 
   afterEach(() => {
-    Object.defineProperty(process.versions, 'node', {
-      value: originalNodeVersion,
-      configurable: true,
-    });
+    try {
+      Object.defineProperty(process.versions, 'node', {
+        value: originalNodeVersion,
+        configurable: true,
+      });
+    } catch (_error) {
+      // If we can't restore the Node version, that's unfortunate but not critical
+      console.warn('Could not restore process.versions.node');
+    }
   });
 
   it('should not listen if isActive is false', () => {

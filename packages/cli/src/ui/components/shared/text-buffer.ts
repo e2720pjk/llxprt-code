@@ -2039,6 +2039,7 @@ export interface TextBuffer {
     shift: boolean;
     paste: boolean;
     sequence: string;
+    insertable?: boolean;
   }) => void;
   /**
    * Opens the current buffer contents in the user's preferred terminal text

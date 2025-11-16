@@ -2326,7 +2326,7 @@ describe('InputPrompt', () => {
         <InputPrompt {...props} />,
       );
       await wait();
-      expect(stdout.lastFrame()).not.toContain(`{chalk.inverse(' ')}`);
+      expect(stdout.lastFrame()).not.toContain(chalk.inverse(' '));
       // This snapshot is good to make sure there was an input prompt but does
       // not show the inverted cursor because snapshots do not show colors.
       expect(stdout.lastFrame()).toMatchSnapshot();

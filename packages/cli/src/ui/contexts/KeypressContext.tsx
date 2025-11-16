@@ -516,7 +516,16 @@ export function KeypressProvider({
           const seq = dragBufferRef.current;
           dragBufferRef.current = '';
           if (seq) {
-            broadcast({ ...key, name: '', paste: true, sequence: seq });
+            broadcast({
+              ...key,
+              name: '',
+              paste: true,
+              sequence: seq,
+              ctrl: false,
+              meta: false,
+              shift: false,
+              insertable: true,
+            });
           }
         }, DRAG_COMPLETION_TIMEOUT_MS);
 
@@ -904,6 +913,7 @@ export function KeypressProvider({
           shift: false,
           paste: true,
           sequence: dragBufferRef.current,
+          insertable: true,
         });
         isDraggingRef.current = false;
         dragBufferRef.current = '';
@@ -918,13 +928,14 @@ export function KeypressProvider({
     debugKeystrokeLogging,
   ]);
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     // Refresh implementation - currently a no-op but can be extended
-  };
+    // Future implementation can trigger context updates or re-renders
+  }, []);
 
   const contextValue = useMemo(
     () => ({ subscribe, unsubscribe, refresh }),
-    [subscribe, unsubscribe],
+    [subscribe, unsubscribe, refresh],
   );
 
   return (
