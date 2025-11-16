@@ -2335,9 +2335,9 @@ describe('InputPrompt', () => {
   });
 
   it('should still allow input when shell is not focused', async () => {
-    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />, {
-      shellFocus: false,
-    });
+    const { stdin, unmount } = renderWithProviders(
+      <InputPrompt {...props} focus={false} />,
+    );
     await wait();
 
     stdin.write('a');

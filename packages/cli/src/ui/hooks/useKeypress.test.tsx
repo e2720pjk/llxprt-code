@@ -7,7 +7,6 @@
 import { act } from 'react';
 import { renderWithProviders as render } from '../../test-utils/render.js';
 import { useKeypress } from './useKeypress.js';
-import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { useStdin } from 'ink';
 import { EventEmitter } from 'node:events';
 import type { Mock } from 'vitest';
@@ -47,11 +46,7 @@ describe.each([true, false])(`useKeypress with useKitty=%s`, (useKitty) => {
       useKeypress(onKeypress, { isActive });
       return null;
     }
-    return render(
-      <KeypressProvider kittyProtocolEnabled={useKitty}>
-        <TestComponent />
-      </KeypressProvider>,
-    );
+    return render(<TestComponent />, { kittyProtocolEnabled: useKitty });
   };
 
   beforeEach(() => {
