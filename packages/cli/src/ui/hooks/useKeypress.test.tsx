@@ -100,7 +100,18 @@ describe.each([true, false])(`useKeypress with useKitty=%s`, (useKitty) => {
     { key: { name: 'up', sequence: '\x1b[A' } },
     { key: { name: 'down', sequence: '\x1b[B' } },
     { key: { name: 'tab', sequence: '\x1b[Z', shift: true } },
+    { key: { name: 'return', sequence: '\x1b[13u', kittyProtocol: true } },
+    { key: { name: 'f1', sequence: '\x1b[11~', kittyProtocol: true } },
+    {
+      key: {
+        name: 'up',
+        sequence: '\x1b[1;2A',
+        shift: true,
+        kittyProtocol: true,
+      },
+    },
   ])('should listen for keypress when active for key $key.name', ({ key }) => {
+    if (key.kittyProtocol && !useKitty) return;
     renderKeypressHook(true);
     act(() => stdin.write(key.sequence));
     expect(onKeypress).toHaveBeenCalledWith(expect.objectContaining(key));

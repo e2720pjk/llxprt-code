@@ -79,7 +79,6 @@ const mockSlashCommands: SlashCommand[] = [
         description: 'Resume a chat',
         kind: CommandKind.BUILT_IN,
         action: vi.fn(),
-        completion: async () => ['fix-foo', 'fix-bar'],
       },
     ],
   },
@@ -117,7 +116,6 @@ describe('InputPrompt', () => {
         mockBuffer.cursor = [0, newText.length];
         mockBuffer.viewportVisualLines = [newText];
         mockBuffer.allVisualLines = [newText];
-        mockBuffer.visualToLogicalMap = [[0, 0]];
       }),
       replaceRangeByOffset: vi.fn(),
       viewportVisualLines: [''],
@@ -162,6 +160,7 @@ describe('InputPrompt', () => {
       showSuggestions: false,
       visibleStartIndex: 0,
       isPerfectMatch: false,
+      activeHint: '',
       navigateUp: vi.fn(),
       navigateDown: vi.fn(),
       resetCompletionState: vi.fn(),
@@ -170,8 +169,11 @@ describe('InputPrompt', () => {
       handleAutocomplete: vi.fn(),
       promptCompletion: {
         text: '',
+        isLoading: false,
+        isActive: false,
         accept: vi.fn(),
         clear: vi.fn(),
+        markSelected: vi.fn(),
       },
     };
     mockedUseCommandCompletion.mockReturnValue(mockCommandCompletion);
@@ -199,7 +201,9 @@ describe('InputPrompt', () => {
     );
 
     mockedUseKittyKeyboardProtocol.mockReturnValue({
-      supported: false,
+      supported: true,
+      enabled: true,
+      checking: false,
     });
 
     props = {
@@ -1383,11 +1387,6 @@ describe('InputPrompt', () => {
       mockBuffer.lines = text.split('\n');
       mockBuffer.viewportVisualLines = text.split('\n');
       mockBuffer.visualCursor = [1, 3]; // cursor on 'o' in 'second'
-      mockBuffer.visualToLogicalMap = [
-        [0, 0],
-        [1, 0],
-        [2, 0],
-      ];
 
       const { stdout, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
@@ -1405,10 +1404,6 @@ describe('InputPrompt', () => {
       mockBuffer.lines = text.split('\n');
       mockBuffer.viewportVisualLines = text.split('\n');
       mockBuffer.visualCursor = [1, 0]; // cursor on 's' in 'second'
-      mockBuffer.visualToLogicalMap = [
-        [0, 0],
-        [1, 0],
-      ];
 
       const { stdout, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
@@ -1426,10 +1421,6 @@ describe('InputPrompt', () => {
       mockBuffer.lines = text.split('\n');
       mockBuffer.viewportVisualLines = text.split('\n');
       mockBuffer.visualCursor = [0, 10]; // cursor after 'first line'
-      mockBuffer.visualToLogicalMap = [
-        [0, 0],
-        [1, 0],
-      ];
 
       const { stdout, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
@@ -1446,12 +1437,7 @@ describe('InputPrompt', () => {
       mockBuffer.text = text;
       mockBuffer.lines = text.split('\n');
       mockBuffer.viewportVisualLines = text.split('\n');
-      mockBuffer.visualCursor = [1, 0]; // cursor on the blank line
-      mockBuffer.visualToLogicalMap = [
-        [0, 0],
-        [1, 0],
-        [2, 0],
-      ];
+      mockBuffer.visualCursor = [1, 0]; // cursor on blank line
 
       const { stdout, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
@@ -1476,12 +1462,6 @@ describe('InputPrompt', () => {
       mockBuffer.viewportVisualLines = text.split('\n');
       mockBuffer.allVisualLines = text.split('\n');
       mockBuffer.visualCursor = [2, 5]; // cursor at the end of "world"
-      // Provide a visual-to-logical mapping for each visual line
-      mockBuffer.visualToLogicalMap = [
-        [0, 0], // 'hello' starts at col 0 of logical line 0
-        [1, 0], // '' (blank) is logical line 1, col 0
-        [2, 0], // 'world' is logical line 2, col 0
-      ];
 
       const { stdout, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
@@ -1541,7 +1521,11 @@ describe('InputPrompt', () => {
   describe('paste auto-submission protection', () => {
     beforeEach(() => {
       vi.useFakeTimers();
-      mockedUseKittyKeyboardProtocol.mockReturnValue({ supported: false });
+      mockedUseKittyKeyboardProtocol.mockReturnValue({
+        supported: false,
+        enabled: false,
+        checking: false,
+      });
     });
 
     afterEach(() => {
@@ -1606,7 +1590,11 @@ describe('InputPrompt', () => {
       {
         name: 'kitty',
         setup: () =>
-          mockedUseKittyKeyboardProtocol.mockReturnValue({ supported: true }),
+          mockedUseKittyKeyboardProtocol.mockReturnValue({
+            supported: true,
+            enabled: true,
+            checking: false,
+          }),
       },
     ])(
       'should allow immediate submission for a trusted paste ($name)',
@@ -1885,7 +1873,7 @@ describe('InputPrompt', () => {
       expect(mockHandleAutocomplete).toHaveBeenCalledWith(0);
       expect(props.buffer.setText).toHaveBeenCalledWith('echo hello');
       unmount();
-    }, 15000);
+    });
 
     it('submits the highlighted entry on Enter and exits reverse-search', async () => {
       // Mock the reverse search completion to return suggestions
