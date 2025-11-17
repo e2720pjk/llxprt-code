@@ -2322,7 +2322,7 @@ describe('InputPrompt', () => {
     });
   });
 
-  it('should still allow input when shell is not focused', async () => {
+  it('should ignore input when not focused', async () => {
     const { stdin, unmount } = renderWithProviders(
       <InputPrompt {...props} focus={false} />,
     );
@@ -2331,7 +2331,7 @@ describe('InputPrompt', () => {
     stdin.write('a');
     await wait();
 
-    expect(mockBuffer.handleInput).toHaveBeenCalled();
+    expect(mockBuffer.handleInput).not.toHaveBeenCalled();
     unmount();
   });
   it('should prevent slash commands from being queued while streaming', async () => {
