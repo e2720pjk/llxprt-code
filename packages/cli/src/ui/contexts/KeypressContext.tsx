@@ -150,19 +150,6 @@ export function useKeypressContext() {
   return context;
 }
 
-/**
- * Provides a React context that captures terminal keypresses and broadcasts parsed key events to subscribers.
- *
- * This component manages stdin raw mode and emits normalized Key objects (including support for Kitty protocol parsing,
- * paste start/end payloads, drag-like quote buffering, modifier mapping, and the `insertable` flag) to handlers
- * registered via the KeypressContext. It also flushes buffered input on focus/paste interruptions and on unmount.
- *
- * @param children - React children to be wrapped by the provider
- * @param kittyProtocolEnabled - Enable parsing and buffering of Kitty/CSI parameterized sequences
- * @param config - Optional runtime configuration used for logging and overflow events
- * @param debugKeystrokeLogging - When true, enable verbose debug logging of internal key parsing and buffering
- * @returns The provider React element that supplies the KeypressContext to descendants
- */
 export function KeypressProvider({
   children,
   kittyProtocolEnabled,

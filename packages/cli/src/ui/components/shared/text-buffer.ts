@@ -1448,26 +1448,7 @@ export function textBufferReducer(
   }
 }
 
-/**
- * React hook that provides a wrapping-aware editable text buffer with undo/redo,
- * word- and line-level operations, visual layout mapping, and Vim-like commands.
- *
- * The returned object contains the buffer state (lines, joined text, logical cursor),
- * visual layout (visual lines, visual cursor, scroll row) and a comprehensive set
- * of editing APIs (insertion, deletion, movement, replace by range/offset, undo/redo,
- * external editor integration, input handling, and many Vim-specific commands).
- *
- * @param props - Configuration for the text buffer
- * @param props.initialText - Initial contents of the buffer
- * @param props.initialCursorOffset - Initial linear offset for the cursor within `initialText`
- * @param props.viewport - Viewport dimensions used for visual layout and scrolling
- * @param props.stdin - Optional stdin-like stream used when opening external editors
- * @param props.setRawMode - Optional function to toggle raw input mode on the terminal
- * @param props.onChange - Optional callback invoked with the new full text whenever it changes
- * @param props.isValidPath - Optional predicate used to detect and transform pasted file paths
- * @param props.shellModeActive - When true, disables drag/drop inference for pasted paths
- * @returns The TextBuffer API object exposing buffer state, visual layout, and editing methods
- */
+// --- End of reducer logic ---
 
 export function useTextBuffer({
   initialText = '',
