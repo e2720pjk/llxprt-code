@@ -11,6 +11,7 @@ import {
   useEffect,
   useRef,
   useReducer,
+  useLayoutEffect,
 } from 'react';
 import { type DOMElement, measureElement } from 'ink';
 import { App } from './App.js';
@@ -93,6 +94,7 @@ import { useLoadProfileDialog } from './hooks/useLoadProfileDialog.js';
 import { useToolsDialog } from './hooks/useToolsDialog.js';
 import { useRuntimeApi } from './contexts/RuntimeContext.js';
 import { globalOAuthUI } from '../auth/global-oauth-ui.js';
+import { calculateMainAreaWidth } from './utils/ui-sizing.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const SHELL_WIDTH_FRACTION = 0.89;
@@ -192,20 +194,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const staticExtraHeight = 3;
 
   useEffect(() => {
-    if (config.setShellExecutionConfig) {
-      config.setShellExecutionConfig({
-        terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
-        terminalHeight: Math.max(
-          Math.floor(terminalHeight - SHELL_HEIGHT_PADDING), // Use terminalHeight directly or availableTerminalHeight? Report said availableTerminalHeight.
-          1,
-        ),
-        // pager: settings.merged.tools?.shell?.pager,
-        // showColor: settings.merged.tools?.shell?.showColor,
-      });
-    }
-  }, [terminalWidth, terminalHeight, config]);
-
-  useEffect(() => {
     registerCleanup(async () => {
       const ideClient = await IdeClient.getInstance();
       await ideClient.disconnect();
@@ -298,7 +286,10 @@ export const AppContainer = (props: AppContainerProps) => {
     Math.floor(terminalWidth * widthFraction) - 3,
   );
   const suggestionsWidth = Math.max(20, Math.floor(terminalWidth * 0.8));
-  const mainAreaWidth = Math.floor(terminalWidth * 0.9);
+  const mainAreaWidth = useMemo(
+    () => calculateMainAreaWidth(terminalWidth, settings),
+    [terminalWidth, settings],
+  );
   const staticAreaMaxItemHeight = Math.max(terminalHeight * 4, 100);
 
   const isValidPath = useCallback((filePath: string): boolean => {
@@ -729,13 +720,40 @@ export const AppContainer = (props: AppContainerProps) => {
   const isInputActive = !initError && !isProcessing;
 
   // Compute available terminal height based on controls measurement
-  const availableTerminalHeight = useMemo(() => {
+  // Using useLayoutEffect for proper layout timing (from Phase 03 analysis)
+  const [availableTerminalHeight, setAvailableTerminalHeight] = useState(
+    () => terminalHeight - staticExtraHeight,
+  );
+
+  useLayoutEffect(() => {
     if (mainControlsRef.current) {
       const fullFooterMeasurement = measureElement(mainControlsRef.current);
-      return terminalHeight - fullFooterMeasurement.height - staticExtraHeight;
+      const newHeight = Math.max(
+        terminalHeight - fullFooterMeasurement.height - staticExtraHeight,
+        0,
+      );
+      setAvailableTerminalHeight(newHeight);
+    } else {
+      setAvailableTerminalHeight(
+        Math.max(terminalHeight - staticExtraHeight, 0),
+      );
     }
-    return terminalHeight - staticExtraHeight;
-  }, [terminalHeight]);
+  }, [terminalHeight, mainControlsRef.current]);
+
+  // Update shell execution config with proper terminal height calculations
+  useEffect(() => {
+    if ((config as any).setShellExecutionConfig) {
+      (config as any).setShellExecutionConfig({
+        terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
+        terminalHeight: Math.max(
+          Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING),
+          1,
+        ),
+        // pager: settings.merged.tools?.shell?.pager,
+        // showColor: settings.merged.tools?.shell?.showColor,
+      });
+    }
+  }, [terminalWidth, availableTerminalHeight, config]);
 
   const isFocused = useFocus();
   useBracketedPaste();
