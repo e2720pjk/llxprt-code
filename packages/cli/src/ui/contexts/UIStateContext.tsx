@@ -21,7 +21,7 @@ import type {
   ApprovalMode,
   UserTierId,
   DetectedIde,
-} from '@google/gemini-cli-core';
+} from '@vybestack/llxprt-code-core';
 import type { DOMElement } from 'ink';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { UpdateObject } from '../utils/updateCheck.js';

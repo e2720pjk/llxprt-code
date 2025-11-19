@@ -10,7 +10,7 @@ import { ToolMessage, ToolMessageProps } from './ToolMessage.js';
 import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
-import type { AnsiOutput } from '@google/gemini-cli-core';
+import type { AnsiOutput } from '@vybestack/llxprt-code-core';
 
 vi.mock('../TerminalOutput.js', () => ({
   TerminalOutput: function MockTerminalOutput({

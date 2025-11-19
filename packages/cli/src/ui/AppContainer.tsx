@@ -538,7 +538,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openSettingsDialog,
       setQuittingMessages,
       setDebugMessage,
-      setShowPrivacyNotice,
+      () => setShowPrivacyNotice(true),
       setCorgiMode,
     ],
   );
@@ -557,10 +557,21 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.clearItems,
     historyManager.loadHistory,
     refreshStatic,
+    setDebugMessage,
+    () => {}, // setThemeDialogOpen (not available)
+    () => {}, // setAuthDialogOpen (not available)
+    () => {}, // setEditorDialogOpen (not available)
+    () => {}, // openProviderDialog
+    () => {}, // openProviderModelDialog
+    () => {}, // openLoadProfileDialog
+    () => {}, // openToolsDialog
+    () => setCorgiMode(!corgiMode),
+    setQuittingMessages,
+    setShowPrivacyNotice,
+    () => {}, // setSettingsDialogOpen (not available)
     toggleVimEnabled,
-    setIsProcessing,
-    setGeminiMdFileCount,
-    slashCommandActions,
+    () => {}, // setIsProcessing
+    () => {}, // setLlxprtMdFileCount (not available)
   );
 
   const performMemoryRefresh = useCallback(async () => {
@@ -573,7 +584,7 @@ export const AppContainer = (props: AppContainerProps) => {
     );
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const contextSettings = settings.merged.context as any;
+      const contextSettings = settings.merged as any;
       const { memoryContent, fileCount } = await loadHierarchicalLlxprtMemory(
         process.cwd(),
         contextSettings?.loadMemoryFromIncludeDirectories
@@ -644,7 +655,7 @@ export const AppContainer = (props: AppContainerProps) => {
     shellModeActive,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     () => (settings.merged.general as any)?.preferredEditor as EditorType,
-    onAuthError,
+    () => {}, // onAuthError expects no parameters
     performMemoryRefresh,
     refreshStatic, // This is argument 12: onEditorClose
     () => cancelHandlerRef.current(), // This is argument 13: onCancelSubmit
