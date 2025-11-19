@@ -11,6 +11,7 @@ import React, {
   useState,
   useRef,
   useReducer,
+  useLayoutEffect,
 } from 'react';
 import {
   Box,
@@ -108,6 +109,7 @@ import { useVim } from './hooks/vim.js';
 import { useKeypress, Key } from './hooks/useKeypress.js';
 import { KeypressProvider } from './contexts/KeypressContext.js';
 import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
+import { calculateMainAreaWidth } from './utils/ui-sizing.js';
 import { keyMatchers, Command } from './keyMatchers.js';
 import * as fs from 'fs';
 import {
@@ -410,10 +412,12 @@ const App = (props: AppInternalProps) => {
   }, [config, updateHistoryTokenCount, tokenLogger]);
   const [staticNeedsRefresh, setStaticNeedsRefresh] = useState(false);
   const [staticKey, setStaticKey] = useState(0);
+  const [historyRemountKey, setHistoryRemountKey] = useState(0);
   const refreshStatic = useCallback(() => {
     stdout.write(ansiEscapes.clearTerminal);
     setStaticKey((prev) => prev + 1);
-  }, [setStaticKey, stdout]);
+    setHistoryRemountKey((prev) => prev + 1);
+  }, [setStaticKey, setHistoryRemountKey, stdout]);
 
   const [llxprtMdFileCount, setLlxprtMdFileCount] = useState<number>(0);
   const [debugMessage, setDebugMessage] = useState<string>('');
@@ -844,7 +848,7 @@ const App = (props: AppInternalProps) => {
     20,
     Math.floor(terminalWidth * widthFraction) - 6,
   );
-  const suggestionsWidth = Math.max(60, Math.floor(terminalWidth * 0.8));
+  const suggestionsWidth = Math.max(20, Math.floor(terminalWidth * 0.8));
 
   // Utility callbacks
   const isValidPath = useCallback((filePath: string): boolean => {
@@ -1225,17 +1229,19 @@ const App = (props: AppInternalProps) => {
   const mainControlsRef = useRef<DOMElement>(null);
   const pendingHistoryItemRef = useRef<DOMElement>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (mainControlsRef.current) {
       const fullFooterMeasurement = measureElement(mainControlsRef.current);
-      setFooterHeight(fullFooterMeasurement.height);
+      if (fullFooterMeasurement.height > 0) {
+        setFooterHeight(fullFooterMeasurement.height);
+      }
     }
-  }, [terminalHeight, consoleMessages, showErrorDetails]);
+  }, [buffer, terminalWidth, terminalHeight]);
 
   const staticExtraHeight = /* margins and padding */ 3;
-  const availableTerminalHeight = useMemo(
-    () => terminalHeight - footerHeight - staticExtraHeight,
-    [terminalHeight, footerHeight],
+  const availableTerminalHeight = Math.max(
+    0,
+    terminalHeight - footerHeight - staticExtraHeight - 2,
   );
 
   useEffect(() => {
@@ -1338,11 +1344,10 @@ const App = (props: AppInternalProps) => {
     );
   }
 
-  const mainAreaWidth = Math.floor(terminalWidth * 0.9);
+  const mainAreaWidth = calculateMainAreaWidth(terminalWidth, settings);
   const debugConsoleMaxHeight = Math.floor(Math.max(terminalHeight * 0.2, 5));
   // Arbitrary threshold to ensure that items in the static area are large
   // enough but not too large to make the terminal hard to use.
-  const staticAreaMaxItemHeight = Math.max(terminalHeight * 4, 100);
 
   // Detect PowerShell for file reference syntax tip
   const isPowerShell =
@@ -1374,11 +1379,7 @@ const App = (props: AppInternalProps) => {
           items={[
             <Box flexDirection="column" key="header">
               {!(settings.merged.hideBanner || config.getScreenReader()) && (
-                <Header
-                  terminalWidth={terminalWidth}
-                  version={version}
-                  nightly={nightly}
-                />
+                <Header version={version} nightly={nightly} />
               )}
               {!(settings.merged.hideTips || config.getScreenReader()) && (
                 <Tips config={config} />
@@ -1386,9 +1387,11 @@ const App = (props: AppInternalProps) => {
             </Box>,
             ...history.map((h) => (
               <HistoryItemDisplay
-                terminalWidth={mainAreaWidth}
-                availableTerminalHeight={staticAreaMaxItemHeight}
-                key={h.id}
+                key={`${h.id}-${historyRemountKey}`}
+                availableTerminalHeight={
+                  constrainHeight ? availableTerminalHeight : undefined
+                }
+                terminalWidth={terminalWidth}
                 item={h}
                 isPending={false}
                 config={config}
