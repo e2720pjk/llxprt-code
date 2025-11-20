@@ -10,10 +10,12 @@ import { ShowMoreLines } from './ShowMoreLines.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
+import { useConfig } from '../contexts/ConfigContext.js';
 import { AppHeader } from './AppHeader.js';
 
 export const MainContent = () => {
   const { version } = useAppContext();
+  const config = useConfig();
   const uiState = useUIState();
   const {
     pendingHistoryItems,
@@ -35,7 +37,8 @@ export const MainContent = () => {
               key={h.id}
               item={h}
               isPending={false}
-              commands={uiState.slashCommands}
+              slashCommands={uiState.slashCommands}
+              config={config}
             />
           )),
         ]}
@@ -56,6 +59,7 @@ export const MainContent = () => {
               isFocused={!uiState.isEditorDialogOpen}
               activeShellPtyId={uiState.activePtyId}
               shellFocused={uiState.shellFocused}
+              config={config}
             />
           ))}
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />

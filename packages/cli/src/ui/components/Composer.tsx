@@ -45,12 +45,11 @@ export const Composer = () => {
     debugMode: config.getDebugMode(),
     branchName: uiState.branchName,
     debugMessage: uiState.debugMessage,
-    corgiMode: uiState.corgiMode,
     errorCount: uiState.errorCount,
     showErrorDetails: uiState.showErrorDetails,
     showMemoryUsage:
       config.getDebugMode() || settings.merged.ui?.showMemoryUsage || false,
-    promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
+    historyTokenCount: uiState.sessionStats.lastPromptTokenCount,
     nightly: uiState.nightly,
     isTrustedFolder: uiState.isTrustedFolder,
   };
@@ -123,6 +122,7 @@ export const Composer = () => {
             !settings.merged.ui?.hideContextSummary && (
               <ContextSummaryDisplay
                 ideContext={uiState.ideContextState}
+                llxprtMdFileCount={uiState.geminiMdFileCount}
                 geminiMdFileCount={uiState.geminiMdFileCount}
                 contextFileNames={contextFileNames}
                 mcpServers={config.getMcpServers()}

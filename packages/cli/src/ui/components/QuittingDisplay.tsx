@@ -8,9 +8,11 @@ import { Box } from 'ink';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { useConfig } from '../contexts/ConfigContext.js';
 
 export const QuittingDisplay = () => {
   const uiState = useUIState();
+  const config = useConfig();
   const { rows: terminalHeight, columns: terminalWidth } = useTerminalSize();
 
   const availableTerminalHeight = terminalHeight;
@@ -30,6 +32,7 @@ export const QuittingDisplay = () => {
           terminalWidth={terminalWidth}
           item={item}
           isPending={false}
+          config={config}
         />
       ))}
     </Box>
