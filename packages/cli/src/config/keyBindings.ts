@@ -59,6 +59,7 @@ export enum Command {
 
   // Debugging/Terminal fixes
   REFRESH_KEYPRESS = 'refreshKeypress',
+  TOGGLE_SHELL_INPUT_FOCUS = 'toggleShellInputFocus',
 }
 
 /**
@@ -168,4 +169,5 @@ export const defaultKeyBindings: KeyBindingConfig = {
 
   // Debugging/Terminal fixes
   [Command.REFRESH_KEYPRESS]: [{ key: 'r', ctrl: true, shift: true }],
+  [Command.TOGGLE_SHELL_INPUT_FOCUS]: [{ key: 'i', ctrl: true }],
 };
