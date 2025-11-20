@@ -26,7 +26,7 @@ export const useThemeCommand = (
   loadedSettings: LoadedSettings,
   appState: AppState,
   addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
-  initialThemeError: string | null,
+  _initialThemeError: string | null,
 ): UseThemeCommandReturn => {
   // Determine the effective theme
   const effectiveTheme = loadedSettings.merged.theme;
