@@ -207,20 +207,7 @@ describe('<ToolMessage />', () => {
   });
 
   it('renders AnsiOutputText for AnsiOutput results', () => {
-    const ansiResult: AnsiOutput = [
-      [
-        {
-          text: 'hello',
-          fg: '#ffffff',
-          bg: '#000000',
-          bold: false,
-          italic: false,
-          underline: false,
-          dim: false,
-          inverse: false,
-        },
-      ],
-    ];
+    const ansiResult = 'MockAnsiOutput:hello'; // Convert to string as ToolResultDisplay expects
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} resultDisplay={ansiResult} />,
       StreamingState.Idle,

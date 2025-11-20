@@ -11,18 +11,18 @@ import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
-import { AuthInProgress } from '../auth/AuthInProgress.js';
-import { AuthDialog } from '../auth/AuthDialog.js';
+import { AuthInProgress } from './AuthInProgress.js';
+import { AuthDialog } from './AuthDialog.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { PrivacyNotice } from '../privacy/PrivacyNotice.js';
 import { WorkspaceMigrationDialog } from './WorkspaceMigrationDialog.js';
-import { ProQuotaDialog } from './ProQuotaDialog.js';
+
 import { Colors } from '../colors.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
-import { DEFAULT_GEMINI_FLASH_MODEL } from '@vybestack/llxprt-code-core';
+
 import process from 'node:process';
 
 // Props for DialogManager
@@ -54,15 +54,7 @@ export const DialogManager = () => {
       />
     );
   }
-  if (uiState.isProQuotaDialogOpen) {
-    return (
-      <ProQuotaDialog
-        currentModel={uiState.currentModel}
-        fallbackModel={DEFAULT_GEMINI_FLASH_MODEL}
-        onChoice={uiActions.handleProQuotaChoice}
-      />
-    );
-  }
+
   if (uiState.shouldShowIdePrompt) {
     return (
       <IdeIntegrationNudge
@@ -146,11 +138,17 @@ export const DialogManager = () => {
     return (
       <Box flexDirection="column">
         <AuthDialog
-          config={config}
+          onSelect={(authMethod, _scope) => {
+            // Handle auth method selection
+            uiActions.setAuthState({
+              isAuthenticated: false,
+              isPending: true,
+              error: null,
+              authType: authMethod || 'oauth',
+            });
+          }}
           settings={settings}
-          setAuthState={uiActions.setAuthState}
-          authError={uiState.authError}
-          onAuthError={uiActions.onAuthError}
+          initialErrorMessage={uiState.authError}
         />
       </Box>
     );

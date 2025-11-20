@@ -19,6 +19,7 @@ import {
 import { appEvents, AppEvent } from './utils/events.js';
 import type { Config } from '@vybestack/llxprt-code-core';
 import { FatalConfigError } from '@vybestack/llxprt-code-core';
+import type { InitializationResult } from './core/initializer.js';
 
 // Custom error to identify mock process.exit calls
 class MockProcessExitError extends Error {
@@ -258,11 +259,19 @@ describe('startInteractiveUI', () => {
     const { render } = await import('ink');
     const renderSpy = vi.mocked(render);
 
+    const mockInitializationResult: InitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
     await startInteractiveUI(
       mockConfig,
       mockSettings,
       mockStartupWarnings,
       mockWorkspaceRoot,
+      mockInitializationResult,
     );
 
     // Verify render was called with correct options
@@ -286,11 +295,19 @@ describe('startInteractiveUI', () => {
     const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
     const { registerCleanup } = await import('./utils/cleanup.js');
 
+    const mockInitializationResult: InitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
     await startInteractiveUI(
       mockConfig,
       mockSettings,
       mockStartupWarnings,
       mockWorkspaceRoot,
+      mockInitializationResult,
     );
 
     // Verify all startup tasks were called

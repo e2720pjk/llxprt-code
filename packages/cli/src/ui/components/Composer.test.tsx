@@ -189,6 +189,7 @@ describe('Composer', () => {
           metrics: {} as any,
           lastPromptTokenCount: 150,
           promptCount: 5,
+          historyTokenCount: 1000,
         },
       });
       const config = createMockConfig({
