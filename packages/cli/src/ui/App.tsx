@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
 import { Box } from 'ink';
 import { StreamingContext } from './contexts/StreamingContext.js';
 import { Notifications } from './components/Notifications.js';

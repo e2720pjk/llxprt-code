@@ -36,7 +36,7 @@ if (wantWarningSuppression && !process.env.NODE_NO_WARNINGS) {
   });
 }
 
-import React, { ErrorInfo, useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { render, Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
 import { AppContainer } from './ui/AppContainer.js';
@@ -48,7 +48,6 @@ import os from 'node:os';
 import dns from 'node:dns';
 import { spawn } from 'node:child_process';
 import { start_sandbox } from './utils/sandbox.js';
-import chalk from 'chalk';
 import {
   DnsResolutionOrder,
   LoadedSettings,
@@ -94,13 +93,7 @@ import { appEvents, AppEvent } from './utils/events.js';
 import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import {
   setCliRuntimeContext,
-  switchActiveProvider,
-  setActiveModel,
-  setActiveModelParam,
-  clearActiveModelParam,
-  getActiveModelParams,
   loadProfileByName,
-  applyCliArgumentOverrides,
 } from './runtime/runtimeSettings.js';
 import { writeFileSync } from 'node:fs';
 import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
@@ -229,22 +222,6 @@ ${reason.stack}`
       appEvents.emit(AppEvent.OpenDebugConsole);
     }
   });
-}
-
-function handleError(error: Error, errorInfo: ErrorInfo) {
-  // Log to console for debugging
-  console.error('Application Error:', error);
-  console.error('Component Stack:', errorInfo.componentStack);
-
-  // Special handling for maximum update depth errors
-  if (error.message.includes('Maximum update depth exceeded')) {
-    console.error('\nCRITICAL: RENDER LOOP DETECTED!');
-    console.error('This is likely caused by:');
-    console.error('- State updates during render');
-    console.error('- Incorrect useEffect dependencies');
-    console.error('- Non-memoized props causing re-renders');
-    console.error('\nCheck recent changes to React components and hooks.');
-  }
 }
 
 export async function startInteractiveUI(
