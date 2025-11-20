@@ -38,9 +38,6 @@ import {
   getErrorMessage,
   getAllLlxprtMdFilenames,
   UserTierId,
-  AuthType,
-  clearCachedCredentialFile,
-  ShellExecutionService,
 } from '@vybestack/llxprt-code-core';
 import { validateAuthMethod } from '../config/auth.js';
 import { loadHierarchicalLlxprtMemory } from '../config/config.js';
@@ -75,7 +72,7 @@ import { appEvents, AppEvent } from '../utils/events.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
 import { ConsolePatcher } from './utils/ConsolePatcher.js';
-import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
+import { registerCleanup } from '../utils/cleanup.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useWorkspaceMigration } from './hooks/useWorkspaceMigration.js';
 import { useSessionStats } from './contexts/SessionContext.js';
@@ -129,31 +126,21 @@ export const AppContainer = (props: AppContainerProps) => {
     HistoryItem[] | null
   >(null);
   const [showPrivacyNotice, setShowPrivacyNotice] = useState<boolean>(false);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [themeError, setThemeError] = useState<string | null>(
-    initializationResult.themeError,
-  );
-  const [isProcessing, setIsProcessing] = useState<boolean>(false);
-  const [shellFocused, setShellFocused] = useState(false);
+  const [themeError] = useState<string | null>(initializationResult.themeError);
+  const [isProcessing] = useState<boolean>(false);
+  const [shellFocused] = useState(false);
   const [geminiMdFileCount, setGeminiMdFileCount] = useState<number>(
     initializationResult.geminiMdFileCount,
   );
   const [shellModeActive, setShellModeActive] = useState(false);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [modelSwitchedFromQuotaError, setModelSwitchedFromQuotaError] =
-    useState<boolean>(false);
+
   const [historyRemountKey, setHistoryRemountKey] = useState(0);
   const [updateInfo, setUpdateInfo] = useState<UpdateObject | null>(null);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [isTrustedFolder, setIsTrustedFolder] = useState<boolean | undefined>(
+  const [isTrustedFolder] = useState<boolean | undefined>(
     config.isTrustedFolder(),
   );
   const [currentModel, setCurrentModel] = useState(config.getModel());
   const [userTier, setUserTier] = useState<UserTierId | undefined>(undefined);
-  const [isProQuotaDialogOpen, setIsProQuotaDialogOpen] = useState(false);
-  const [proQuotaDialogResolver, setProQuotaDialogResolver] = useState<
-    ((value: boolean) => void) | null
-  >(null);
 
   const runtime = useRuntimeApi();
   const { updateTodos } = useTodoContext();
@@ -172,8 +159,6 @@ export const AppContainer = (props: AppContainerProps) => {
   });
 
   const logger = useLogger(config.storage);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [userMessages, setUserMessages] = useState<string[]>([]);
 
   // Initialize independent input history from logger
   useEffect(() => {
@@ -222,7 +207,7 @@ export const AppContainer = (props: AppContainerProps) => {
     }
 
     return cleanup;
-  }, [historyManager.addItem, runtime]);
+  }, [historyManager, runtime]);
 
   // Set global OAuth addItem callback for all OAuth flows
   useEffect(() => {
@@ -309,35 +294,7 @@ export const AppContainer = (props: AppContainerProps) => {
     shellModeActive,
   });
 
-  useEffect(() => {
-    const fetchUserMessages = async () => {
-      const pastMessagesRaw = (await logger?.getPreviousUserMessages()) || [];
-      const currentSessionUserMessages = historyManager.history
-        .filter(
-          (item): item is HistoryItem & { type: 'user'; text: string } =>
-            item.type === 'user' &&
-            typeof item.text === 'string' &&
-            item.text.trim() !== '',
-        )
-        .map((item) => item.text)
-        .reverse();
-      const combinedMessages = [
-        ...currentSessionUserMessages,
-        ...pastMessagesRaw,
-      ];
-      const deduplicatedMessages: string[] = [];
-      if (combinedMessages.length > 0) {
-        deduplicatedMessages.push(combinedMessages[0]);
-        for (let i = 1; i < combinedMessages.length; i++) {
-          if (combinedMessages[i] !== combinedMessages[i - 1]) {
-            deduplicatedMessages.push(combinedMessages[i]);
-          }
-        }
-      }
-      setUserMessages(deduplicatedMessages.reverse());
-    };
-    fetchUserMessages();
-  }, [historyManager.history, logger]);
+  useEffect(() => {}, [historyManager.history, logger]);
 
   const refreshStatic = useCallback(() => {
     stdout.write(ansiEscapes.clearTerminal);
@@ -346,7 +303,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const {
     isThemeDialogOpen,
-    openThemeDialog,
+    openThemeDialog: _openThemeDialog,
     handleThemeSelect,
     handleThemeHighlight,
   } = useThemeCommand(
@@ -356,13 +313,8 @@ export const AppContainer = (props: AppContainerProps) => {
     initializationResult.themeError,
   );
 
-  const {
-    isAuthDialogOpen,
-    openAuthDialog,
-    handleAuthSelect,
-    isAuthenticating,
-    cancelAuthentication,
-  } = useAuthCommand(settings, appState, config);
+  const { isAuthDialogOpen, handleAuthSelect, isAuthenticating } =
+    useAuthCommand(settings, appState, config);
 
   const authError = appState.errors.auth;
   const onAuthError = useCallback(
@@ -400,21 +352,23 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [settings.merged.security?.auth, onAuthError]);
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [editorError, setEditorError] = useState<string | null>(null);
+  const [editorError] = useState<string | null>(null);
   const {
     isEditorDialogOpen,
-    openEditorDialog,
+    openEditorDialog: _openEditorDialog,
     handleEditorSelect,
     exitEditorDialog,
   } = useEditorSettings(settings, appState, historyManager.addItem);
 
-  const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
-    useSettingsCommand();
+  const {
+    isSettingsDialogOpen,
+    openSettingsDialog: _openSettingsDialog,
+    closeSettingsDialog,
+  } = useSettingsCommand();
 
   const {
     showDialog: isProviderDialogOpen,
-    openDialog: openProviderDialog,
+    openDialog: _openProviderDialog,
     handleSelect: handleProviderSelect,
     closeDialog: exitProviderDialog,
     providers: providerOptions,
@@ -431,7 +385,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const {
     showDialog: isProviderModelDialogOpen,
-    openDialog: openProviderModelDialogRaw,
+    openDialog: _openProviderModelDialogRaw,
     handleSelect: handleProviderModelChange,
     closeDialog: exitProviderModelDialog,
   } = useProviderModelDialog({
@@ -443,21 +397,9 @@ export const AppContainer = (props: AppContainerProps) => {
     appState,
   });
 
-  const [providerModels, setProviderModels] = useState<any[]>([]);
-  const openProviderModelDialog = useCallback(async () => {
-    try {
-      const models = await runtime.listAvailableModels();
-      setProviderModels(models);
-    } catch (e) {
-      console.error('Failed to load models:', e);
-      setProviderModels([]);
-    }
-    await openProviderModelDialogRaw();
-  }, [openProviderModelDialogRaw, runtime]);
-
   const {
     showDialog: isLoadProfileDialogOpen,
-    openDialog: openLoadProfileDialog,
+    openDialog: _openLoadProfileDialog,
     handleSelect: handleProfileSelect,
     closeDialog: exitLoadProfileDialog,
     profiles,
@@ -474,7 +416,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const {
     showDialog: isToolsDialogOpen,
-    openDialog: openToolsDialogRaw,
+    openDialog: _openToolsDialogRaw,
     closeDialog: exitToolsDialog,
     action: toolsDialogAction,
     availableTools: toolsDialogTools,
@@ -490,13 +432,6 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
   });
 
-  const openToolsDialog = useCallback(
-    (action: 'enable' | 'disable') => {
-      openToolsDialogRaw(action);
-    },
-    [openToolsDialogRaw],
-  );
-
   const {
     showWorkspaceMigrationDialog,
     workspaceExtensions,
@@ -505,43 +440,6 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useWorkspaceMigration(settings);
 
   const { toggleVimEnabled } = useVimMode();
-
-  const slashCommandActions = useMemo(
-    () => ({
-      openAuthDialog: openAuthDialog,
-      openThemeDialog,
-      openEditorDialog,
-      openProviderDialog,
-      openProviderModelDialog,
-      openLoadProfileDialog,
-      openToolsDialog,
-      openPrivacyNotice: () => setShowPrivacyNotice(true),
-      openSettingsDialog,
-      quit: (messages: HistoryItem[]) => {
-        setQuittingMessages(messages);
-        setTimeout(async () => {
-          await runExitCleanup();
-          process.exit(0);
-        }, 100);
-      },
-      setDebugMessage,
-      toggleCorgiMode: () => setCorgiMode((prev) => !prev),
-    }),
-    [
-      openAuthDialog,
-      openThemeDialog,
-      openEditorDialog,
-      openProviderDialog,
-      openProviderModelDialog,
-      openLoadProfileDialog,
-      openToolsDialog,
-      openSettingsDialog,
-      setQuittingMessages,
-      setDebugMessage,
-      () => setShowPrivacyNotice(true),
-      setCorgiMode,
-    ],
-  );
 
   const {
     handleSlashCommand,
@@ -565,9 +463,9 @@ export const AppContainer = (props: AppContainerProps) => {
     () => {}, // openProviderModelDialog
     () => {}, // openLoadProfileDialog
     () => {}, // openToolsDialog
-    () => setCorgiMode(!corgiMode),
+    () => setCorgiMode((prev) => !prev),
     setQuittingMessages,
-    setShowPrivacyNotice,
+    () => setShowPrivacyNotice(true),
     () => {}, // setSettingsDialogOpen (not available)
     toggleVimEnabled,
     () => {}, // setIsProcessing
@@ -710,22 +608,6 @@ export const AppContainer = (props: AppContainerProps) => {
     refreshStatic();
   }, [historyManager, clearConsoleMessagesState, refreshStatic]);
 
-  const handleProQuotaChoice = useCallback(
-    (choice: 'auth' | 'continue') => {
-      setIsProQuotaDialogOpen(false);
-      if (proQuotaDialogResolver) {
-        if (choice === 'auth') {
-          proQuotaDialogResolver(false); // Don't continue with fallback, show auth dialog
-          openAuthDialog();
-        } else {
-          proQuotaDialogResolver(true); // Continue with fallback model
-        }
-        setProQuotaDialogResolver(null);
-      }
-    },
-    [proQuotaDialogResolver, openAuthDialog],
-  );
-
   const { handleInput: vimHandleInput } = useVim(buffer, handleFinalSubmit);
 
   const isInputActive = !initError && !isProcessing;
@@ -749,12 +631,15 @@ export const AppContainer = (props: AppContainerProps) => {
         Math.max(terminalHeight - staticExtraHeight, 0),
       );
     }
-  }, [terminalHeight, mainControlsRef.current]);
+  }, [terminalHeight]);
 
   // Update shell execution config with proper terminal height calculations
   useEffect(() => {
-    if ((config as any).setShellExecutionConfig) {
-      (config as any).setShellExecutionConfig({
+    const shellConfig = config as unknown as {
+      setShellExecutionConfig?: (config: unknown) => void;
+    };
+    if (shellConfig.setShellExecutionConfig) {
+      shellConfig.setShellExecutionConfig({
         terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
         terminalHeight: Math.max(
           Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING),
@@ -967,7 +852,6 @@ export const AppContainer = (props: AppContainerProps) => {
         isFolderTrustDialogOpen ||
         isAuthenticating ||
         showPrivacyNotice ||
-        isProQuotaDialogOpen ||
         isProviderDialogOpen ||
         isProviderModelDialogOpen ||
         isLoadProfileDialogOpen ||
@@ -1045,7 +929,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isSettingsDialogOpen,
       isFolderTrustDialogOpen,
       showPrivacyNotice,
-      isProQuotaDialogOpen,
       isProviderDialogOpen,
       isProviderModelDialogOpen,
       isLoadProfileDialogOpen,
@@ -1100,8 +983,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isLoadProfileDialogOpen ||
       isToolsDialogOpen ||
       appState.openDialogs.oauthCode ||
-      showPrivacyNotice ||
-      isProQuotaDialogOpen,
+      showPrivacyNotice,
     [
       showWorkspaceMigrationDialog,
       shouldShowIdePrompt,
@@ -1119,7 +1001,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isToolsDialogOpen,
       appState.openDialogs.oauthCode,
       showPrivacyNotice,
-      isProQuotaDialogOpen,
     ],
   );
 
@@ -1144,7 +1025,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isToolsDialogOpen,
       providerOptions,
       selectedProvider,
-      providerModels,
+
       profiles,
       toolsDialogTools,
       toolsDialogAction,
@@ -1192,7 +1073,6 @@ export const AppContainer = (props: AppContainerProps) => {
       // Use current state values instead of config.getModel()
       currentModel,
       userTier,
-      isProQuotaDialogOpen,
       // New fields
       contextFileNames,
       errorCount,
@@ -1231,7 +1111,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isToolsDialogOpen,
       providerOptions,
       selectedProvider,
-      providerModels,
+
       profiles,
       toolsDialogTools,
       toolsDialogAction,
@@ -1277,7 +1157,6 @@ export const AppContainer = (props: AppContainerProps) => {
       workspaceExtensions,
       // Quota-related state dependencies
       userTier,
-      isProQuotaDialogOpen,
       // New fields dependencies
       contextFileNames,
       errorCount,
@@ -1326,7 +1205,6 @@ export const AppContainer = (props: AppContainerProps) => {
       handleClearScreen,
       onWorkspaceMigrationDialogOpen,
       onWorkspaceMigrationDialogClose,
-      handleProQuotaChoice,
       handleProviderSelect,
       exitProviderDialog,
       handleProviderModelChange,
@@ -1374,7 +1252,6 @@ export const AppContainer = (props: AppContainerProps) => {
       handleClearScreen,
       onWorkspaceMigrationDialogOpen,
       onWorkspaceMigrationDialogClose,
-      handleProQuotaChoice,
       handleProviderSelect,
       exitProviderDialog,
       handleProviderModelChange,
@@ -1393,10 +1270,13 @@ export const AppContainer = (props: AppContainerProps) => {
         <UIActionsContext.Provider value={uiActions}>
           <ConfigContext.Provider value={config}>
             <AppContext.Provider
-              value={{
-                version: props.version,
-                startupWarnings: props.startupWarnings || [],
-              }}
+              value={useMemo(
+                () => ({
+                  version: props.version,
+                  startupWarnings: props.startupWarnings || [],
+                }),
+                [props.version, props.startupWarnings],
+              )}
             >
               <App />
             </AppContext.Provider>

@@ -135,8 +135,8 @@ class ShellToolInvocation extends BaseToolInvocation<
   async execute(
     signal: AbortSignal,
     updateOutput?: (output: string) => void,
-    terminalColumns?: number,
-    terminalRows?: number,
+    _terminalColumns?: number,
+    _terminalRows?: number,
   ): Promise<ToolResult> {
     // Validate filtering parameters
     if (this.params.head_lines) {
@@ -224,7 +224,11 @@ class ShellToolInvocation extends BaseToolInvocation<
           switch (event.type) {
             case 'data':
               if (isBinaryStream) break;
-              outputChunks.push(event.chunk);
+              outputChunks.push(
+                typeof event.chunk === 'string'
+                  ? event.chunk
+                  : String(event.chunk),
+              );
               if (Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS) {
                 cumulativeOutput = outputChunks.join('');
                 outputChunks = [cumulativeOutput];
@@ -253,14 +257,17 @@ class ShellToolInvocation extends BaseToolInvocation<
           }
 
           if (shouldUpdate) {
-            updateOutput(currentDisplayOutput);
+            updateOutput(
+              typeof currentDisplayOutput === 'string'
+                ? currentDisplayOutput
+                : String(currentDisplayOutput),
+            );
             lastUpdateTime = Date.now();
           }
         },
         signal,
         this.config.getShouldUseNodePtyShell(),
-        terminalColumns,
-        terminalRows,
+        {}, // shellExecutionConfig
       );
 
       const result = await executionResult.result;

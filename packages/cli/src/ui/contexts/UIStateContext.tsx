@@ -78,7 +78,6 @@ export interface UIState {
   workspaceExtensions: any[]; // Extension[]
   // Quota-related state
   userTier: UserTierId | undefined;
-  isProQuotaDialogOpen: boolean;
   currentModel: string;
   // New fields for complete state management
   contextFileNames: string[];

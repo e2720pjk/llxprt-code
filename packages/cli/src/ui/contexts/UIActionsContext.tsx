@@ -42,7 +42,6 @@ export interface UIActions {
   handleClearScreen: () => void;
   onWorkspaceMigrationDialogOpen: () => void;
   onWorkspaceMigrationDialogClose: () => void;
-  handleProQuotaChoice: (choice: 'auth' | 'continue') => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);
