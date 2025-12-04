@@ -5,38 +5,35 @@
  */
 
 import React from 'react';
-import { Box, type DOMElement, Static, Text } from 'ink';
+import { Box, Static, Text } from 'ink';
 import type { Config } from '@vybestack/llxprt-code-core';
-import { ApprovalMode } from '@vybestack/llxprt-code-core';
-import { StreamingState } from '../types.js';
-import { LoadedSettings } from '../../config/settings.js';
-import { UpdateObject } from '../utils/updateCheck.js';
-import { useUIState } from '../contexts/UIStateContext.js';
-import { useUIActions } from '../contexts/UIActionsContext.js';
-import { StreamingContext } from '../contexts/StreamingContext.js';
-import { OverflowProvider } from '../contexts/OverflowContext.js';
-import { Colors } from '../colors.js';
-
-// Tab components
-import { TabbedAppLayout } from './TabbedAppLayout.js';
+import type { DOMElement } from 'ink';
+import type { LoadedSettings } from '../../../config/settings.js';
+import type { UpdateObject } from '../../utils/updateCheck.js';
+import { useUIState } from '../../contexts/UIStateContext.js';
+import { useUIActions } from '../../contexts/UIActionsContext.js';
+import { useTabContext } from '../../contexts/TabContext.js';
 
 // Components
-import { Header } from '../components/Header.js';
-import { Tips } from '../components/Tips.js';
-import { HistoryItemDisplay } from '../components/HistoryItemDisplay.js';
-import { ShowMoreLines } from '../components/ShowMoreLines.js';
-import { Notifications } from '../components/Notifications.js';
-import { TodoPanel } from '../components/TodoPanel.js';
-import { Footer } from '../components/Footer.js';
-import { DialogManager } from '../components/DialogManager.js';
-import { Composer } from '../components/Composer.js';
-import { LoadingIndicator } from '../components/LoadingIndicator.js';
-import { AutoAcceptIndicator } from '../components/AutoAcceptIndicator.js';
-import { ShellModeIndicator } from '../components/ShellModeIndicator.js';
-import { ContextSummaryDisplay } from '../components/ContextSummaryDisplay.js';
-import { DetailedMessagesDisplay } from '../components/DetailedMessagesDisplay.js';
+import { Header } from '../Header.js';
+import { Tips } from '../Tips.js';
+import { HistoryItemDisplay } from '../HistoryItemDisplay.js';
+import { ShowMoreLines } from '../ShowMoreLines.js';
+import { Notifications } from '../Notifications.js';
+import { Footer } from '../Footer.js';
+import { DialogManager } from '../DialogManager.js';
+import { Composer } from '../Composer.js';
+import { LoadingIndicator } from '../LoadingIndicator.js';
+import { AutoAcceptIndicator } from '../AutoAcceptIndicator.js';
+import { ShellModeIndicator } from '../ShellModeIndicator.js';
+import { ContextSummaryDisplay } from '../ContextSummaryDisplay.js';
+import { DetailedMessagesDisplay } from '../DetailedMessagesDisplay.js';
+import { StreamingContext } from '../../contexts/StreamingContext.js';
+import { OverflowProvider } from '../../contexts/OverflowContext.js';
+import { Colors } from '../../colors.js';
+import { StreamingState } from '../../types.js';
 
-interface DefaultAppLayoutProps {
+interface ChatTabProps {
   config: Config;
   settings: LoadedSettings;
   startupWarnings: string[];
@@ -48,7 +45,7 @@ interface DefaultAppLayoutProps {
   updateInfo: UpdateObject | null;
 }
 
-export const DefaultAppLayout = ({
+export const ChatTab: React.FC<ChatTabProps> = ({
   config,
   settings,
   startupWarnings,
@@ -58,9 +55,10 @@ export const DefaultAppLayout = ({
   availableTerminalHeight,
   contextFileNames,
   updateInfo,
-}: DefaultAppLayoutProps) => {
+}) => {
   const uiState = useUIState();
   const uiActions = useUIActions();
+  const { state: tabState } = useTabContext();
 
   const {
     terminalWidth,
@@ -76,7 +74,6 @@ export const DefaultAppLayout = ({
     showToolDescriptions,
     consoleMessages,
     slashCommands,
-    staticKey,
     isInputActive,
     ctrlCPressedOnce,
     ctrlDPressedOnce,
@@ -97,17 +94,16 @@ export const DefaultAppLayout = ({
     tokenMetrics,
     currentModel,
     availableTerminalHeight: uiAvailableTerminalHeight,
+    isNarrow,
   } = uiState;
 
   // Use the UI state's availableTerminalHeight if constrainHeight is true
-  // Otherwise, fall back to the prop (which is the same calculation)
   const effectiveAvailableHeight = constrainHeight
     ? uiAvailableTerminalHeight
     : availableTerminalHeight;
 
   const showTodoPanelSetting = settings.merged.ui?.showTodoPanel ?? true;
   const hideContextSummary = settings.merged.ui?.hideContextSummary ?? false;
-  const { isNarrow } = uiState;
 
   const debugConsoleMaxHeight = Math.floor(Math.max(terminalHeight * 0.2, 5));
   const staticAreaMaxItemHeight = Math.max(terminalHeight * 4, 100);
@@ -133,8 +129,8 @@ export const DefaultAppLayout = ({
     uiState.isToolsDialogOpen ||
     uiState.showPrivacyNotice;
 
-  // Check if tabs are enabled via setting (default to false for now)
-  const useTabs = false; // settings.merged.ui?.enableTabs ?? false;
+  // Independent static key for chat tab
+  const chatStaticKey = tabState.activeTab === 'chat' ? 0 : 1;
 
   if (quittingMessages) {
     return (
@@ -157,29 +153,11 @@ export const DefaultAppLayout = ({
     );
   }
 
-  // Use tabbed layout if enabled
-  if (useTabs) {
-    return (
-      <TabbedAppLayout
-        config={config}
-        settings={settings}
-        startupWarnings={startupWarnings}
-        version={version}
-        nightly={nightly}
-        mainControlsRef={mainControlsRef}
-        availableTerminalHeight={availableTerminalHeight}
-        contextFileNames={contextFileNames}
-        updateInfo={updateInfo}
-      />
-    );
-  }
-
-  // Original layout for backward compatibility
   return (
     <StreamingContext.Provider value={streamingState}>
       <Box flexDirection="column" width="90%" ref={uiState.rootUiRef}>
         <Static
-          key={staticKey}
+          key={chatStaticKey}
           items={[
             <Box flexDirection="column" key="header">
               {!(
@@ -238,8 +216,6 @@ export const DefaultAppLayout = ({
             updateInfo={updateInfo}
             history={history}
           />
-
-          {showTodoPanelSetting && <TodoPanel width={inputWidth} />}
 
           {dialogsVisible ? (
             <DialogManager
@@ -305,7 +281,7 @@ export const DefaultAppLayout = ({
                   paddingTop={isNarrow ? 1 : 0}
                   marginLeft={hideContextSummary ? 1 : 2}
                 >
-                  {showAutoAcceptIndicator !== ApprovalMode.DEFAULT &&
+                  {showAutoAcceptIndicator !== undefined &&
                     !shellModeActive && (
                       <AutoAcceptIndicator
                         approvalMode={showAutoAcceptIndicator}

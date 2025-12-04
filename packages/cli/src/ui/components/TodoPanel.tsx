@@ -25,6 +25,7 @@ interface Todo extends CoreTodo {
 
 interface TodoPanelProps {
   width: number;
+  fullScreen?: boolean;
 }
 
 interface UseVerticalResponsiveReturn {
