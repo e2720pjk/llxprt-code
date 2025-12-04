@@ -25,6 +25,7 @@ interface Todo extends CoreTodo {
 
 interface TodoPanelProps {
   width: number;
+  fullScreen?: boolean;
 }
 
 interface UseVerticalResponsiveReturn {
@@ -32,10 +33,13 @@ interface UseVerticalResponsiveReturn {
   maxItems: number;
 }
 
-function useVerticalResponsive(): UseVerticalResponsiveReturn {
+function useVerticalResponsive(
+  fullScreen: boolean = false,
+): UseVerticalResponsiveReturn {
   const { rows } = useTerminalSize();
   // Reserve space for header, footer, and input prompt (roughly 8 lines)
-  const reservedSpace = 8;
+  // In fullScreen mode, reserve less space since we take up the whole tab
+  const reservedSpace = fullScreen ? 3 : 8;
   const maxItems = Math.max(1, rows - reservedSpace);
 
   // Add debug logging
@@ -344,11 +348,14 @@ const renderTodo = (
   return elements;
 };
 
-const TodoPanelComponent: React.FC<TodoPanelProps> = ({ width }) => {
+const TodoPanelComponent: React.FC<TodoPanelProps> = ({
+  width,
+  fullScreen = false,
+}) => {
   const { todos } = useTodoContext();
   const { getExecutingToolCalls, subscribe } = useToolCallContext();
   const { isNarrow, isStandard, isWide } = useResponsive();
-  const { maxItems } = useVerticalResponsive();
+  const { maxItems } = useVerticalResponsive(fullScreen);
   const [, forceUpdate] = useState({});
   const [contentKey, setContentKey] = useState(0);
 
@@ -500,10 +507,10 @@ const TodoPanelComponent: React.FC<TodoPanelProps> = ({ width }) => {
       key={`todo-panel-${contentKey}`} // Force re-render by changing key when content changes
       flexDirection="column"
       width={width}
-      borderStyle="round"
+      borderStyle={fullScreen ? 'single' : 'round'}
       borderColor={SemanticColors.text.accent}
-      paddingX={1}
-      paddingY={1}
+      paddingX={fullScreen ? 0 : 1}
+      paddingY={fullScreen ? 0 : 1}
     >
       {allElements}
     </Box>

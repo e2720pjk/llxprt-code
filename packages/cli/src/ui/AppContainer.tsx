@@ -1710,6 +1710,7 @@ export const AppContainer = (props: AppContainerProps) => {
     cancelOngoingRequest,
   };
 
+  // Feature flag for tabs architecture - can be controlled via environment variable
   return (
     <UIStateProvider value={uiState}>
       <UIActionsProvider value={uiActions}>

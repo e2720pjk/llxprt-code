@@ -29,9 +29,9 @@ export function useFlickerDetector(
   constrainHeight: boolean,
 ): void {
   useEffect(() => {
-    if (rootUiRef.current) {
+    if (rootUiRef.current && constrainHeight) {
       const measurement = measureElement(rootUiRef.current);
-      if (measurement.height > terminalHeight && constrainHeight) {
+      if (measurement.height > terminalHeight) {
         appEvents.emit(AppEvent.Flicker, {
           contentHeight: measurement.height,
           terminalHeight,
@@ -39,5 +39,5 @@ export function useFlickerDetector(
         });
       }
     }
-  }); // NO dependency array - runs after every render
+  }, [terminalHeight, constrainHeight]); // Added dependencies to prevent running on every render
 }
