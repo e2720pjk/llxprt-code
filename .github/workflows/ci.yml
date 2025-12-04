@@ -5,11 +5,11 @@ name: 'LLxprt Code CI'
 on:
   push:
     branches:
-      - 'main'
+      - ${{ github.default_branch }}
       - 'release/**'
   pull_request:
     branches:
-      - 'main'
+      - ${{ github.default_branch }}
       - 'release/**'
   merge_group:
   workflow_dispatch:

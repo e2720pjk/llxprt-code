@@ -3,7 +3,7 @@ name: 'On Merge Smoke Test'
 on:
   push:
     branches:
-      - 'main'
+      - ${{ github.default_branch }}
       - 'release/**'
   workflow_dispatch:
     inputs:
