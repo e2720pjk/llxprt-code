@@ -3,7 +3,7 @@ name: 'On Merge Smoke Test'
 on:
   push:
     branches:
-      - 'main'
+      - 'opencode-dev'
       - 'release/**'
   workflow_dispatch:
     inputs:
@@ -11,7 +11,7 @@ on:
         description: 'The branch, tag, or SHA to test on.'
         required: false
         type: 'string'
-        default: 'main'
+        default: 'opencode-dev'
       dry-run:
         description: 'Run a dry-run of the smoke test; No bug will be created'
         required: true
