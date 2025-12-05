@@ -12,7 +12,13 @@ import React, {
   useState,
   useRef,
 } from 'react';
-import { type DOMElement, measureElement, useStdin, useStdout } from 'ink';
+import {
+  type DOMElement,
+  measureElement,
+  useStdin,
+  useStdout,
+  useIsScreenReaderEnabled,
+} from 'ink';
 import {
   MessageType,
   ToolCallStatus,
@@ -111,6 +117,7 @@ import { ConfigProvider } from './contexts/ConfigContext.js';
 import { SettingsProvider } from './contexts/SettingsContext.js';
 import { AppContext } from './contexts/AppContext.js';
 import { DefaultAppLayout } from './layouts/DefaultAppLayout.js';
+import { ScreenReaderAppLayout } from './layouts/ScreenReaderAppLayout.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import {
   disableBracketedPaste,
@@ -163,6 +170,7 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
  */
 export const AppContainer = (props: AppContainerProps) => {
   debug.log('AppContainer architecture active (v2)');
+  const isScreenReaderEnabled = useIsScreenReaderEnabled();
   const {
     config,
     settings,
@@ -1777,15 +1785,19 @@ export const AppContainer = (props: AppContainerProps) => {
         <SettingsProvider settings={settings}>
           <UIActionsProvider value={uiActions}>
             <UIStateProvider value={uiState}>
-              <DefaultAppLayout
-                config={config}
-                settings={settings}
-                startupWarnings={startupWarnings}
-                mainControlsRef={mainControlsRef}
-                availableTerminalHeight={availableTerminalHeight}
-                contextFileNames={contextFileNames}
-                updateInfo={updateInfo}
-              />
+              {isScreenReaderEnabled ? (
+                <ScreenReaderAppLayout config={config} />
+              ) : (
+                <DefaultAppLayout
+                  config={config}
+                  settings={settings}
+                  startupWarnings={startupWarnings}
+                  mainControlsRef={mainControlsRef}
+                  availableTerminalHeight={availableTerminalHeight}
+                  contextFileNames={contextFileNames}
+                  updateInfo={updateInfo}
+                />
+              )}
             </UIStateProvider>
           </UIActionsProvider>
         </SettingsProvider>
