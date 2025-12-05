@@ -10,28 +10,29 @@ import { useUIState } from '../../contexts/UIStateContext.js';
 import { useTabContext } from '../../contexts/TabContext.js';
 import { Colors } from '../../colors.js';
 
+const getColorByLevel = (level: string) => {
+  switch (level.toLowerCase()) {
+    case 'error':
+      return Colors.AccentRed;
+    case 'warn':
+    case 'warning':
+      return Colors.AccentYellow;
+    case 'info':
+      return Colors.AccentBlue;
+    case 'debug':
+      return Colors.Gray;
+    default:
+      return 'white';
+  }
+};
+
 export const DebugTab: React.FC = () => {
   const { consoleMessages } = useUIState();
   const { state: tabState } = useTabContext();
 
-  // Independent static key for debug tab
-  const debugStaticKey = tabState.activeTab === 'debug' ? 0 : 2;
-
-  const getColorByLevel = (level: string) => {
-    switch (level.toLowerCase()) {
-      case 'error':
-        return Colors.AccentRed;
-      case 'warn':
-      case 'warning':
-        return Colors.AccentYellow;
-      case 'info':
-        return Colors.AccentBlue;
-      case 'debug':
-        return Colors.Gray;
-      default:
-        return 'white';
-    }
-  };
+  // Force Static remount when switching to/from debug tab to maintain isolation
+  // Uses distinct keys to ensure Ink's Static component resets properly
+  const debugStaticKey = `debug-static-${tabState.activeTab === 'debug' ? 'active' : 'inactive'}`;
 
   return (
     <Box flexDirection="column" width="90%">
@@ -53,10 +54,10 @@ export const DebugTab: React.FC = () => {
           {({ msg, index }) => (
             <Box key={index} flexDirection="column" marginBottom={0}>
               <Box>
-                <Text color={getColorByLevel('info')}>
-                  [{new Date().toISOString()}] INFO:
+                <Text color={getColorByLevel(msg.type)}>
+                  [{msg.timestamp}] {msg.type.toUpperCase()}:
                 </Text>
-                <Text> {String(msg)}</Text>
+                <Text> {msg.content}</Text>
               </Box>
             </Box>
           )}

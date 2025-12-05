@@ -7,6 +7,7 @@
 import React from 'react';
 import { Box, Static, Text } from 'ink';
 import type { Config } from '@vybestack/llxprt-code-core';
+import { ApprovalMode } from '@vybestack/llxprt-code-core';
 import type { DOMElement } from 'ink';
 import type { LoadedSettings } from '../../../config/settings.js';
 import type { UpdateObject } from '../../utils/updateCheck.js';
@@ -281,7 +282,7 @@ export const ChatTab: React.FC<ChatTabProps> = ({
                   paddingTop={isNarrow ? 1 : 0}
                   marginLeft={hideContextSummary ? 1 : 2}
                 >
-                  {showAutoAcceptIndicator !== undefined &&
+                  {showAutoAcceptIndicator !== ApprovalMode.DEFAULT &&
                     !shellModeActive && (
                       <AutoAcceptIndicator
                         approvalMode={showAutoAcceptIndicator}

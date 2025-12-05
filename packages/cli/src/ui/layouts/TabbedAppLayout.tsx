@@ -7,6 +7,7 @@
 import React from 'react';
 import { Box } from 'ink';
 import type { Config } from '@vybestack/llxprt-code-core';
+import type { DOMElement } from 'ink';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
 
@@ -24,7 +25,7 @@ interface TabbedAppLayoutProps {
   startupWarnings: string[];
   version: string;
   nightly: boolean;
-  mainControlsRef: React.RefObject<any>;
+  mainControlsRef: React.RefObject<DOMElement | null>;
   availableTerminalHeight: number;
   contextFileNames: string[];
   updateInfo: UpdateObject | null;
@@ -60,7 +61,7 @@ const TabbedAppLayoutContent: React.FC<TabbedAppLayoutProps> = (props) => {
       <TabBar
         tabs={tabState.tabs}
         activeTab={tabState.activeTab}
-        onSwitch={(tabId: string) => switchTab(tabId as any)}
+        onSwitch={switchTab}
       />
       <Box flexDirection="column" marginTop={1}>
         {renderActiveTab()}
@@ -69,10 +70,8 @@ const TabbedAppLayoutContent: React.FC<TabbedAppLayoutProps> = (props) => {
   );
 };
 
-export const TabbedAppLayout: React.FC<TabbedAppLayoutProps> = (props) => {
-  return (
-    <TabProvider>
-      <TabbedAppLayoutContent {...props} />
-    </TabProvider>
-  );
-};
+export const TabbedAppLayout: React.FC<TabbedAppLayoutProps> = (props) => (
+  <TabProvider>
+    <TabbedAppLayoutContent {...props} />
+  </TabProvider>
+);

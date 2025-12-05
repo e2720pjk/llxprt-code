@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useMemo,
+} from 'react';
 
 export type TabId = 'chat' | 'debug' | 'todo' | 'system';
 
@@ -76,12 +82,15 @@ export const TabProvider: React.FC<TabProviderProps> = ({ children }) => {
     }));
   }, []);
 
-  const value: TabContextValue = {
-    state,
-    switchTab,
-    markTabRead,
-    markTabUnread,
-  };
+  const value = useMemo<TabContextValue>(
+    () => ({
+      state,
+      switchTab,
+      markTabRead,
+      markTabUnread,
+    }),
+    [state, switchTab, markTabRead, markTabUnread],
+  );
 
   return <TabContext.Provider value={value}>{children}</TabContext.Provider>;
 };

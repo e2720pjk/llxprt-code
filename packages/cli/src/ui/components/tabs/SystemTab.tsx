@@ -40,9 +40,14 @@ export const SystemTab: React.FC<SystemTabProps> = ({
 
   const formatBytes = (bytes: number) => {
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    if (bytes === 0) return '0 Bytes';
+    if (bytes <= 0) return '0 Bytes';
     const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    return Math.round((bytes / Math.pow(1024, i)) * 100) / 100 + ' ' + sizes[i];
+    const clampedIndex = Math.min(i, sizes.length - 1);
+    return (
+      Math.round((bytes / Math.pow(1024, clampedIndex)) * 100) / 100 +
+      ' ' +
+      sizes[clampedIndex]
+    );
   };
 
   const formatTime = (ms: number) => {
@@ -117,10 +122,17 @@ export const SystemTab: React.FC<SystemTabProps> = ({
         <Text color={Colors.AccentYellow} bold>
           Memory Usage
         </Text>
-        <Text>RSS: {formatBytes(process.memoryUsage().rss)}</Text>
-        <Text>Heap Used: {formatBytes(process.memoryUsage().heapUsed)}</Text>
-        <Text>Heap Total: {formatBytes(process.memoryUsage().heapTotal)}</Text>
-        <Text>External: {formatBytes(process.memoryUsage().external)}</Text>
+        {React.useMemo(() => {
+          const memUsage = process.memoryUsage();
+          return (
+            <>
+              <Text>RSS: {formatBytes(memUsage.rss)}</Text>
+              <Text>Heap Used: {formatBytes(memUsage.heapUsed)}</Text>
+              <Text>Heap Total: {formatBytes(memUsage.heapTotal)}</Text>
+              <Text>External: {formatBytes(memUsage.external)}</Text>
+            </>
+          );
+        }, [])}
       </Box>
 
       <Box flexDirection="column">
