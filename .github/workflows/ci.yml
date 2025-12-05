@@ -5,11 +5,11 @@ name: 'LLxprt Code CI'
 on:
   push:
     branches:
-      - 'main'
+      - 'opencode-dev'
       - 'release/**'
   pull_request:
     branches:
-      - 'main'
+      - 'opencode-dev'
       - 'release/**'
   merge_group:
   workflow_dispatch:

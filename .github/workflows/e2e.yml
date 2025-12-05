@@ -3,11 +3,11 @@ name: 'Testing: E2E'
 on:
   push:
     branches:
-      - 'main'
+      - 'opencode-dev'
   # This will run for PRs from the base repository, providing secrets.
   pull_request:
     branches:
-      - 'main'
+      - 'opencode-dev'
       - 'release/**'
   # This will run for PRs from forks when a label is added.
   pull_request_target:
@@ -18,7 +18,7 @@ on:
       branch_ref:
         description: 'Branch to run on'
         required: true
-        default: 'main'
+        default: 'opencode-dev'
         type: 'string'
 
 jobs:
