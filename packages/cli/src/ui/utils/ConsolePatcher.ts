@@ -64,6 +64,7 @@ export class ConsolePatcher {
             type,
             content: this.formatArgs(args),
             count: 1,
+            timestamp: new Date().toISOString(),
           });
         }
       }

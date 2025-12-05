@@ -38,6 +38,7 @@ export function useExtensionAutoUpdate({
           type,
           content: message,
           count: 1,
+          timestamp: new Date().toISOString(),
         });
       },
     });

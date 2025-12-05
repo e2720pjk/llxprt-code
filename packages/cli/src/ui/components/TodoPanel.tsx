@@ -25,6 +25,8 @@ interface Todo extends CoreTodo {
 
 interface TodoPanelProps {
   width: number;
+  /** @todo Implement full-screen layout mode for tabbed view */
+  fullScreen?: boolean;
 }
 
 interface UseVerticalResponsiveReturn {
