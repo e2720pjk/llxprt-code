@@ -35,6 +35,7 @@ describe('appReducer', () => {
           editor: null,
         },
         lastAddItemAction: null,
+        historyRemountKey: 0,
       });
     });
 
@@ -581,6 +582,7 @@ describe('appReducer', () => {
           editor: null,
         },
         lastAddItemAction: null,
+        historyRemountKey: 0,
       };
 
       // Create a deep copy to compare later

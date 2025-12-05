@@ -72,6 +72,7 @@ describe('useEditorSettings', () => {
         editor: null,
       },
       lastAddItemAction: null,
+      historyRemountKey: 0,
     };
 
     mockAddItem = vi.fn();

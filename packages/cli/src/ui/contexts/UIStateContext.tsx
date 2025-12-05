@@ -48,9 +48,13 @@ export interface UIState {
 
   // History and streaming
   history: HistoryItem[];
+  pendingHistory: HistoryItem[]; // Dynamic history for alternate buffer
   pendingHistoryItems: HistoryItemWithoutId[];
   streamingState: StreamingState;
   thought: ThoughtSummary | null;
+
+  // History remount key for forcing re-renders
+  historyRemountKey: number;
 
   // Input buffer
   buffer: TextBuffer;

@@ -41,7 +41,8 @@ export type AppAction =
   | { type: 'CLEAR_WARNING'; payload: string }
   | { type: 'SET_THEME_ERROR'; payload: string | null }
   | { type: 'SET_AUTH_ERROR'; payload: string | null }
-  | { type: 'SET_EDITOR_ERROR'; payload: string | null };
+  | { type: 'SET_EDITOR_ERROR'; payload: string | null }
+  | { type: 'INCREMENT_HISTORY_REMOUNT_KEY' };
 
 export interface AppState {
   openDialogs: {
@@ -65,6 +66,7 @@ export interface AppState {
     itemData: Omit<HistoryItem, 'id'>;
     baseTimestamp: number;
   } | null;
+  historyRemountKey: number;
 }
 
 export const initialAppState: AppState = {
@@ -86,6 +88,7 @@ export const initialAppState: AppState = {
     editor: null,
   },
   lastAddItemAction: null,
+  historyRemountKey: 0,
 };
 
 export function appReducer(state: AppState, action: AppAction): AppState {
@@ -158,6 +161,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           ...state.errors,
           editor: action.payload,
         },
+      };
+
+    case 'INCREMENT_HISTORY_REMOUNT_KEY':
+      return {
+        ...state,
+        historyRemountKey: state.historyRemountKey + 1,
       };
 
     default:

@@ -23,6 +23,7 @@ export interface UIActions {
   clearItems: () => void;
   loadHistory: (newHistory: HistoryItem[]) => void;
   refreshStatic: () => void;
+  incrementHistoryRemountKey: () => void;
 
   // Input actions
   handleUserInputSubmit: (value: string) => void;

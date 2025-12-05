@@ -1527,8 +1527,12 @@ export const AppContainer = (props: AppContainerProps) => {
 
     // History and streaming
     history,
+    pendingHistory: [], // Dynamic history for alternate buffer
     pendingHistoryItems,
     streamingState,
+
+    // History remount key
+    historyRemountKey: appState.historyRemountKey,
 
     // Input buffer
     buffer,
@@ -1663,6 +1667,9 @@ export const AppContainer = (props: AppContainerProps) => {
     clearItems,
     loadHistory,
     refreshStatic,
+    incrementHistoryRemountKey: () => {
+      appDispatch({ type: 'INCREMENT_HISTORY_REMOUNT_KEY' });
+    },
 
     // Input actions
     handleUserInputSubmit,

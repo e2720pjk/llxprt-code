@@ -12,7 +12,7 @@ import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
-import { useAlternateBuffer } from '../hooks/useAlternateBuffer.js';
+import { useRenderMode } from '../hooks/useRenderMode.js';
 import { SCROLL_TO_ITEM_END } from './shared/VirtualizedList.js';
 import { ScrollableList } from './shared/ScrollableList.js';
 import { useMemo, memo, useCallback } from 'react';
@@ -24,12 +24,16 @@ const MemoizedAppHeader = memo(AppHeader);
 const getEstimatedItemHeight = () => 100;
 
 const keyExtractor = (
-  item: { type: 'header' | 'history' | 'pending'; item?: HistoryItem },
+  item: {
+    type: 'header' | 'history' | 'pending' | 'pending-streaming';
+    item?: HistoryItem;
+  },
   _index: number,
 ) => {
   if (item.type === 'header') return 'header';
   if (item.type === 'history' && item.item) return item.item.id.toString();
-  return 'pending';
+  if (item.type === 'pending' && item.item) return `pending-${item.item.id}`;
+  return 'pending-streaming';
 };
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
@@ -39,23 +43,14 @@ const keyExtractor = (
 export const MainContent = ({ config }: { config: Config }) => {
   const { version } = useAppContext();
   const uiState = useUIState();
-  const isAlternateBuffer = useAlternateBuffer();
+  const renderMode = useRenderMode();
 
-  const { pendingHistoryItems, mainAreaWidth, availableTerminalHeight } =
-    uiState;
-
-  const historyItems = uiState.history.map((h) => (
-    <HistoryItemDisplay
-      terminalWidth={mainAreaWidth}
-      availableTerminalHeight={availableTerminalHeight}
-      key={h.id}
-      item={h}
-      isPending={false}
-      slashCommands={uiState.slashCommands}
-      activeShellPtyId={uiState.activePtyId}
-      config={config}
-    />
-  ));
+  const {
+    pendingHistory,
+    pendingHistoryItems,
+    mainAreaWidth,
+    availableTerminalHeight,
+  } = uiState;
 
   const pendingItems = useMemo(
     () => (
@@ -97,13 +92,42 @@ export const MainContent = ({ config }: { config: Config }) => {
     ],
   );
 
+  // Static history items for accessibility and screen readers
+  const staticHistoryItems = useMemo(
+    () =>
+      uiState.history.map((h) => (
+        <HistoryItemDisplay
+          terminalWidth={mainAreaWidth}
+          availableTerminalHeight={availableTerminalHeight}
+          key={h.id}
+          item={h}
+          isPending={false}
+          slashCommands={uiState.slashCommands}
+          activeShellPtyId={uiState.activePtyId}
+          config={config}
+        />
+      )),
+    [
+      uiState.history,
+      mainAreaWidth,
+      availableTerminalHeight,
+      uiState.slashCommands,
+      uiState.activePtyId,
+      config,
+    ],
+  );
+
+  // Virtualized data for alternate buffer mode
   const virtualizedData = useMemo(
     () => [
       { type: 'header' as const },
       ...uiState.history.map((item) => ({ type: 'history' as const, item })),
-      { type: 'pending' as const },
+      ...(pendingHistory.length > 0
+        ? pendingHistory.map((item) => ({ type: 'pending' as const, item }))
+        : []),
+      { type: 'pending-streaming' as const },
     ],
-    [uiState.history],
+    [uiState.history, pendingHistory],
   );
 
   const renderItem = useCallback(
@@ -123,6 +147,20 @@ export const MainContent = ({ config }: { config: Config }) => {
             config={config}
           />
         );
+      } else if (item.type === 'pending' && item.item) {
+        return (
+          <MemoizedHistoryItemDisplay
+            terminalWidth={mainAreaWidth}
+            availableTerminalHeight={availableTerminalHeight}
+            key={item.item.id}
+            item={item.item}
+            isPending={true}
+            isFocused={!uiState.isEditorDialogOpen}
+            slashCommands={uiState.slashCommands}
+            activeShellPtyId={uiState.activePtyId}
+            config={config}
+          />
+        );
       } else {
         return pendingItems;
       }
@@ -135,10 +173,11 @@ export const MainContent = ({ config }: { config: Config }) => {
       config,
       uiState.slashCommands,
       uiState.activePtyId,
+      uiState.isEditorDialogOpen,
     ],
   );
 
-  if (isAlternateBuffer) {
+  if (renderMode === 'virtualized') {
     return (
       <ScrollableList
         hasFocus={!uiState.isEditorDialogOpen}
@@ -152,13 +191,14 @@ export const MainContent = ({ config }: { config: Config }) => {
     );
   }
 
+  // Static rendering for screen readers and accessibility
   return (
     <>
       <Static
-        key={uiState.staticKey}
+        key={uiState.historyRemountKey}
         items={[
           <AppHeader key="app-header" version={version} />,
-          ...historyItems,
+          ...staticHistoryItems,
         ]}
       >
         {(item) => item}
