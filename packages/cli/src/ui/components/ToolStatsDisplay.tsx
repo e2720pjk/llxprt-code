@@ -52,7 +52,7 @@ const StatRow: React.FC<{
   );
 };
 
-export const ToolStatsDisplay: React.FC = () => {
+const ToolStatsDisplayComponent: React.FC = () => {
   const { stats } = useSessionStats();
   const { tools } = stats.metrics;
   const activeTools = Object.entries(tools.byName).filter(
@@ -209,3 +209,5 @@ export const ToolStatsDisplay: React.FC = () => {
     </Box>
   );
 };
+
+export const ToolStatsDisplay = React.memo(ToolStatsDisplayComponent);

@@ -34,7 +34,7 @@ const StatRow: React.FC<StatRowProps> = ({
   </Box>
 );
 
-export const CacheStatsDisplay: React.FC = () => {
+const CacheStatsDisplayComponent: React.FC = () => {
   const { getCliProviderManager } = useRuntimeApi();
   const providerManager = getCliProviderManager();
 
@@ -181,3 +181,5 @@ export const CacheStatsDisplay: React.FC = () => {
     </Box>
   );
 };
+
+export const CacheStatsDisplay = React.memo(CacheStatsDisplayComponent);

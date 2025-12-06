@@ -45,7 +45,7 @@ const StatRow: React.FC<StatRowProps> = ({
   </Box>
 );
 
-export const ModelStatsDisplay: React.FC = () => {
+const ModelStatsDisplayComponent: React.FC = () => {
   const { stats } = useSessionStats();
   const { models } = stats.metrics;
   const activeModels = Object.entries(models).filter(
@@ -198,3 +198,5 @@ export const ModelStatsDisplay: React.FC = () => {
     </Box>
   );
 };
+
+export const ModelStatsDisplay = React.memo(ModelStatsDisplayComponent);

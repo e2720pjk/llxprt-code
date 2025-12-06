@@ -163,7 +163,7 @@ interface StatsDisplayProps {
   title?: string;
 }
 
-export const StatsDisplay: React.FC<StatsDisplayProps> = ({
+const StatsDisplayComponent: React.FC<StatsDisplayProps> = ({
   duration,
   title,
 }) => {
@@ -334,6 +334,8 @@ export const StatsDisplay: React.FC<StatsDisplayProps> = ({
     </Box>
   );
 };
+
+export const StatsDisplay = React.memo(StatsDisplayComponent);
 
 /**
  * @plan PLAN-20250909-TOKTRACK.P05
