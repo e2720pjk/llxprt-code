@@ -1257,11 +1257,36 @@ describe('App UI', () => {
   describe('errorCount', () => {
     it('should correctly sum the counts of error messages', async () => {
       const mockConsoleMessages: ConsoleMessageItem[] = [
-        { type: 'error', content: 'First error', count: 1 },
-        { type: 'log', content: 'some log', count: 1 },
-        { type: 'error', content: 'Second error', count: 3 },
-        { type: 'warn', content: 'a warning', count: 1 },
-        { type: 'error', content: 'Third error', count: 1 },
+        {
+          type: 'error',
+          content: 'First error',
+          count: 1,
+          timestamp: '2025-12-05T00:45:00.000Z',
+        },
+        {
+          type: 'log',
+          content: 'some log',
+          count: 1,
+          timestamp: '2025-12-05T00:45:01.000Z',
+        },
+        {
+          type: 'error',
+          content: 'Second error',
+          count: 3,
+          timestamp: '2025-12-05T00:45:02.000Z',
+        },
+        {
+          type: 'warn',
+          content: 'a warning',
+          count: 1,
+          timestamp: '2025-12-05T00:45:03.000Z',
+        },
+        {
+          type: 'error',
+          content: 'Third error',
+          count: 1,
+          timestamp: '2025-12-05T00:45:04.000Z',
+        },
       ];
 
       vi.mocked(useConsoleMessages).mockReturnValue({

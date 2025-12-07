@@ -561,6 +561,7 @@ export const AppContainer = (props: AppContainerProps) => {
         type: 'error',
         content: String(errorMessage),
         count: 1,
+        timestamp: new Date().toISOString(),
       });
     };
     appEvents.on(AppEvent.LogError, logErrorHandler);
