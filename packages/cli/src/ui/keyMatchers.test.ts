@@ -73,6 +73,9 @@ describe('keyMatchers', () => {
     [Command.PAGE_DOWN]: (key: Key) => key.name === 'pagedown',
     [Command.SCROLL_HOME]: (key: Key) => key.name === 'home',
     [Command.SCROLL_END]: (key: Key) => key.name === 'end',
+
+    // Tab navigation
+    [Command.TAB_CYCLE]: (key: Key) => key.ctrl && key.name === 'o',
   };
 
   // Test data for each command with positive and negative test cases
@@ -272,6 +275,13 @@ describe('keyMatchers', () => {
       command: Command.TOGGLE_SHELL_INPUT_FOCUS,
       positive: [createKey('f', { ctrl: true })],
       negative: [createKey('f')],
+    },
+
+    // Tab navigation
+    {
+      command: Command.TAB_CYCLE,
+      positive: [createKey('o', { ctrl: true })],
+      negative: [createKey('o'), createKey('p', { ctrl: true })],
     },
   ];
 

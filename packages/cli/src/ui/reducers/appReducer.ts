@@ -5,6 +5,7 @@
  */
 
 import { HistoryItem } from '../types.js';
+import type { TabId } from '../contexts/UIStateContext.js';
 
 export type AppAction =
   | {
@@ -42,7 +43,8 @@ export type AppAction =
   | { type: 'SET_THEME_ERROR'; payload: string | null }
   | { type: 'SET_AUTH_ERROR'; payload: string | null }
   | { type: 'SET_EDITOR_ERROR'; payload: string | null }
-  | { type: 'INCREMENT_HISTORY_REMOUNT_KEY' };
+  | { type: 'INCREMENT_HISTORY_REMOUNT_KEY' }
+  | { type: 'SET_ACTIVE_TAB'; payload: TabId };
 
 export interface AppState {
   openDialogs: {
@@ -67,6 +69,7 @@ export interface AppState {
     baseTimestamp: number;
   } | null;
   historyRemountKey: number;
+  activeTab: TabId;
 }
 
 export const initialAppState: AppState = {
@@ -89,6 +92,7 @@ export const initialAppState: AppState = {
   },
   lastAddItemAction: null,
   historyRemountKey: 0,
+  activeTab: 'chat',
 };
 
 export function appReducer(state: AppState, action: AppAction): AppState {
@@ -167,6 +171,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         historyRemountKey: state.historyRemountKey + 1,
+      };
+
+    case 'SET_ACTIVE_TAB':
+      return {
+        ...state,
+        activeTab: action.payload,
       };
 
     default:

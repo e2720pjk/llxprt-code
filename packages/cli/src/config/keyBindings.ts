@@ -69,6 +69,9 @@ export enum Command {
   PAGE_DOWN = 'pageDown',
   SCROLL_HOME = 'scrollHome',
   SCROLL_END = 'scrollEnd',
+
+  // Tab navigation
+  TAB_CYCLE = 'tabCycle',
 }
 
 /**
@@ -188,4 +191,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.PAGE_DOWN]: [{ key: 'pagedown' }],
   [Command.SCROLL_HOME]: [{ key: 'home' }],
   [Command.SCROLL_END]: [{ key: 'end' }],
+
+  // Tab navigation
+  [Command.TAB_CYCLE]: [{ key: 'o', ctrl: true }],
 };

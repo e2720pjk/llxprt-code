@@ -11,6 +11,7 @@ import { type FolderTrustChoice } from '../components/FolderTrustDialog.js';
 import { type AuthType, type EditorType } from '@vybestack/llxprt-code-core';
 import { type SettingScope } from '../../config/settings.js';
 import type { HistoryItem } from '../types.js';
+import type { TabId } from './UIStateContext.js';
 
 /**
  * UI Actions shape for the AppContainer architecture.
@@ -132,6 +133,9 @@ export interface UIActions {
 
   // Cancel ongoing request
   cancelOngoingRequest?: () => void;
+
+  // Tab management
+  setActiveTab: (tabId: TabId) => void;
 }
 
 const UIActionsContext = createContext<UIActions | undefined>(undefined);

@@ -73,6 +73,7 @@ describe('useEditorSettings', () => {
       },
       lastAddItemAction: null,
       historyRemountKey: 0,
+      activeTab: 'chat',
     };
 
     mockAddItem = vi.fn();

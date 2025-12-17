@@ -30,6 +30,11 @@ import type { SlashCommand, CommandContext } from '../commands/types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 /**
+ * Tab identifier for different UI sections
+ */
+export type TabId = 'chat' | 'debug' | 'todo' | 'system';
+
+/**
  * UI State shape for the AppContainer architecture.
  * This consolidates all UI state that was previously scattered across
  * the monolithic App.tsx component.
@@ -188,6 +193,10 @@ export interface UIState {
   // Hybrid compatibility
   messageQueue: string[];
   userMessages: string[];
+
+  // Tab management
+  activeTab: TabId;
+  tabs: Array<{ id: TabId; label: string; hasUpdates?: boolean }>;
 }
 
 const UIStateContext = createContext<UIState | undefined>(undefined);

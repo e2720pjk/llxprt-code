@@ -10,8 +10,13 @@ import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
+import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
+import { TabBar } from './TabBar.js';
+import { DebugTab } from './tabs/DebugTab.js';
+import { TodoTab } from './tabs/TodoTab.js';
+import { SystemTab } from './tabs/SystemTab.js';
 import { useRenderMode } from '../hooks/useRenderMode.js';
 import { SCROLL_TO_ITEM_END } from './shared/VirtualizedList.js';
 import { ScrollableList } from './shared/ScrollableList.js';
@@ -43,7 +48,10 @@ const keyExtractor = (
 export const MainContent = ({ config }: { config: Config }) => {
   const { version } = useAppContext();
   const uiState = useUIState();
+  const uiActions = useUIActions();
   const renderMode = useRenderMode();
+
+  const { activeTab, tabs } = uiState;
 
   const {
     pendingHistory,
@@ -177,33 +185,58 @@ export const MainContent = ({ config }: { config: Config }) => {
     ],
   );
 
-  if (renderMode === 'virtualized') {
-    return (
-      <ScrollableList
-        hasFocus={!uiState.isEditorDialogOpen}
-        data={virtualizedData}
-        renderItem={renderItem}
-        estimatedItemHeight={getEstimatedItemHeight}
-        keyExtractor={keyExtractor}
-        initialScrollIndex={SCROLL_TO_ITEM_END}
-        initialScrollOffsetInIndex={SCROLL_TO_ITEM_END}
-      />
-    );
-  }
+  // Render tab content based on active tab
+  const renderTabContent = () => {
+    if (activeTab === 'chat') {
+      if (renderMode === 'virtualized') {
+        return (
+          <ScrollableList
+            hasFocus={!uiState.isEditorDialogOpen}
+            data={virtualizedData}
+            renderItem={renderItem}
+            estimatedItemHeight={getEstimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={SCROLL_TO_ITEM_END}
+            initialScrollOffsetInIndex={SCROLL_TO_ITEM_END}
+          />
+        );
+      }
 
-  // Static rendering for screen readers and accessibility
+      // Static rendering for screen readers and accessibility
+      return (
+        <>
+          <Static
+            key={uiState.historyRemountKey}
+            items={[
+              <AppHeader key="app-header" version={version} />,
+              ...staticHistoryItems,
+            ]}
+          >
+            {(item) => item}
+          </Static>
+          {pendingItems}
+        </>
+      );
+    } else if (activeTab === 'debug') {
+      return <DebugTab />;
+    } else if (activeTab === 'todo') {
+      return <TodoTab />;
+    } else if (activeTab === 'system') {
+      return <SystemTab />;
+    }
+
+    // Fallback to chat tab
+    return null;
+  };
+
   return (
-    <>
-      <Static
-        key={uiState.historyRemountKey}
-        items={[
-          <AppHeader key="app-header" version={version} />,
-          ...staticHistoryItems,
-        ]}
-      >
-        {(item) => item}
-      </Static>
-      {pendingItems}
-    </>
+    <Box flexDirection="column">
+      <TabBar
+        tabs={tabs}
+        activeTab={activeTab}
+        onSwitch={uiActions.setActiveTab}
+      />
+      {renderTabContent()}
+    </Box>
   );
 };

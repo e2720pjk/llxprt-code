@@ -36,6 +36,7 @@ describe('appReducer', () => {
         },
         lastAddItemAction: null,
         historyRemountKey: 0,
+        activeTab: 'chat',
       });
     });
 
@@ -583,6 +584,7 @@ describe('appReducer', () => {
         },
         lastAddItemAction: null,
         historyRemountKey: 0,
+        activeTab: 'chat',
       };
 
       // Create a deep copy to compare later

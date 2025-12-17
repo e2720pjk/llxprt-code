@@ -1666,6 +1666,15 @@ export const AppContainer = (props: AppContainerProps) => {
 
     // Nightly flag
     nightly,
+
+    // Tab management
+    activeTab: appState.activeTab,
+    tabs: [
+      { id: 'chat', label: 'Chat' },
+      { id: 'debug', label: 'Debug' },
+      { id: 'todo', label: 'Todo' },
+      { id: 'system', label: 'System' },
+    ],
   };
 
   // Build UIActions object
@@ -1777,6 +1786,11 @@ export const AppContainer = (props: AppContainerProps) => {
 
     // Cancel ongoing request
     cancelOngoingRequest,
+
+    // Tab management
+    setActiveTab: (tabId) => {
+      appDispatch({ type: 'SET_ACTIVE_TAB', payload: tabId });
+    },
   };
 
   return (
