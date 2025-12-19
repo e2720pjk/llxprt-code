@@ -5,6 +5,7 @@
  */
 
 import { HistoryItem } from '../types.js';
+import type { TabId } from '../contexts/UIStateContext.js';
 
 export type AppAction =
   | {
@@ -41,7 +42,13 @@ export type AppAction =
   | { type: 'CLEAR_WARNING'; payload: string }
   | { type: 'SET_THEME_ERROR'; payload: string | null }
   | { type: 'SET_AUTH_ERROR'; payload: string | null }
-  | { type: 'SET_EDITOR_ERROR'; payload: string | null };
+  | { type: 'SET_EDITOR_ERROR'; payload: string | null }
+  | { type: 'INCREMENT_HISTORY_REMOUNT_KEY' }
+  | { type: 'SET_ACTIVE_TAB'; payload: TabId }
+  | {
+      type: 'SET_TAB_HAS_UPDATES';
+      payload: { tabId: TabId; hasUpdates: boolean };
+    };
 
 export interface AppState {
   openDialogs: {
@@ -65,6 +72,9 @@ export interface AppState {
     itemData: Omit<HistoryItem, 'id'>;
     baseTimestamp: number;
   } | null;
+  historyRemountKey: number;
+  activeTab: TabId;
+  tabsWithUpdates: Set<TabId>;
 }
 
 export const initialAppState: AppState = {
@@ -86,6 +96,9 @@ export const initialAppState: AppState = {
     editor: null,
   },
   lastAddItemAction: null,
+  historyRemountKey: 0,
+  activeTab: 'chat',
+  tabsWithUpdates: new Set<TabId>(),
 };
 
 export function appReducer(state: AppState, action: AppAction): AppState {
@@ -159,6 +172,39 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           editor: action.payload,
         },
       };
+
+    case 'INCREMENT_HISTORY_REMOUNT_KEY':
+      return {
+        ...state,
+        historyRemountKey: state.historyRemountKey + 1,
+      };
+
+    case 'SET_ACTIVE_TAB': {
+      const newTabsWithUpdates = new Set(state.tabsWithUpdates);
+      newTabsWithUpdates.delete(action.payload);
+      return {
+        ...state,
+        activeTab: action.payload,
+        tabsWithUpdates: newTabsWithUpdates,
+      };
+    }
+
+    case 'SET_TAB_HAS_UPDATES': {
+      const { tabId, hasUpdates } = action.payload;
+      if (state.activeTab === tabId && hasUpdates) {
+        return state;
+      }
+      const newTabsWithUpdates = new Set(state.tabsWithUpdates);
+      if (hasUpdates) {
+        newTabsWithUpdates.add(tabId);
+      } else {
+        newTabsWithUpdates.delete(tabId);
+      }
+      return {
+        ...state,
+        tabsWithUpdates: newTabsWithUpdates,
+      };
+    }
 
     default:
       return state;

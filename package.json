@@ -39,6 +39,7 @@
     "test": "cross-env VITEST_MAX_THREADS=1 VITEST_MIN_THREADS=1 npm run test --workspaces --if-present",
     "test:ci": "cross-env NODE_OPTIONS=--max-old-space-size=6144 npm run test:ci --workspaces --if-present && npm run test:scripts",
     "test:scripts": "vitest run --config ./scripts/tests/vitest.config.ts",
+    "test:tmux:llxprt": "node scripts/oldui-tmux-harness.js --script scripts/oldui-tmux-script.tabs-cycling.llxprt.json",
     "test:e2e": "cross-env VERBOSE=true KEEP_OUTPUT=true npm run test:integration:sandbox:none",
     "test:integration:all": "npm run test:integration:sandbox:none && npm run test:integration:sandbox:docker && npm run test:integration:sandbox:podman",
     "test:integration:sandbox:none": "cross-env LLXPRT_SANDBOX=false vitest run --root ./integration-tests",

@@ -466,10 +466,10 @@ function VirtualizedList<T>(
   return (
     <Box
       ref={containerRef}
-      overflowY="scroll"
+      {...({ overflowY: 'visible' } as any)} // eslint-disable-line @typescript-eslint/no-explicit-any
       overflowX="hidden"
-      scrollTop={scrollTop}
-      scrollbarThumbColor={props.scrollbarThumbColor ?? 'gray'}
+      {...({ scrollTop } as any)} // eslint-disable-line @typescript-eslint/no-explicit-any
+      {...({ scrollbarThumbColor: props.scrollbarThumbColor ?? 'gray' } as any)} // eslint-disable-line @typescript-eslint/no-explicit-any
       width="100%"
       height="100%"
       flexDirection="column"

@@ -15,7 +15,7 @@ type MouseEventsEnabledSettings = {
 };
 
 export const isMouseEventsEnabled = (
-  renderOptions: Pick<RenderOptions, 'alternateBuffer'>,
+  renderOptions: RenderOptions & { alternateBuffer?: boolean },
   settings: MouseEventsEnabledSettings,
 ): boolean =>
   renderOptions.alternateBuffer === true &&

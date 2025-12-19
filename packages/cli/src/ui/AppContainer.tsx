@@ -42,6 +42,7 @@ import {
 } from '../constants/historyLimits.js';
 import { LoadedSettings, SettingScope } from '../config/settings.js';
 import { ConsolePatcher } from './utils/ConsolePatcher.js';
+import { logBuffer } from './utils/earlyLogBuffer.js';
 import { registerCleanup } from '../utils/cleanup.js';
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useInputHistoryStore } from './hooks/useInputHistoryStore.js';
@@ -102,11 +103,16 @@ import { useFlickerDetector } from './hooks/useFlickerDetector.js';
 import { useMouseSelection } from './hooks/useMouseSelection.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 import { globalOAuthUI } from '../auth/global-oauth-ui.js';
-import { UIStateProvider, type UIState } from './contexts/UIStateContext.js';
+import {
+  UIStateProvider,
+  type UIState,
+  type TabId,
+} from './contexts/UIStateContext.js';
 import {
   UIActionsProvider,
   type UIActions,
 } from './contexts/UIActionsContext.js';
+import { AppContext } from './contexts/AppContext.js';
 import { DefaultAppLayout } from './layouts/DefaultAppLayout.js';
 import {
   disableBracketedPaste,
@@ -152,6 +158,33 @@ export const AppContainer = (props: AppContainerProps) => {
     appState,
     appDispatch,
   } = props;
+
+  const tabs = useMemo(
+    (): Array<{ id: TabId; label: string; hasUpdates?: boolean }> => [
+      {
+        id: 'chat',
+        label: 'Chat',
+        hasUpdates: appState.tabsWithUpdates.has('chat'),
+      },
+      {
+        id: 'debug',
+        label: 'Debug',
+        hasUpdates: appState.tabsWithUpdates.has('debug'),
+      },
+      {
+        id: 'todo',
+        label: 'Todo',
+        hasUpdates: appState.tabsWithUpdates.has('todo'),
+      },
+      {
+        id: 'system',
+        label: 'System',
+        hasUpdates: appState.tabsWithUpdates.has('system'),
+      },
+    ],
+    [appState.tabsWithUpdates],
+  );
+
   const runtime = useRuntimeApi();
   const isFocused = useFocus();
   const { isNarrow } = useResponsive();
@@ -159,7 +192,14 @@ export const AppContainer = (props: AppContainerProps) => {
   const [updateInfo, setUpdateInfo] = useState<UpdateObject | null>(null);
   const { stdout } = useStdout();
   const { stdin, setRawMode } = useStdin();
-  const nightly = props.version.includes('nightly'); // TODO: Use for nightly-specific features
+
+  const appContextValue = useMemo(
+    () => ({
+      version: props.version,
+      startupWarnings,
+    }),
+    [props.version, startupWarnings],
+  );
   const historyLimits = useMemo(
     () => ({
       maxItems:
@@ -243,6 +283,13 @@ export const AppContainer = (props: AppContainerProps) => {
   });
 
   useEffect(() => {
+    // Drain early logs that happened before AppContainer mounted
+    const earlyLogs = logBuffer.drain();
+    if (earlyLogs.length > 0) {
+      // We can't batch efficiently here without exposing dispatch, but we can iterate
+      earlyLogs.forEach((log) => handleNewMessage({ ...log, isEarly: true }));
+    }
+
     const consolePatcher = new ConsolePatcher({
       onNewMessage: handleNewMessage,
       debugMode: config.getDebugMode(),
@@ -1183,6 +1230,14 @@ export const AppContainer = (props: AppContainerProps) => {
     [handleSlashCommand],
   );
 
+  const setActiveTab = useCallback(
+    (tabId: TabId) => {
+      appDispatch({ type: 'SET_ACTIVE_TAB', payload: tabId });
+      refreshStatic();
+    },
+    [appDispatch, refreshStatic],
+  );
+
   const handleSettingsRestart = useCallback(() => {
     handleSlashCommand('/quit');
   }, [handleSlashCommand]);
@@ -1229,8 +1284,15 @@ export const AppContainer = (props: AppContainerProps) => {
         setConstrainHeight(true);
       }
 
-      if (keyMatchers[Command.SHOW_ERROR_DETAILS](key)) {
-        setShowErrorDetails((prev) => !prev);
+      if (keyMatchers[Command.TAB_CYCLE](key)) {
+        const nextTab = (() => {
+          const currentIndex = tabs.findIndex(
+            (t) => t.id === appState.activeTab,
+          );
+          const nextIndex = (currentIndex + 1) % tabs.length;
+          return tabs[nextIndex].id;
+        })();
+        setActiveTab(nextTab);
       } else if (keyMatchers[Command.TOGGLE_MOUSE_EVENTS](key)) {
         const nextActive = !isMouseEventsActive();
         setMouseEventsActive(nextActive);
@@ -1268,7 +1330,6 @@ export const AppContainer = (props: AppContainerProps) => {
     [
       constrainHeight,
       setConstrainHeight,
-      setShowErrorDetails,
       showToolDescriptions,
       setShowToolDescriptions,
       config,
@@ -1286,6 +1347,9 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelOngoingRequest,
       addItem,
       settings.merged.debugKeystrokeLogging,
+      setActiveTab,
+      appState.activeTab,
+      tabs,
     ],
   );
 
@@ -1524,8 +1588,11 @@ export const AppContainer = (props: AppContainerProps) => {
     // History and streaming
     history,
     pendingHistoryItems,
+    pendingHistory: pendingHistoryItems,
     streamingState,
     thought,
+    activeShellPtyId: null,
+    historyRemountKey: appState.historyRemountKey,
 
     // Input buffer
     buffer,
@@ -1643,6 +1710,13 @@ export const AppContainer = (props: AppContainerProps) => {
 
     // Available terminal height for content (after footer measurement)
     availableTerminalHeight,
+
+    // Tab management
+    activeTab: appState.activeTab,
+    tabs,
+
+    version: props.version,
+    nightly: props.version.includes('nightly'),
   };
 
   // Build UIActions object
@@ -1750,23 +1824,28 @@ export const AppContainer = (props: AppContainerProps) => {
 
     // Cancel ongoing request
     cancelOngoingRequest,
+
+    // Tab management
+    setActiveTab,
   };
 
   return (
-    <UIStateProvider value={uiState}>
-      <UIActionsProvider value={uiActions}>
-        <DefaultAppLayout
-          config={config}
-          settings={settings}
-          startupWarnings={startupWarnings}
-          version={props.version}
-          nightly={nightly}
-          mainControlsRef={mainControlsRef}
-          availableTerminalHeight={availableTerminalHeight}
-          contextFileNames={contextFileNames}
-          updateInfo={updateInfo}
-        />
-      </UIActionsProvider>
-    </UIStateProvider>
+    <AppContext.Provider value={appContextValue}>
+      <UIStateProvider value={uiState}>
+        <UIActionsProvider value={uiActions}>
+          <DefaultAppLayout
+            config={config}
+            settings={settings}
+            startupWarnings={startupWarnings}
+            version={props.version}
+            nightly={props.version.includes('nightly')}
+            mainControlsRef={mainControlsRef}
+            availableTerminalHeight={availableTerminalHeight}
+            contextFileNames={contextFileNames}
+            updateInfo={updateInfo}
+          />
+        </UIActionsProvider>
+      </UIStateProvider>
+    </AppContext.Provider>
   );
 };

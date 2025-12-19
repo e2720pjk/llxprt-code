@@ -217,6 +217,9 @@ function compileMatcher(step) {
     const flags = typeof step.regexFlags === 'string' ? step.regexFlags : '';
     return { kind: 'regex', value: new RegExp(step.regex, flags) };
   }
+  if (typeof step.notContains === 'string') {
+    return { kind: 'notContains', value: step.notContains };
+  }
   throw new Error(
     `Matcher requires "contains" or "regex": ${JSON.stringify(step)}`,
   );
@@ -226,12 +229,18 @@ function matchText(text, matcher) {
   if (matcher.kind === 'contains') {
     return text.includes(matcher.value);
   }
+  if (matcher.kind === 'notContains') {
+    return !text.includes(matcher.value);
+  }
   return matcher.value.test(text);
 }
 
 function formatMatcher(matcher) {
   if (matcher.kind === 'contains') {
     return `contains "${matcher.value}"`;
+  }
+  if (matcher.kind === 'notContains') {
+    return `notContains "${matcher.value}"`;
   }
   return `regex /${matcher.value.source}/${matcher.value.flags}`;
 }
@@ -468,7 +477,7 @@ async function runScriptSteps({ sessionName, outDir, steps, defaults }) {
     }
 
     try {
-      switch (step.type) {
+      switch (step.type ?? step.action) {
         case 'wait': {
           const ms = Number(step.ms ?? 0);
           if (!Number.isFinite(ms) || ms < 0) {

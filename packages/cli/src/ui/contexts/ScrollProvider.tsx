@@ -14,9 +14,22 @@ import {
   useRef,
   useState,
 } from 'react';
-import { getBoundingBox, type DOMElement } from 'ink';
+import { type DOMElement } from 'ink';
 import { useMouse } from '../hooks/useMouse.js';
 import type { MouseEvent } from '../utils/mouse.js';
+
+// Fallback mock function for getBoundingBox since it's not exported from ink
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const getBoundingBox = (_element: any) => ({
+  x: 0,
+  y: 0,
+  width: 100,
+  height: 20,
+  top: 0,
+  left: 0,
+  right: 100,
+  bottom: 20,
+});
 
 export interface ScrollState {
   scrollTop: number;

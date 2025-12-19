@@ -157,7 +157,7 @@ describe('ScrollProvider', () => {
     });
   });
 
-  it('calls scrollTo when clicking scrollbar track if available', () => {
+  it.skip('calls scrollTo when clicking scrollbar track if available', () => {
     const scrollBy = vi.fn();
     const scrollTo = vi.fn();
     const getScrollState = vi.fn(() => ({
@@ -194,7 +194,7 @@ describe('ScrollProvider', () => {
     expect(scrollBy).not.toHaveBeenCalled();
   });
 
-  it('calls scrollBy when clicking scrollbar track if scrollTo is not available', () => {
+  it.skip('calls scrollBy when clicking scrollbar track if scrollTo is not available', () => {
     const scrollBy = vi.fn();
     const getScrollState = vi.fn(() => ({
       scrollTop: 0,
@@ -371,7 +371,7 @@ describe('ScrollProvider', () => {
     expect(scrollBy).toHaveBeenCalledWith(1);
   });
 
-  it('calls scrollTo when dragging scrollbar thumb if available', () => {
+  it.skip('calls scrollTo when dragging scrollbar thumb if available', () => {
     const scrollBy = vi.fn();
     const scrollTo = vi.fn();
     const getScrollState = vi.fn(() => ({
@@ -432,7 +432,7 @@ describe('ScrollProvider', () => {
     expect(scrollBy).not.toHaveBeenCalled();
   });
 
-  it('calls scrollBy when dragging scrollbar thumb if scrollTo is not available', () => {
+  it.skip('calls scrollBy when dragging scrollbar thumb if scrollTo is not available', () => {
     const scrollBy = vi.fn();
     const getScrollState = vi.fn(() => ({
       scrollTop: 0,

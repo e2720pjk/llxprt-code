@@ -16,11 +16,9 @@ import {
   tildeifyPath,
   tokenLimit,
 } from '@vybestack/llxprt-code-core';
-import { ConsoleSummaryDisplay } from './ConsoleSummaryDisplay.js';
 import process from 'node:process';
 import Gradient from 'ink-gradient';
 import { useRuntimeApi } from '../contexts/RuntimeContext.js';
-import { DebugProfiler } from './DebugProfiler.js';
 import { useResponsive } from '../hooks/useResponsive.js';
 import { truncateMiddle } from '../utils/responsive.js';
 
@@ -230,9 +228,13 @@ export const Footer = React.memo<FooterProps>(
     model,
     targetDir,
     branchName,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     debugMode,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     debugMessage,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     errorCount,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     showErrorDetails,
     showMemoryUsage,
     historyTokenCount,
@@ -298,14 +300,6 @@ export const Footer = React.memo<FooterProps>(
             )}
             {isTrustedFolder === false && (
               <Text color={SemanticColors.status.warning}> (untrusted)</Text>
-            )}
-            {debugMode && (
-              <>
-                <DebugProfiler />
-                <Text color={SemanticColors.status.error}>
-                  {' ' + (debugMessage || '--debug')}
-                </Text>
-              </>
             )}
             {vimMode && (
               <Text color={SemanticColors.text.secondary}>[{vimMode}] </Text>
@@ -492,14 +486,6 @@ export const Footer = React.memo<FooterProps>(
                   </Text>
                 </>
               )}
-
-              {/* Show error count */}
-              {!showErrorDetails && errorCount > 0 && (
-                <>
-                  <Text color={SemanticColors.text.secondary}> | </Text>
-                  <ConsoleSummaryDisplay errorCount={errorCount} />
-                </>
-              )}
             </Box>
           )}
         </Box>
@@ -523,6 +509,5 @@ export const Footer = React.memo<FooterProps>(
     prevProps.vimMode === nextProps.vimMode &&
     prevProps.contextLimit === nextProps.contextLimit &&
     prevProps.isTrustedFolder === nextProps.isTrustedFolder,
-  // Ignore rapidly changing values - TPM, wait time, and session tokens
 );
 Footer.displayName = 'Footer';

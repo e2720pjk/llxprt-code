@@ -12,6 +12,7 @@ import {
   type AppAction,
 } from './appReducer.js';
 import type { HistoryItem } from '../types.js';
+import { type TabId } from '../contexts/UIStateContext.js';
 
 describe('appReducer', () => {
   describe('initial state', () => {
@@ -35,6 +36,9 @@ describe('appReducer', () => {
           editor: null,
         },
         lastAddItemAction: null,
+        historyRemountKey: 0,
+        activeTab: 'chat' as const,
+        tabsWithUpdates: new Set<TabId>(),
       });
     });
 
@@ -580,6 +584,9 @@ describe('appReducer', () => {
           editor: null,
         },
         lastAddItemAction: null,
+        historyRemountKey: 0,
+        activeTab: 'chat' as const,
+        tabsWithUpdates: new Set<TabId>(),
       };
 
       // Create a deep copy to compare later

@@ -1,0 +1,120 @@
+{
+  "tmux": {
+    "cols": 120,
+    "rows": 100,
+    "historyLimit": 50000,
+    "initialWaitMs": 10000
+  },
+  "yolo": false,
+  "steps": [
+    {
+      "type": "wait",
+      "ms": 2000
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "Chat"
+    },
+    {
+      "type": "line",
+      "text": "/todo add Finish the integration",
+      "submitKeys": ["Enter"]
+    },
+    {
+      "type": "wait",
+      "ms": 10000
+    },
+    {
+      "type": "capture",
+      "label": "chat-after-todo-add",
+      "scope": "screen"
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "notContains": "↳ todowrite"
+    },
+    {
+      "type": "key",
+      "key": "C-o"
+    },
+    {
+      "type": "wait",
+      "ms": 2000
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "Debug"
+    },
+    {
+      "type": "key",
+      "key": "C-o"
+    },
+    {
+      "type": "wait",
+      "ms": 3000
+    },
+    {
+      "type": "capture",
+      "label": "todo-tab-content",
+      "scope": "screen"
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "Chat"
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "Todo"
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "Todo Progress"
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "No tasks yet."
+    },
+    {
+      "type": "key",
+      "key": "C-o"
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "System"
+    },
+    {
+      "type": "key",
+      "key": "C-o"
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "Chat"
+    },
+    {
+      "type": "line",
+      "text": "/quit",
+      "submitKeys": ["Enter"]
+    },
+    {
+      "type": "waitForExit",
+      "timeoutMs": 15000
+    }
+  ]
+}

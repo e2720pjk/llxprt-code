@@ -8,8 +8,9 @@ import React, { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { useTodoContext } from '../contexts/TodoContext.js';
 import { useToolCallContext } from '../contexts/ToolCallContext.js';
+import { useUIState } from '../contexts/UIStateContext.js';
 import { useResponsive } from '../hooks/useResponsive.js';
-import { SemanticColors } from '../colors.js';
+import { SemanticColors, Colors } from '../colors.js';
 import {
   Todo as CoreTodo,
   Subtask,
@@ -17,14 +18,26 @@ import {
 } from '@vybestack/llxprt-code-core';
 import { groupToolCalls, type GroupedToolCall } from './todo-utils.js';
 import { truncateEnd } from '../utils/responsive.js';
-import { useTerminalSize } from '../hooks/useTerminalSize.js';
 
-interface Todo extends CoreTodo {
+export interface Todo extends CoreTodo {
   subtasks?: Subtask[];
 }
 
+export type TodoPanelItem =
+  | { type: 'header' }
+  | { type: 'todo-header' }
+  | { type: 'no-todos' }
+  | { type: 'summary'; todos: Todo[] }
+  | {
+      type: 'todo-item';
+      todo: Todo;
+      allToolCalls: TodoToolCall[];
+      abbreviated?: boolean;
+    };
+
 interface TodoPanelProps {
   width: number;
+  showBorder?: boolean;
 }
 
 interface UseVerticalResponsiveReturn {
@@ -33,17 +46,16 @@ interface UseVerticalResponsiveReturn {
 }
 
 function useVerticalResponsive(): UseVerticalResponsiveReturn {
-  const { rows } = useTerminalSize();
-  // Reserve space for header, footer, and input prompt (roughly 8 lines)
-  const reservedSpace = 8;
-  const maxItems = Math.max(1, rows - reservedSpace);
-
-  // Add debug logging
-  // const debugLogger = new DebugLogger('llxprt:ui:todo-panel');
-  // debugLogger.debug(`Terminal height: ${rows}, max items: ${maxItems}`);
+  const { availableTerminalHeight, terminalHeight } = useUIState();
+  // We use availableTerminalHeight which already accounts for footer and extra space.
+  // We subtract a bit more for the Todo Tab's own header/AppHeader.
+  const maxItems = Math.max(
+    1,
+    Math.floor((availableTerminalHeight || terminalHeight || 20) - 4),
+  );
 
   return {
-    height: rows,
+    height: terminalHeight,
     maxItems,
   };
 }
@@ -88,7 +100,7 @@ const formatParameters = (parameters: Record<string, unknown>): string => {
   return paramStrings.join(', ');
 };
 
-const renderToolCall = (
+export const renderToolCall = (
   toolCall: TodoToolCall,
   count: number = 1,
   indent: string = '    ',
@@ -112,7 +124,7 @@ const renderToolCall = (
   );
 };
 
-const renderTodoSummary = (todos: Todo[]): React.ReactElement[] => {
+export const renderTodoSummary = (todos: Todo[]): React.ReactElement[] => {
   const elements: React.ReactElement[] = [];
   const completed = todos.filter((t) => t.status === 'completed').length;
   const inProgress = todos.filter((t) => t.status === 'in_progress').length;
@@ -163,7 +175,7 @@ const renderTodoSummary = (todos: Todo[]): React.ReactElement[] => {
   return elements;
 };
 
-const renderTodoAbbreviated = (
+export const renderTodoAbbreviated = (
   todo: Todo,
   availableWidth: number,
 ): React.ReactElement[] => {
@@ -216,7 +228,7 @@ const renderTodoAbbreviated = (
   return elements;
 };
 
-const renderTodo = (
+export const renderTodo = (
   todo: Todo,
   allToolCalls: TodoToolCall[],
 ): React.ReactElement[] => {
@@ -344,7 +356,10 @@ const renderTodo = (
   return elements;
 };
 
-const TodoPanelComponent: React.FC<TodoPanelProps> = ({ width }) => {
+const TodoPanelComponent: React.FC<TodoPanelProps> = ({
+  width,
+  showBorder = true,
+}) => {
   const { todos } = useTodoContext();
   const { getExecutingToolCalls, subscribe } = useToolCallContext();
   const { isNarrow, isStandard, isWide } = useResponsive();
@@ -500,10 +515,10 @@ const TodoPanelComponent: React.FC<TodoPanelProps> = ({ width }) => {
       key={`todo-panel-${contentKey}`} // Force re-render by changing key when content changes
       flexDirection="column"
       width={width}
-      borderStyle="round"
-      borderColor={SemanticColors.text.accent}
-      paddingX={1}
-      paddingY={1}
+      borderStyle={showBorder ? 'round' : undefined}
+      borderColor={Colors.AccentYellow}
+      paddingX={showBorder ? 1 : 0}
+      paddingY={showBorder ? 1 : 0}
     >
       {allElements}
     </Box>

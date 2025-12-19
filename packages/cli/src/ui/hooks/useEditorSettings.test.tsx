@@ -25,6 +25,7 @@ import {
 } from '@vybestack/llxprt-code-core';
 import { AppDispatchProvider } from '../contexts/AppDispatchContext.js';
 import { type AppState, type AppAction } from '../reducers/appReducer.js';
+import { type TabId } from '../contexts/UIStateContext.js';
 
 vi.mock('@vybestack/llxprt-code-core', async () => {
   const actual = await vi.importActual('@vybestack/llxprt-code-core');
@@ -72,6 +73,9 @@ describe('useEditorSettings', () => {
         editor: null,
       },
       lastAddItemAction: null,
+      historyRemountKey: 0,
+      activeTab: 'chat' as const,
+      tabsWithUpdates: new Set<TabId>(),
     };
 
     mockAddItem = vi.fn();

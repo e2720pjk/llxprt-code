@@ -1,0 +1,127 @@
+{
+  "tmux": {
+    "cols": 120,
+    "rows": 40,
+    "historyLimit": 50000,
+    "scrollbackLines": 5000,
+    "initialWaitMs": 8000
+  },
+  "yolo": false,
+  "steps": [
+    {
+      "type": "wait",
+      "ms": 2000
+    },
+    {
+      "type": "capture",
+      "label": "initial-screen",
+      "scope": "screen"
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "Chat"
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "Debug"
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "Todo"
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "System"
+    },
+    {
+      "type": "capture",
+      "label": "before-tab-cycle",
+      "scope": "screen"
+    },
+    {
+      "type": "key",
+      "key": "C-o"
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "capture",
+      "label": "after-first-ctrl-o",
+      "scope": "screen"
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "Debug"
+    },
+    {
+      "type": "key",
+      "key": "C-o"
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "capture",
+      "label": "after-second-ctrl-o",
+      "scope": "screen"
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "Todo"
+    },
+    {
+      "type": "key",
+      "key": "C-o"
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "capture",
+      "label": "after-third-ctrl-o",
+      "scope": "screen"
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "System"
+    },
+    {
+      "type": "key",
+      "key": "C-o"
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "capture",
+      "label": "after-fourth-ctrl-o-wraparound",
+      "scope": "screen"
+    },
+    {
+      "type": "expect",
+      "scope": "screen",
+      "contains": "Chat"
+    },
+    {
+      "type": "line",
+      "text": "/quit",
+      "submitKeys": ["Enter"]
+    },
+    {
+      "type": "waitForExit",
+      "timeoutMs": 15000
+    }
+  ]
+}
