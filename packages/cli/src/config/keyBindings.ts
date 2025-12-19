@@ -69,6 +69,9 @@ export enum Command {
   // Debugging/Terminal fixes
   REFRESH_KEYPRESS = 'refreshKeypress',
   TOGGLE_MOUSE_EVENTS = 'toggleMouseEvents',
+
+  // Tab navigation
+  TAB_CYCLE = 'tabCycle',
 }
 
 /**
@@ -198,4 +201,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
     { key: '\\', ctrl: true },
     { sequence: '\x1c' },
   ],
+
+  // Tab navigation
+  [Command.TAB_CYCLE]: [{ key: 'o', ctrl: true }],
 };

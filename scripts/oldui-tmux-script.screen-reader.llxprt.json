@@ -1,0 +1,32 @@
+{
+  "startCommand": ["node", "scripts/start.js", "--screen-reader"],
+  "steps": [
+    {
+      "step": 1,
+      "action": "waitFor",
+      "regex": "Current Tab:",
+      "timeoutMs": 15000,
+      "description": "Wait for Screen Reader simplified tab indicator"
+    },
+    {
+      "step": 2,
+      "action": "waitFor",
+      "regex": "Error Count:",
+      "timeoutMs": 5000,
+      "description": "Wait for Screen Reader simplified footer element"
+    },
+    {
+      "step": 3,
+      "action": "capture",
+      "scope": "screen",
+      "label": "screen-reader-mode",
+      "description": "Capture screen to verify simple footer and tab indicator"
+    },
+    {
+      "step": 4,
+      "action": "send_keys",
+      "keys": ["C-c"],
+      "description": "Exit"
+    }
+  ]
+}

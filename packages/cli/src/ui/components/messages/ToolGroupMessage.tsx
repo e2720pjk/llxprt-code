@@ -28,6 +28,7 @@ interface ToolGroupMessageProps {
   config: Config;
   isFocused?: boolean;
   showTodoPanel?: boolean;
+  filterTodoTools?: boolean;
 }
 
 const extractCountFromText = (text?: string): number | undefined => {
@@ -88,6 +89,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   config,
   isFocused = true,
   showTodoPanel = true,
+  filterTodoTools = false,
 }) => {
   const { todos } = useTodoContext();
   const { getExecutingToolCalls } = useToolCallContext();
@@ -114,6 +116,13 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     () =>
       toolCalls
         .map((tool) => {
+          if (
+            filterTodoTools &&
+            (isTodoReadTool(tool.name) || isTodoWriteTool(tool.name))
+          ) {
+            return null;
+          }
+
           if (isTodoPanelEnabled) {
             const count = deriveTodoCount(tool, todos.length);
 
@@ -145,7 +154,13 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
           return tool;
         })
         .filter(Boolean) as IndividualToolCallDisplay[],
-    [toolCalls, isTodoPanelEnabled, textualTodoOutput, todos.length],
+    [
+      toolCalls,
+      isTodoPanelEnabled,
+      filterTodoTools,
+      textualTodoOutput,
+      todos.length,
+    ],
   );
 
   // If all tools were filtered out, don't render anything

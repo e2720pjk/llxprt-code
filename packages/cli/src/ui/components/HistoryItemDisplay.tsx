@@ -44,6 +44,7 @@ interface HistoryItemDisplayProps {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   availableTerminalHeightGemini?: number;
+  filterTodoTools?: boolean;
 }
 
 export const HistoryItemDisplay: React.FC<HistoryItemDisplayProps> = ({
@@ -58,6 +59,7 @@ export const HistoryItemDisplay: React.FC<HistoryItemDisplayProps> = ({
   activeShellPtyId: _activeShellPtyId,
   embeddedShellFocused: _embeddedShellFocused,
   availableTerminalHeightGemini: _availableTerminalHeightGemini,
+  filterTodoTools = false,
 }) => {
   const itemForDisplay = useMemo(() => {
     // Skip sanitization for trusted system message types that may contain ANSI codes
@@ -152,6 +154,7 @@ export const HistoryItemDisplay: React.FC<HistoryItemDisplayProps> = ({
           config={config}
           isFocused={isFocused}
           showTodoPanel={showTodoPanel}
+          filterTodoTools={filterTodoTools}
         />
       )}
       {itemForDisplay.type === 'compression' && (

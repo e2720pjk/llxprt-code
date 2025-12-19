@@ -36,8 +36,83 @@ if (wantWarningSuppression && !process.env.NODE_NO_WARNINGS) {
   });
 }
 
+// Polyfill Range for environments that don't have it (e.g. Node.js)
+if (
+  typeof global !== 'undefined' &&
+  typeof (global as unknown as { Range: unknown }).Range === 'undefined'
+) {
+  (global as unknown as { Range: unknown }).Range = class Range {
+    commonAncestorContainer = null;
+    startContainer = null;
+    startOffset = 0;
+    endContainer = null;
+    endOffset = 0;
+    collapsed = true;
+    cloneContents() {
+      return null;
+    }
+    cloneRange() {
+      return new Range();
+    }
+    collapse() {}
+    compareBoundaryPoints() {
+      return 0;
+    }
+    comparePoint() {
+      return 0;
+    }
+    createContextualFragment() {
+      return null;
+    }
+    deleteContents() {}
+    detach() {}
+    extractContents() {
+      return null;
+    }
+    getBoundingClientRect() {
+      return {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+        left: 0,
+      };
+    }
+    getClientRects() {
+      return {
+        length: 0,
+        item: () => null,
+        *[Symbol.iterator]() {},
+      };
+    }
+    insertNode() {}
+    intersectsNode() {
+      return false;
+    }
+    isPointInRange() {
+      return false;
+    }
+    selectNode() {}
+    selectNodeContents() {}
+    setEnd() {}
+    setEndAfter() {}
+    setEndBefore() {}
+    setStart() {}
+    setStartAfter() {}
+    setStartBefore() {}
+    surroundContents() {}
+    toString() {
+      return '';
+    }
+  };
+}
+
 import React, { ErrorInfo, useState, useEffect } from 'react';
 import { render, Box, Text } from 'ink';
+import { logBuffer } from './ui/utils/earlyLogBuffer.js';
 import Spinner from 'ink-spinner';
 import { AppWrapper } from './ui/App.js';
 import { ErrorBoundary } from './ui/components/ErrorBoundary.js';
@@ -425,6 +500,7 @@ export async function main() {
   const consolePatcher = new ConsolePatcher({
     stderr: true,
     debugMode: config.getDebugMode(),
+    onNewMessage: logBuffer.add,
   });
   consolePatcher.patch();
   registerCleanup(consolePatcher.cleanup);

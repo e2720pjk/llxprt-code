@@ -337,6 +337,7 @@ export interface ConsoleMessageItem {
   type: 'log' | 'warn' | 'error' | 'debug' | 'info';
   content: string;
   count: number;
+  isEarly?: boolean;
 }
 
 /**

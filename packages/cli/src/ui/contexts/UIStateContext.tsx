@@ -29,9 +29,14 @@ import type { ShellConfirmationRequest } from '../components/ShellConfirmationDi
 import type { LoadedSettings } from '../../config/settings.js';
 
 /**
+ * Tab identifier for different UI sections
+ */
+export type TabId = 'chat' | 'debug' | 'todo' | 'system';
+
+/**
  * UI State shape for the AppContainer architecture.
  * This consolidates all UI state that was previously scattered across
- * the monolithic App.tsx component.
+ * monolithic App.tsx component.
  */
 export interface UIState {
   // Core app context
@@ -48,8 +53,11 @@ export interface UIState {
   // History and streaming
   history: HistoryItem[];
   pendingHistoryItems: HistoryItemWithoutId[];
+  pendingHistory: HistoryItemWithoutId[];
   streamingState: StreamingState;
   thought: ThoughtSummary | null;
+  activeShellPtyId: number | null;
+  historyRemountKey: number;
 
   // Input buffer
   buffer: TextBuffer;
@@ -174,6 +182,14 @@ export interface UIState {
 
   // Available terminal height for content (after footer measurement)
   availableTerminalHeight: number;
+
+  // Tab management
+  activeTab: TabId;
+  tabs: Array<{ id: TabId; label: string; hasUpdates?: boolean }>;
+
+  // Version info
+  version: string;
+  nightly: boolean;
 }
 
 const UIStateContext = createContext<UIState | undefined>(undefined);

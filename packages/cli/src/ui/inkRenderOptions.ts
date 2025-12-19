@@ -39,5 +39,8 @@ export const inkRenderOptions = (
     isScreenReaderEnabled,
     alternateBuffer: useAlternateBuffer,
     incrementalRendering,
+  } as RenderOptions & {
+    alternateBuffer?: boolean;
+    incrementalRendering?: boolean;
   };
 };
