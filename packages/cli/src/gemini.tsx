@@ -86,6 +86,7 @@ import {
   registerCleanup,
   runExitCleanup,
 } from './utils/cleanup.js';
+import { restoreTerminalModes } from './ui/contexts/KeypressContext.js';
 import { getCliVersion } from './utils/version.js';
 import { validateAuthMethod } from './config/auth.js';
 import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
@@ -414,6 +415,10 @@ export async function main() {
     // Detect and enable Kitty keyboard protocol once at startup.
     detectAndEnableKittyProtocol();
   }
+
+  // Register terminal mode cleanup for focus tracking and bracketed paste
+  registerCleanup(restoreTerminalModes);
+
   if (argv.sessionSummary) {
     registerCleanup(() => {
       const metrics = uiTelemetryService.getMetrics();
