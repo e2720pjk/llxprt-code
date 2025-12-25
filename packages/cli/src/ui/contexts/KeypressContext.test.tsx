@@ -31,6 +31,14 @@ vi.mock('ink', async (importOriginal) => {
   };
 });
 
+vi.mock('fs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('fs')>();
+  return {
+    ...original,
+    writeSync: vi.fn(),
+  };
+});
+
 class MockStdin extends EventEmitter {
   isTTY = true;
   isRaw = false;
@@ -1793,7 +1801,8 @@ describe('Kitty Sequence Parsing', () => {
 
     it('should handle Ctrl+Z by suspending cleanly', async () => {
       const keyHandler = vi.fn();
-      const writeSpy = vi.spyOn(process.stdout, 'write');
+      const fs = await import('fs');
+      const writeSyncSpy = vi.spyOn(fs, 'writeSync');
       const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
 
       stdin.isRaw = false;
@@ -1805,7 +1814,7 @@ describe('Kitty Sequence Parsing', () => {
       });
 
       mockSetRawMode.mockClear();
-      writeSpy.mockClear();
+      writeSyncSpy.mockClear();
 
       // Send Ctrl+Z
       act(() => {
@@ -1823,14 +1832,20 @@ describe('Kitty Sequence Parsing', () => {
       expect(mockSetRawMode).toHaveBeenCalledWith(false);
 
       // Should show cursor and disable bracketed paste
-      expect(writeSpy).toHaveBeenCalledWith('\x1b[?25h'); // Show cursor
-      expect(writeSpy).toHaveBeenCalledWith('\x1b[?2004l'); // Disable bracketed paste
-      expect(writeSpy).toHaveBeenCalledWith('\x1b[?1004l'); // Disable focus tracking
+      expect(writeSyncSpy).toHaveBeenCalledWith(process.stdout.fd, '\x1b[?25h'); // Show cursor
+      expect(writeSyncSpy).toHaveBeenCalledWith(
+        process.stdout.fd,
+        '\x1b[?2004l',
+      ); // Disable bracketed paste
+      expect(writeSyncSpy).toHaveBeenCalledWith(
+        process.stdout.fd,
+        '\x1b[?1004l',
+      ); // Disable focus tracking
 
       // Should send SIGTSTP (not SIGSTOP)
       expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGTSTP');
 
-      writeSpy.mockRestore();
+      writeSyncSpy.mockRestore();
       killSpy.mockRestore();
     });
 

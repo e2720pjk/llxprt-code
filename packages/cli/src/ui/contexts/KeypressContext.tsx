@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'fs';
 import { DebugLogger, type Config } from '@vybestack/llxprt-code-core';
+import { registerCleanup } from '../../utils/cleanup.js';
 import {
   KittySequenceOverflowEvent,
   logKittySequenceOverflow,
@@ -192,6 +194,33 @@ interface KeypressContextValue {
 const KeypressContext = createContext<KeypressContextValue | undefined>(
   undefined,
 );
+
+/**
+ * Restore terminal modes that we enable while running.
+ * This function is called both from React cleanup (on unmount) and from
+ * centralized cleanup system (on process exit/SIGINT/SIGTERM).
+ */
+const restoreTerminalModes = () => {
+  try {
+    fs.writeSync(process.stdout.fd, SHOW_CURSOR);
+  } catch {
+    // Ignore errors during cleanup
+  }
+  try {
+    fs.writeSync(process.stdout.fd, DISABLE_BRACKETED_PASTE);
+  } catch {
+    // Ignore errors during cleanup
+  }
+  try {
+    fs.writeSync(process.stdout.fd, DISABLE_FOCUS_TRACKING);
+  } catch {
+    // Ignore errors during cleanup
+  }
+};
+
+// Register with centralized cleanup system to ensure terminal modes are restored
+// on process exit, SIGINT, SIGTERM, and other termination signals
+registerCleanup(restoreTerminalModes);
 
 export function useKeypressContext() {
   const context = useContext(KeypressContext);
@@ -944,9 +973,7 @@ export function KeypressProvider({
         setRawMode(false);
 
         // Restore cursor and disable terminal modes
-        process.stdout.write(SHOW_CURSOR);
-        process.stdout.write(DISABLE_BRACKETED_PASTE);
-        process.stdout.write(DISABLE_FOCUS_TRACKING);
+        restoreTerminalModes();
 
         // Send SIGTSTP to suspend the process
         process.kill(process.pid, 'SIGTSTP');
@@ -1151,9 +1178,7 @@ export function KeypressProvider({
       // If we exit without running these, the user's terminal can be left with
       // bracketed paste / focus tracking enabled, which makes subsequent shells
       // print escape sequences for mouse/keys.
-      process.stdout.write(SHOW_CURSOR);
-      process.stdout.write(DISABLE_BRACKETED_PASTE);
-      process.stdout.write(DISABLE_FOCUS_TRACKING);
+      restoreTerminalModes();
 
       if (backslashTimeout) {
         clearTimeout(backslashTimeout);
