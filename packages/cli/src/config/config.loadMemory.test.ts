@@ -291,6 +291,7 @@ describe('loadCliConfig memory discovery', () => {
       debug: false,
       prompt: undefined,
       promptInteractive: undefined,
+      outputFormat: undefined,
       allFiles: false,
       showMemoryUsage: false,
       yolo: false,
@@ -317,11 +318,11 @@ describe('loadCliConfig memory discovery', () => {
       loadMemoryFromIncludeDirectories: undefined,
       ideMode: undefined,
       screenReader: undefined,
-      useSmartEdit: undefined,
       sessionSummary: undefined,
       dumponerror: undefined,
       promptWords: [],
       set: undefined,
+      query: undefined,
     };
 
     const { ExtensionEnablementManager, ExtensionStorage } =
