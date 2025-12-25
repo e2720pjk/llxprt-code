@@ -27,12 +27,16 @@ export const useBracketedPaste = () => {
     process.on('exit', cleanup);
     process.on('SIGINT', cleanup);
     process.on('SIGTERM', cleanup);
+    process.on('uncaughtException', cleanup);
+    process.on('unhandledRejection', cleanup);
 
     return () => {
       cleanup();
       process.removeListener('exit', cleanup);
       process.removeListener('SIGINT', cleanup);
       process.removeListener('SIGTERM', cleanup);
+      process.removeListener('uncaughtException', cleanup);
+      process.removeListener('unhandledRejection', cleanup);
     };
   }, []);
 };

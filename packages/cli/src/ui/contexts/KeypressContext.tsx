@@ -22,6 +22,7 @@ import {
 } from 'react';
 import readline from 'node:readline';
 import { PassThrough } from 'node:stream';
+import * as fs from 'fs';
 import {
   BACKSLASH_ENTER_DETECTION_WINDOW_MS,
   CHAR_CODE_ESC,
@@ -58,6 +59,30 @@ export const KITTY_SEQUENCE_TIMEOUT_MS = 50; // Flush incomplete kitty sequences
 export const SINGLE_QUOTE = "'";
 export const DOUBLE_QUOTE = '"';
 const MAX_MOUSE_BUFFER_SIZE = 4096;
+
+/**
+ * Best-effort restore of terminal modes we enable while running.
+ * If we exit without running these, user's terminal can be left with
+ * bracketed paste / focus tracking enabled, which makes subsequent shells
+ * print escape sequences for mouse/keys.
+ */
+export function restoreTerminalModes() {
+  try {
+    fs.writeSync(process.stdout.fd, SHOW_CURSOR);
+  } catch (err) {
+    // Ignore errors during cleanup - terminal may be closed
+  }
+  try {
+    fs.writeSync(process.stdout.fd, DISABLE_BRACKETED_PASTE);
+  } catch (err) {
+    // Ignore errors during cleanup - terminal may be closed
+  }
+  try {
+    fs.writeSync(process.stdout.fd, DISABLE_FOCUS_TRACKING);
+  } catch (err) {
+    // Ignore errors during cleanup - terminal may be closed
+  }
+}
 
 const ALT_KEY_CHARACTER_MAP: Record<string, string> = {
   '\u00E5': 'a',
@@ -944,9 +969,7 @@ export function KeypressProvider({
         setRawMode(false);
 
         // Restore cursor and disable terminal modes
-        process.stdout.write(SHOW_CURSOR);
-        process.stdout.write(DISABLE_BRACKETED_PASTE);
-        process.stdout.write(DISABLE_FOCUS_TRACKING);
+        restoreTerminalModes();
 
         // Send SIGTSTP to suspend the process
         process.kill(process.pid, 'SIGTSTP');
@@ -1148,12 +1171,20 @@ export function KeypressProvider({
       }
 
       // Best-effort restore of terminal modes we enable while running.
-      // If we exit without running these, the user's terminal can be left with
+      // If we exit without running these, user's terminal can be left with
       // bracketed paste / focus tracking enabled, which makes subsequent shells
       // print escape sequences for mouse/keys.
-      process.stdout.write(SHOW_CURSOR);
-      process.stdout.write(DISABLE_BRACKETED_PASTE);
-      process.stdout.write(DISABLE_FOCUS_TRACKING);
+      restoreTerminalModes();
+      try {
+        fs.writeSync(process.stdout.fd, DISABLE_BRACKETED_PASTE);
+      } catch (err) {
+        // Ignore errors during cleanup - terminal may be closed
+      }
+      try {
+        fs.writeSync(process.stdout.fd, DISABLE_FOCUS_TRACKING);
+      } catch (err) {
+        // Ignore errors during cleanup - terminal may be closed
+      }
 
       if (backslashTimeout) {
         clearTimeout(backslashTimeout);
