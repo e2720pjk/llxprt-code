@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'fs';
+
 let detectionComplete = false;
 let protocolSupported = false;
 let protocolEnabled = false;
@@ -61,9 +63,11 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
             protocolSupported = true;
             enableProtocolSequence();
 
-            // Set up cleanup on exit
             process.on('exit', disableProtocol);
+            process.on('SIGINT', disableProtocol);
             process.on('SIGTERM', disableProtocol);
+            process.on('uncaughtException', disableProtocol);
+            process.on('unhandledRejection', disableProtocol);
           }
 
           detectionComplete = true;
@@ -93,10 +97,13 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
 }
 
 function disableProtocol() {
-  if (protocolEnabled) {
-    process.stdout.write('\x1b[<u');
-    protocolEnabled = false;
+  if (!protocolEnabled) {
+    return;
   }
+  protocolEnabled = false;
+  try {
+    fs.writeSync(process.stdout.fd, '\x1b[<u');
+  } catch {}
 }
 
 export function enableSupportedProtocol(): void {
