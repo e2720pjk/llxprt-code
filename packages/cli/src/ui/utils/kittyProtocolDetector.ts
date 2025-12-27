@@ -11,6 +11,7 @@ let protocolEnabled = false;
 function enableProtocolSequence() {
   process.stdout.write('\x1b[>1u');
   protocolEnabled = true;
+  console.error('[DEBUG] Kitty Protocol ENABLED');
 }
 
 /**
@@ -94,8 +95,10 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
 
 function disableProtocol() {
   if (protocolEnabled) {
+    console.error('[DEBUG] Kitty Protocol DISABLE sequence being written');
     process.stdout.write('\x1b[<u');
     protocolEnabled = false;
+    console.error('[DEBUG] Kitty Protocol DISABLED');
   }
 }
 

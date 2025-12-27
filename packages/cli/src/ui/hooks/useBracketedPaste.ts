@@ -18,10 +18,14 @@ import {
  */
 export const useBracketedPaste = () => {
   const cleanup = () => {
+    console.error('[DEBUG] useBracketedPaste cleanup handler called');
     disableBracketedPaste();
   };
 
   useEffect(() => {
+    console.error(
+      '[DEBUG] useBracketedPaste mounted - calling enableBracketedPaste',
+    );
     enableBracketedPaste();
 
     process.on('exit', cleanup);
@@ -29,6 +33,7 @@ export const useBracketedPaste = () => {
     process.on('SIGTERM', cleanup);
 
     return () => {
+      console.error('[DEBUG] useBracketedPaste unmounting - calling cleanup');
       cleanup();
       process.removeListener('exit', cleanup);
       process.removeListener('SIGINT', cleanup);

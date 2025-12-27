@@ -268,6 +268,7 @@ export function KeypressProvider({
     const wasRaw = stdin.isRaw;
     const rawManaged = wasRaw === false;
     if (rawManaged) {
+      console.error('[DEBUG] KeypressContext: Setting raw mode to true');
       setRawMode(true);
     }
 
@@ -1089,14 +1090,20 @@ export function KeypressProvider({
 
     // Handle SIGCONT (process resume after tmux reattach or fg)
     const handleSigcont = () => {
-      if (!rawManaged) return;
+      console.error('[DEBUG] SIGCONT handler triggered');
+      if (!rawManaged) {
+        console.error('[DEBUG] SIGCONT: Skipping (rawManaged=false)');
+        return;
+      }
 
       // Resume stdin and re-enable raw mode
       stdin.resume();
       setRawMode(true);
 
       // Re-send terminal control sequences
+      console.error('[DEBUG] SIGCONT: ENABLE_BRACKETED_PASTE');
       process.stdout.write(ENABLE_BRACKETED_PASTE);
+      console.error('[DEBUG] SIGCONT: ENABLE_FOCUS_TRACKING');
       process.stdout.write(ENABLE_FOCUS_TRACKING);
       enableSupportedProtocol();
 
@@ -1151,8 +1158,11 @@ export function KeypressProvider({
       // If we exit without running these, the user's terminal can be left with
       // bracketed paste / focus tracking enabled, which makes subsequent shells
       // print escape sequences for mouse/keys.
+      console.error('[DEBUG] KeypressContext cleanup: SHOW_CURSOR');
       process.stdout.write(SHOW_CURSOR);
+      console.error('[DEBUG] KeypressContext cleanup: DISABLE_BRACKETED_PASTE');
       process.stdout.write(DISABLE_BRACKETED_PASTE);
+      console.error('[DEBUG] KeypressContext cleanup: DISABLE_FOCUS_TRACKING');
       process.stdout.write(DISABLE_FOCUS_TRACKING);
 
       if (backslashTimeout) {
