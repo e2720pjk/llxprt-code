@@ -290,6 +290,12 @@ export interface ASTEditToolParams {
    * If provided, the tool will verify the file hasn't been modified since this time.
    */
   last_modified?: number;
+
+  /**
+   * Number of replacements expected. Defaults to 1 if not specified.
+   * Use when you want to replace multiple occurrences.
+   */
+  expected_replacements?: number;
 }
 
 // ===== ReadFile Parameter Interface =====
@@ -1596,6 +1602,7 @@ export class ASTEditTool
     oldString: string,
     newString: string,
     isNewFile: boolean,
+    expectedReplacements: number = 1,
   ): string {
     if (isNewFile) {
       return newString;
@@ -1607,8 +1614,30 @@ export class ASTEditTool
       return currentContent;
     }
 
-    // For single replacement, use replace() instead of replaceAll()
-    return currentContent.replace(oldString, newString);
+    if (expectedReplacements === 1) {
+      return currentContent.replace(oldString, () => newString);
+    } else {
+      let result = currentContent;
+      let replacementCount = 0;
+      let searchIndex = 0;
+
+      while (replacementCount < expectedReplacements) {
+        const foundIndex = result.indexOf(oldString, searchIndex);
+        if (foundIndex === -1) {
+          break;
+        }
+
+        result =
+          result.substring(0, foundIndex) +
+          newString +
+          result.substring(foundIndex + oldString.length);
+
+        replacementCount++;
+        searchIndex = foundIndex + newString.length;
+      }
+
+      return result;
+    }
   }
 
   constructor(private readonly config: Config) {
@@ -1626,7 +1655,8 @@ export class ASTEditTool
       **Parameters:**
       - file_path: Absolute path to the file to modify
       - old_string: Text to replace (must match exactly)
-      - new_string: Replacement text`,
+      - new_string: Replacement text
+      - expected_replacements: Number of replacements expected (default: 1)`,
       Kind.Edit,
       {
         properties: {
@@ -1655,6 +1685,12 @@ export class ASTEditTool
             description:
               'Timestamp of the file when last read. Used for concurrency control.',
           },
+          expected_replacements: {
+            type: 'number',
+            description:
+              'Number of replacements expected. Defaults to 1 if not specified. Use when you want to replace multiple occurrences.',
+            minimum: 1,
+          },
         },
         required: ['file_path', 'old_string', 'new_string'],
         type: 'object',
@@ -1679,6 +1715,11 @@ export class ASTEditTool
     if (!workspaceContext.isPathWithinWorkspace(params.file_path)) {
       const directories = workspaceContext.getDirectories();
       return `File path must be within one of the workspace directories: ${directories.join(', ')}`;
+    }
+
+    const expectedReplacements = params.expected_replacements ?? 1;
+    if (params.old_string === '' && expectedReplacements > 1) {
+      return `Cannot perform multiple replacements with empty old_string (would cause infinite loop)`;
     }
 
     return null;
@@ -1719,6 +1760,7 @@ export class ASTEditTool
             params.old_string,
             params.new_string,
             false,
+            params.expected_replacements ?? 1,
           );
         } catch (err) {
           if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
@@ -1733,6 +1775,7 @@ export class ASTEditTool
         ...originalParams,
         old_string: oldContent,
         new_string: modifiedProposedContent,
+        expected_replacements: 1, // Reset to single replacement after manual edit
       }),
     };
   }
@@ -1935,9 +1978,9 @@ class ASTEditToolInvocation
         this.params.file_path,
       );
 
-      // Detect if this is a new file (same logic as apply path)
-      const isNewFile =
-        this.params.old_string === '' && rawCurrentContent === '';
+      // Detect if this is a new file (same logic as apply path: file must not exist)
+      const fileExists = existsSync(this.params.file_path);
+      const isNewFile = this.params.old_string === '' && !fileExists;
 
       // Freshness Check (must run first to prevent stale edits in concurrent scenarios)
       if (
@@ -1976,6 +2019,7 @@ class ASTEditToolInvocation
         this.params.old_string,
         this.params.new_string,
         isNewFile,
+        this.params.expected_replacements ?? 1,
       );
       const astValidation = this.validateASTSyntax(
         this.params.file_path,
@@ -2232,12 +2276,21 @@ class ASTEditToolInvocation
         currentContent,
         normalizedOldString,
       );
+      const expectedReplacements = params.expected_replacements ?? 1;
 
       if (occurrences === 0) {
         error = {
           display: `Failed to edit, could not find string to replace.`,
           raw: `Failed to edit, 0 occurrences found for old_string in ${params.file_path}. No edits made.`,
           type: ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+        };
+      } else if (occurrences !== expectedReplacements) {
+        const occurrenceTerm =
+          expectedReplacements === 1 ? 'occurrence' : 'occurrences';
+        error = {
+          display: `Failed to edit, expected ${expectedReplacements} ${occurrenceTerm} but found ${occurrences}.`,
+          raw: `Failed to edit, Expected ${expectedReplacements} ${occurrenceTerm} but found ${occurrences} for old_string in file: ${params.file_path}`,
+          type: ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
         };
       } else if (normalizedOldString === normalizedNewString) {
         error = {
@@ -2254,6 +2307,7 @@ class ASTEditToolInvocation
           normalizedOldString,
           normalizedNewString,
           isNewFile,
+          params.expected_replacements ?? 1,
         )
       : (currentContent ?? '');
 
@@ -2288,9 +2342,13 @@ class ASTEditToolInvocation
   private countOccurrences(content: string, searchString: string): number {
     if (!searchString) return 0;
 
-    // Since applyReplacement uses String.replace (single replacement),
-    // count occurrences that will actually be replaced (0 or 1)
-    return content.includes(searchString) ? 1 : 0;
+    let count = 0;
+    let pos = content.indexOf(searchString);
+    while (pos !== -1) {
+      count++;
+      pos = content.indexOf(searchString, pos + searchString.length);
+    }
+    return count;
   }
 
   private async readFileContent(): Promise<string> {
