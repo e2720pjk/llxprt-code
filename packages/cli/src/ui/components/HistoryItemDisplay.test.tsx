@@ -76,7 +76,6 @@ describe('<HistoryItemDisplay />', () => {
       osVersion: 'test-os',
       sandboxEnv: 'test-env',
       modelVersion: 'test-model',
-      selectedAuthType: 'test-auth',
       gcpProject: 'test-project',
       keyfile: 'test-keyfile',
       key: 'test-key',
@@ -239,6 +238,63 @@ describe('<HistoryItemDisplay />', () => {
     );
 
     expect(lastFrame()).toMatchSnapshot();
+  });
+
+  it('renders InfoMessage with default icon and color', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: 'info',
+      text: 'Default info message',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Default info message');
+    expect(output).toContain('ℹ');
+  });
+
+  it('renders InfoMessage with custom icon', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: 'info',
+      text: 'Custom icon message',
+      icon: '[OK]',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Custom icon message');
+    expect(output).toContain('[OK]');
+  });
+
+  it('renders InfoMessage with custom color', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: 'info',
+      text: 'Custom color message',
+      color: '#00ff00',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    expect(lastFrame()).toContain('Custom color message');
+  });
+
+  it('renders InfoMessage with no icon (empty string)', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: 'info',
+      text: 'No icon message',
+      icon: '  ',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('No icon message');
+    expect(output).not.toContain('ℹ');
   });
 
   it('should render a truncated gemini_content item', () => {

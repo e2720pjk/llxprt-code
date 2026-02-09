@@ -47,6 +47,10 @@ describe('keyMatchers', () => {
       key.ctrl && !key.shift && key.name === 'n',
     [Command.NAVIGATION_UP]: (key: Key) => !key.shift && key.name === 'up',
     [Command.NAVIGATION_DOWN]: (key: Key) => !key.shift && key.name === 'down',
+    [Command.DIALOG_NAVIGATION_UP]: (key: Key) =>
+      !key.shift && (key.name === 'up' || key.name === 'k'),
+    [Command.DIALOG_NAVIGATION_DOWN]: (key: Key) =>
+      !key.shift && (key.name === 'down' || key.name === 'j'),
     [Command.ACCEPT_SUGGESTION]: (key: Key) =>
       key.name === 'tab' || (key.name === 'return' && !key.ctrl),
     [Command.COMPLETION_UP]: (key: Key) =>
@@ -69,6 +73,8 @@ describe('keyMatchers', () => {
     [Command.TOGGLE_TODO_DIALOG]: (key: Key) => key.ctrl && key.name === 'q',
     [Command.TOGGLE_IDE_CONTEXT_DETAIL]: (key: Key) =>
       key.ctrl && key.name === 'g',
+    [Command.TOGGLE_MARKDOWN]: (key: Key) => key.meta && key.name === 'm',
+    [Command.TOGGLE_COPY_MODE]: (key: Key) => key.ctrl && key.name === 'y',
     [Command.QUIT]: (key: Key) => key.ctrl && key.name === 'c',
     [Command.EXIT]: (key: Key) => key.ctrl && key.name === 'd',
     [Command.SHOW_MORE_LINES]: (key: Key) => key.ctrl && key.name === 's',
@@ -77,6 +83,10 @@ describe('keyMatchers', () => {
       key.name === 'return' && !key.ctrl,
     [Command.ACCEPT_SUGGESTION_REVERSE_SEARCH]: (key: Key) =>
       key.name === 'tab',
+    [Command.TOGGLE_SHELL_INPUT_FOCUS]: (key: Key) =>
+      key.ctrl && key.name === 'f',
+    [Command.EXPAND_SUGGESTION]: (key: Key) => key.name === 'right',
+    [Command.COLLAPSE_SUGGESTION]: (key: Key) => key.name === 'left',
   };
 
   // Test data for each command with positive and negative test cases
@@ -215,6 +225,26 @@ describe('keyMatchers', () => {
       ],
     },
 
+    // Dialog navigation
+    {
+      command: Command.DIALOG_NAVIGATION_UP,
+      positive: [createKey('up'), createKey('k')],
+      negative: [
+        createKey('up', { shift: true }),
+        createKey('k', { shift: true }),
+        createKey('p'),
+      ],
+    },
+    {
+      command: Command.DIALOG_NAVIGATION_DOWN,
+      positive: [createKey('down'), createKey('j')],
+      negative: [
+        createKey('down', { shift: true }),
+        createKey('j', { shift: true }),
+        createKey('n'),
+      ],
+    },
+
     // Auto-completion
     {
       command: Command.ACCEPT_SUGGESTION,
@@ -297,6 +327,11 @@ describe('keyMatchers', () => {
       command: Command.TOGGLE_IDE_CONTEXT_DETAIL,
       positive: [createKey('g', { ctrl: true })],
       negative: [createKey('g'), createKey('t', { ctrl: true })],
+    },
+    {
+      command: Command.TOGGLE_MARKDOWN,
+      positive: [createKey('m', { meta: true })],
+      negative: [createKey('m'), createKey('m', { shift: true })],
     },
     {
       command: Command.QUIT,

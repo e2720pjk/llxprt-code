@@ -9,8 +9,8 @@
 
 import React from 'react';
 import { Box, Text } from 'ink';
-import Gradient from 'ink-gradient';
 import { theme } from '../semantic-colors.js';
+import { Colors } from '../colors.js';
 import { formatDuration } from '../utils/formatters.js';
 import {
   formatTokensPerMinute,
@@ -26,6 +26,7 @@ import {
 } from '../utils/displayUtils.js';
 import { computeSessionStats } from '../utils/computeStats.js';
 import { useRuntimeApi } from '../contexts/RuntimeContext.js';
+import { ThemedGradient } from './ThemedGradient.js';
 
 // A more flexible and powerful StatRow component
 interface StatRowProps {
@@ -143,7 +144,7 @@ const ModelUsageTable: React.FC<{
       ))}
       {cacheEfficiency > 0 && (
         <Box flexDirection="column" marginTop={1}>
-          <Text>
+          <Text color={Colors.Foreground}>
             <Text color={theme.status.success}>Savings Highlight:</Text>{' '}
             {totalCachedTokens.toLocaleString()} ({cacheEfficiency.toFixed(1)}
             %) of input tokens were served from the cache, reducing costs.
@@ -199,9 +200,11 @@ export const StatsDisplay: React.FC<StatsDisplayProps> = ({
   const renderTitle = () => {
     if (title) {
       return theme.ui.gradient && theme.ui.gradient.length > 0 ? (
-        <Gradient colors={theme.ui.gradient}>
-          <Text bold>{title}</Text>
-        </Gradient>
+        <ThemedGradient colors={theme.ui.gradient}>
+          <Text bold color={Colors.Foreground}>
+            {title}
+          </Text>
+        </ThemedGradient>
       ) : (
         <Text bold color={theme.text.accent}>
           {title}
@@ -265,7 +268,7 @@ export const StatsDisplay: React.FC<StatsDisplayProps> = ({
           {files &&
             (files.totalLinesAdded > 0 || files.totalLinesRemoved > 0) && (
               <StatRow title="Code Changes:">
-                <Text>
+                <Text color={Colors.Foreground}>
                   <Text color={theme.status.success}>
                     +{files.totalLinesAdded}
                   </Text>{' '}

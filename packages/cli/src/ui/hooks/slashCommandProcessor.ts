@@ -10,7 +10,7 @@ import process from 'node:process';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
-import type { Config } from '@vybestack/llxprt-code-core';
+import type { Config, Todo } from '@vybestack/llxprt-code-core';
 import {
   GitService,
   Logger,
@@ -33,7 +33,12 @@ import type {
 } from '../types.js';
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { type CommandContext, type SlashCommand } from '../commands/types.js';
+import {
+  type CommandContext,
+  type SlashCommand,
+  type SubagentDialogData,
+  type ModelsDialogData,
+} from '../commands/types.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
@@ -43,6 +48,7 @@ import type {
   ExtensionUpdateState,
   ExtensionUpdateAction,
 } from '../state/extensions.js';
+import { SubagentView } from '../components/SubagentManagement/types.js';
 
 const confirmationLogger = new DebugLogger('llxprt:ui:selection');
 const slashCommandLogger = new DebugLogger('llxprt:ui:slash-commands');
@@ -54,20 +60,31 @@ interface SlashCommandProcessorActions {
   openPrivacyNotice: () => void;
   openSettingsDialog: () => void;
   openLoggingDialog: (data?: { entries: unknown[] }) => void;
-  openProviderModelDialog: () => void;
+  openSubagentDialog: (
+    initialView?: SubagentView,
+    initialName?: string,
+  ) => void;
+  openModelsDialog: (data?: ModelsDialogData) => void;
   openPermissionsDialog: () => void;
   openProviderDialog: () => void;
   openLoadProfileDialog: () => void;
+  openCreateProfileDialog: () => void;
+  openProfileListDialog: () => void;
+  viewProfileDetail: (profileName: string, openedDirectly?: boolean) => void;
+  openProfileEditor: (profileName: string, openedDirectly?: boolean) => void;
   quit: (messages: HistoryItem[]) => void;
   setDebugMessage: (message: string) => void;
   toggleCorgiMode: () => void;
   toggleDebugProfiler: () => void;
   dispatchExtensionStateUpdate: (action: ExtensionUpdateAction) => void;
   addConfirmUpdateExtensionRequest: (request: ConfirmationRequest) => void;
+  openWelcomeDialog: () => void;
 }
 
 /**
  * Hook to define and process slash commands (e.g., /help, /clear).
+ *
+ * @plan PLAN-20260129-TODOPERSIST.P07 - Added todoContext param
  */
 export const useSlashCommandProcessor = (
   config: Config | null,
@@ -82,6 +99,11 @@ export const useSlashCommandProcessor = (
   actions: SlashCommandProcessorActions,
   extensionsUpdateState: Map<string, ExtensionUpdateState>,
   isConfigInitialized: boolean,
+  todoContext?: {
+    todos: Todo[];
+    updateTodos: (todos: Todo[]) => void;
+    refreshTodos: () => void;
+  },
 ) => {
   const session = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[] | undefined>(
@@ -171,7 +193,6 @@ export const useSlashCommandProcessor = (
           osVersion: message.osVersion,
           sandboxEnv: message.sandboxEnv,
           modelVersion: message.modelVersion,
-          selectedAuthType: message.selectedAuthType,
           gcpProject: message.gcpProject,
           keyfile: message.keyfile || '',
           key: message.key || '',
@@ -240,6 +261,11 @@ export const useSlashCommandProcessor = (
     },
     [addItem],
   );
+  /**
+   * @plan PLAN-20260129-TODOPERSIST.P07
+   * @requirement REQ-003, REQ-004, REQ-005, REQ-006
+   * Added todoContext to CommandContext for /todo command integration
+   */
   const commandContext = useMemo(
     (): CommandContext => ({
       services: {
@@ -279,6 +305,7 @@ export const useSlashCommandProcessor = (
         stats: session.stats,
         sessionShellAllowlist,
       },
+      todoContext,
     }),
     [
       alternateBuffer,
@@ -302,6 +329,7 @@ export const useSlashCommandProcessor = (
       setLlxprtMdFileCount,
       reloadCommands,
       extensionsUpdateState,
+      todoContext,
     ],
   );
 
@@ -475,9 +503,6 @@ export const useSlashCommandProcessor = (
                         actions.openLoggingDialog();
                       }
                       return { type: 'handled' };
-                    case 'providerModel':
-                      actions.openProviderModelDialog();
-                      return { type: 'handled' };
                     case 'permissions':
                       actions.openPermissionsDialog();
                       return { type: 'handled' };
@@ -487,7 +512,74 @@ export const useSlashCommandProcessor = (
                     case 'loadProfile':
                       actions.openLoadProfileDialog();
                       return { type: 'handled' };
+                    case 'createProfile':
+                      actions.openCreateProfileDialog();
+                      return { type: 'handled' };
+                    case 'profileList':
+                      slashCommandLogger.log(
+                        () => 'opening profileList dialog',
+                      );
+                      actions.openProfileListDialog();
+                      return { type: 'handled' };
+                    case 'profileDetail':
+                      if (
+                        result.dialogData &&
+                        typeof result.dialogData === 'object' &&
+                        'profileName' in result.dialogData &&
+                        typeof (result.dialogData as { profileName: unknown })
+                          .profileName === 'string'
+                      ) {
+                        const profileName = (
+                          result.dialogData as { profileName: string }
+                        ).profileName;
+                        slashCommandLogger.log(
+                          () => `opening profileDetail for ${profileName}`,
+                        );
+                        // Pass true for openedDirectly since this came from /profile show
+                        actions.viewProfileDetail(profileName, true);
+                      }
+                      return { type: 'handled' };
+                    case 'profileEditor':
+                      if (
+                        result.dialogData &&
+                        typeof result.dialogData === 'object' &&
+                        'profileName' in result.dialogData &&
+                        typeof (result.dialogData as { profileName: unknown })
+                          .profileName === 'string'
+                      ) {
+                        const profileName = (
+                          result.dialogData as { profileName: string }
+                        ).profileName;
+                        slashCommandLogger.log(
+                          () => `opening profileEditor for ${profileName}`,
+                        );
+                        // Pass true for openedDirectly since this came from /profile edit
+                        actions.openProfileEditor(profileName, true);
+                      }
+                      return { type: 'handled' };
                     case 'saveProfile':
+                      return { type: 'handled' };
+                    case 'subagent': {
+                      // Type-safe access via discriminated union - dialogData is SubagentDialogData when dialog is 'subagent'
+                      const subagentData = result.dialogData as
+                        | SubagentDialogData
+                        | undefined;
+                      actions.openSubagentDialog(
+                        subagentData?.initialView,
+                        subagentData?.initialSubagentName,
+                      );
+                      return { type: 'handled' };
+                    }
+                    case 'models': {
+                      // Type-safe access via discriminated union - dialogData is ModelsDialogData when dialog is 'models'
+                      const modelsData = result.dialogData as
+                        | ModelsDialogData
+                        | undefined;
+                      actions.openModelsDialog(modelsData);
+                      return { type: 'handled' };
+                    }
+                    case 'welcome':
+                      actions.openWelcomeDialog();
                       return { type: 'handled' };
                     default: {
                       const unhandled: never = result.dialog;

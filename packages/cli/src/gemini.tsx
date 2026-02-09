@@ -58,13 +58,10 @@ import {
   DnsResolutionOrder,
   LoadedSettings,
   loadSettings,
-  SettingScope,
 } from './config/settings.js';
 import {
   Config,
   sessionId,
-  AuthType,
-  getOauthClient,
   setGitStatsService,
   FatalConfigError,
   JsonFormatter,
@@ -74,8 +71,12 @@ import {
   SettingsService,
   DebugLogger,
   ProfileManager,
+  SessionPersistenceService,
+  type PersistedSession,
+  parseAndFormatApiError,
 } from '@vybestack/llxprt-code-core';
 import { themeManager } from './ui/themes/theme-manager.js';
+import { theme } from './ui/colors.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
@@ -87,7 +88,6 @@ import {
   runExitCleanup,
 } from './utils/cleanup.js';
 import { getCliVersion } from './utils/version.js';
-import { validateAuthMethod } from './config/auth.js';
 import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
 // createProviderManager removed - provider manager now created in loadCliConfig()
 import { runZedIntegration } from './zed-integration/zedIntegration.js';
@@ -95,6 +95,8 @@ import { cleanupExpiredSessions } from './utils/sessionCleanup.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
 import { disableMouseEvents, enableMouseEvents } from './ui/utils/mouse.js';
+import { drainStdinBuffer } from './ui/utils/terminalContract.js';
+import { StdinRawModeManager } from './utils/stdinSafety.js';
 import { checkForUpdates } from './ui/utils/updateCheck.js';
 import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
 import { GitStatsServiceImpl } from './providers/logging/git-stats-service-impl.js';
@@ -114,6 +116,27 @@ import {
   applyCliArgumentOverrides,
 } from './runtime/runtimeSettings.js';
 import { writeFileSync } from 'node:fs';
+
+export function formatNonInteractiveError(error: unknown): string {
+  const formatted = parseAndFormatApiError(error);
+  if (formatted && !formatted.includes('[object Object]')) {
+    return formatted;
+  }
+
+  if (error instanceof Error) {
+    return error.stack ?? error.message;
+  }
+
+  if (error && typeof error === 'object') {
+    try {
+      return JSON.stringify(error, null, 2);
+    } catch {
+      return String(error);
+    }
+  }
+
+  return String(error);
+}
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -142,14 +165,14 @@ const InitializingComponent = ({ initialTotal }: { initialTotal: number }) => {
       setConnected((val) => val + 1);
     };
 
-    appEvents.on('mcp-servers-discovery-start', onStart);
-    appEvents.on('mcp-server-connected', onChange);
-    appEvents.on('mcp-server-error', onChange);
+    appEvents.on(AppEvent.McpServersDiscoveryStart, onStart);
+    appEvents.on(AppEvent.McpServerConnected, onChange);
+    appEvents.on(AppEvent.McpServerError, onChange);
 
     return () => {
-      appEvents.off('mcp-servers-discovery-start', onStart);
-      appEvents.off('mcp-server-connected', onChange);
-      appEvents.off('mcp-server-error', onChange);
+      appEvents.off(AppEvent.McpServersDiscoveryStart, onStart);
+      appEvents.off(AppEvent.McpServerConnected, onChange);
+      appEvents.off(AppEvent.McpServerError, onChange);
     };
   }, []);
 
@@ -157,7 +180,7 @@ const InitializingComponent = ({ initialTotal }: { initialTotal: number }) => {
 
   return (
     <Box>
-      <Text>
+      <Text color={theme.text.primary}>
         <Spinner /> {message}
       </Text>
     </Box>
@@ -217,6 +240,50 @@ export async function startInteractiveUI(
   workspaceRoot: string,
 ) {
   const version = await getCliVersion();
+
+  // Load previous session if --continue flag was used
+  let restoredSession: PersistedSession | null = null;
+  const initialPrompt = config.getQuestion();
+
+  if (config.isContinueSession()) {
+    const persistence = new SessionPersistenceService(
+      config.storage,
+      config.getSessionId(),
+    );
+    restoredSession = await persistence.loadMostRecent();
+
+    if (restoredSession) {
+      const formattedTime =
+        SessionPersistenceService.formatSessionTime(restoredSession);
+
+      if (initialPrompt) {
+        // User provided both --continue and --prompt
+        console.log(chalk.cyan(`Resuming session from ${formattedTime}`));
+        const truncatedPrompt =
+          initialPrompt.length > 50
+            ? `${initialPrompt.slice(0, 50)}...`
+            : initialPrompt;
+        console.log(
+          chalk.dim(
+            `Your prompt "${truncatedPrompt}" will be submitted after session loads.`,
+          ),
+        );
+      } else {
+        console.log(chalk.green(`Resumed session from ${formattedTime}`));
+      }
+    } else {
+      if (initialPrompt) {
+        console.log(
+          chalk.yellow(
+            'No previous session found. Starting fresh with your prompt.',
+          ),
+        );
+      } else {
+        console.log(chalk.yellow('No previous session found. Starting fresh.'));
+      }
+    }
+  }
+
   // Detect and enable Kitty keyboard protocol once at startup
   await detectAndEnableKittyProtocol();
   setWindowTitle(basename(workspaceRoot), settings);
@@ -225,23 +292,12 @@ export async function startInteractiveUI(
   const mouseEventsEnabled = isMouseEventsEnabled(renderOptions, settings);
   if (mouseEventsEnabled) {
     enableMouseEvents();
-    registerCleanup(() => {
+    // Use process.on('exit') instead of registerCleanup because registerCleanup
+    // includes instance.waitUntilExit() which would deadlock on quit.
+    // The 'exit' event fires synchronously during process.exit(). (fixes #959)
+    process.on('exit', () => {
       disableMouseEvents();
     });
-  }
-
-  // Initialize authentication before rendering to ensure geminiClient is available
-  if (settings.merged.selectedAuthType) {
-    try {
-      const err = validateAuthMethod(settings.merged.selectedAuthType);
-      if (err) {
-        console.error('Error validating authentication method:', err);
-        process.exit(1);
-      }
-    } catch (err) {
-      console.error('Error authenticating:', err);
-      process.exit(1);
-    }
   }
 
   const instance = render(
@@ -253,6 +309,7 @@ export async function startInteractiveUI(
             settings={settings}
             startupWarnings={startupWarnings}
             version={version}
+            restoredSession={restoredSession ?? undefined}
           />
         </SettingsContext.Provider>
       </ErrorBoundary>
@@ -260,7 +317,7 @@ export async function startInteractiveUI(
     renderOptions,
   );
 
-  checkForUpdates()
+  checkForUpdates(settings)
     .then((info) => {
       handleAutoUpdate(info, settings, config.getProjectRoot());
     })
@@ -389,26 +446,41 @@ export async function main() {
   }
 
   const wasRaw = process.stdin.isRaw;
+  // Issue #1020: Create stdin manager with error handling to prevent EIO crashes
+  const stdinManager = new StdinRawModeManager({
+    debug: config.getDebugMode(),
+  });
   if (
     config.isInteractive() &&
     !argv.experimentalUi &&
     !wasRaw &&
     process.stdin.isTTY
   ) {
+    // Drain any garbage ANSI sequences that may be in the stdin buffer
+    // before we start processing input. This addresses #199 where garbage
+    // ANSI on startup can disrupt theme selection on some terminals (e.g., OCI).
+    await drainStdinBuffer(process.stdin, 50);
+
     // Set this as early as possible to avoid spurious characters from
     // input showing up in the output.
-    process.stdin.setRawMode(true);
+    // Use stdinManager to safely enable raw mode with EIO error handling (Issue #1020)
+    stdinManager.enable();
 
     // This cleanup isn't strictly needed but may help in certain situations.
     process.on('SIGTERM', async () => {
-      process.stdin.setRawMode(wasRaw);
+      stdinManager.disable(true); // Restore to wasRaw
       await runExitCleanup();
       process.exit(0);
     });
     process.on('SIGINT', async () => {
-      process.stdin.setRawMode(wasRaw);
+      stdinManager.disable(true); // Restore to wasRaw
       await runExitCleanup();
       process.exit(130); // Standard exit code for SIGINT
+    });
+
+    // Register cleanup for the stdin manager to ensure error handler is removed
+    registerCleanup(() => {
+      stdinManager.disable(true);
     });
 
     // Detect and enable Kitty keyboard protocol once at startup.
@@ -501,23 +573,6 @@ export async function main() {
     process.exit(0);
   }
 
-  // Set a default auth type if one isn't set.
-  if (!settings.merged.selectedAuthType) {
-    if (process.env.CLOUD_SHELL === 'true') {
-      settings.setValue(
-        SettingScope.User,
-        'selectedAuthType',
-        AuthType.CLOUD_SHELL,
-      );
-    } else if (process.env.LLXPRT_AUTH_TYPE === 'none') {
-      settings.setValue(
-        SettingScope.User,
-        'selectedAuthType',
-        AuthType.USE_NONE,
-      );
-    }
-  }
-
   setMaxSizedBoxDebugging(config.getDebugMode());
 
   const mcpServers = config.getMcpServers();
@@ -596,6 +651,7 @@ export async function main() {
       );
 
       await switchActiveProvider(configProvider);
+      await config.refreshAuth();
 
       const activeProvider = providerManager.getActiveProvider();
       const configWithCliOverride = config as Config & {
@@ -657,6 +713,21 @@ export async function main() {
       console.error(chalk.red((e as Error).message));
       process.exit(1);
     }
+  } else {
+    // No explicit provider specified - ensure default provider (gemini) is activated
+    // This initializes contentGeneratorConfig to avoid runtime errors on first request
+    try {
+      const defaultProvider =
+        providerManager.getActiveProviderName() || 'gemini';
+      await switchActiveProvider(defaultProvider);
+      await config.refreshAuth();
+    } catch (e) {
+      // Log but don't exit - auth will be triggered lazily on first API call
+      const logger = new DebugLogger('llxprt:gemini');
+      logger.debug(
+        () => `Default provider activation skipped: ${(e as Error).message}`,
+      );
+    }
   }
 
   if (settings.merged.ui?.theme) {
@@ -703,50 +774,76 @@ export async function main() {
         { settingsService: runtimeSettingsService },
       );
 
-      if (
-        settings.merged.selectedAuthType &&
-        !settings.merged.useExternalAuth
-      ) {
-        // Validate authentication here because the sandbox will interfere with the Oauth2 web redirect.
-        try {
-          const err = validateAuthMethod(settings.merged.selectedAuthType);
-          if (err) {
-            throw new Error(err);
-          }
-          await partialConfig.refreshAuth(settings.merged.selectedAuthType);
-
-          // Compression settings are already applied via ephemeral settings in Config
-          // and will be read directly by geminiChat.ts during compression
-        } catch (err) {
-          console.error('Error authenticating:', err);
-          process.exit(1);
-        }
-      }
       let stdinData = '';
       if (hasPipedInput) {
         stdinData = await readStdinOnce();
       }
 
-      // This function is a copy of the one from sandbox.ts
-      // It is moved here to decouple sandbox.ts from the CLI's argument structure.
+      // Inject stdin data into args for the sandbox.
+      // We prepend stdin to the existing prompt (positional or --prompt flag).
+      // This avoids the "Cannot use both positional and --prompt" conflict.
       const injectStdinIntoArgs = (
         args: string[],
         stdinData?: string,
       ): string[] => {
+        if (!stdinData) {
+          return [...args];
+        }
+
         const finalArgs = [...args];
-        if (stdinData) {
-          const promptIndex = finalArgs.findIndex(
-            (arg) => arg === '--prompt' || arg === '-p',
-          );
-          if (promptIndex > -1 && finalArgs.length > promptIndex + 1) {
-            // If there's a prompt argument, prepend stdin to it
-            finalArgs[promptIndex + 1] =
-              `${stdinData}\n\n${finalArgs[promptIndex + 1]}`;
+
+        // Check for --prompt or -p flag first
+        const promptFlagIndex = finalArgs.findIndex(
+          (arg) => arg === '--prompt' || arg === '-p',
+        );
+        if (promptFlagIndex > -1 && finalArgs.length > promptFlagIndex + 1) {
+          // Prepend stdin to the --prompt value
+          finalArgs[promptFlagIndex + 1] =
+            `${stdinData}\n\n${finalArgs[promptFlagIndex + 1]}`;
+          return finalArgs;
+        }
+
+        // Find positional arguments (args after all flags).
+        // Flags can be:
+        // - Boolean flags: --debug, --yolo, --sandbox (no value)
+        // - Value flags: --model gpt4, --key xyz (separate value)
+        // - Combined flags: --model=gpt4, --allowed-tools=run_shell_command(ls) (value in same arg)
+        // Positional args are anything after the last flag that doesn't start with '-'.
+
+        // Start scanning from index 2 (after 'node' and script path).
+        // Find the first argument after index 1 that doesn't start with '-'
+        // and isn't a value for a preceding flag.
+        let positionalStartIndex = -1;
+        for (let i = 2; i < finalArgs.length; i++) {
+          const arg = finalArgs[i];
+          if (arg.startsWith('-')) {
+            // This is a flag. Check if it's a combined flag (contains '=')
+            if (arg.includes('=')) {
+              // Combined flag like --model=gpt4, no separate value to skip
+              continue;
+            }
+            // Check if next arg is a value for this flag (doesn't start with '-')
+            const nextArg = finalArgs[i + 1];
+            if (nextArg && !nextArg.startsWith('-')) {
+              // Skip the value
+              i++;
+            }
           } else {
-            // If there's no prompt argument, add stdin as the prompt
-            finalArgs.push('--prompt', stdinData);
+            // This is a positional argument
+            positionalStartIndex = i;
+            break;
           }
         }
+
+        if (positionalStartIndex > -1) {
+          // There are positional arguments - prepend stdin to the first one
+          finalArgs[positionalStartIndex] =
+            `${stdinData}\n\n${finalArgs[positionalStartIndex]}`;
+          return finalArgs;
+        }
+
+        // No existing prompt - add stdin as a positional argument (not --prompt)
+        finalArgs.push(stdinData);
         return finalArgs;
       };
 
@@ -761,14 +858,6 @@ export async function main() {
       process.exit(exitCode);
     }
     // Note: Non-sandbox memory relaunch is now handled at the top of main()
-  }
-
-  if (
-    settings.merged.selectedAuthType === AuthType.LOGIN_WITH_GOOGLE &&
-    config.isBrowserLaunchSuppressed()
-  ) {
-    // Do oauth before app renders to make copying the link possible.
-    await getOauthClient(settings.merged.selectedAuthType, config);
   }
 
   // Cleanup sessions after config initialization
@@ -857,7 +946,7 @@ export async function main() {
     // the terminal to bun/OpenTUI.
     if (process.stdin.isTTY && process.stdin.isRaw && !wasRaw) {
       try {
-        process.stdin.setRawMode(wasRaw);
+        stdinManager.disable(true); // Restore to wasRaw
       } catch {
         // ignore
       }
@@ -937,7 +1026,7 @@ export async function main() {
     child.on('close', async (code, signal) => {
       if (process.stdin.isTTY && process.stdin.isRaw !== wasRaw) {
         try {
-          process.stdin.setRawMode(wasRaw);
+          stdinManager.disable(true); // Restore to wasRaw
         } catch {
           // ignore
         }
@@ -982,14 +1071,23 @@ export async function main() {
   const prompt_id = Math.random().toString(16).slice(2);
 
   const nonInteractiveConfig = await validateNonInteractiveAuth(
-    settings.merged.selectedAuthType,
     settings.merged.useExternalAuth,
     config,
     settings,
   );
 
+  const hasDeprecatedPromptArg = process.argv.some((arg) =>
+    arg.startsWith('--prompt'),
+  );
+
   try {
-    await runNonInteractive(nonInteractiveConfig, settings, input, prompt_id);
+    await runNonInteractive({
+      config: nonInteractiveConfig,
+      settings,
+      input,
+      prompt_id,
+      hasDeprecatedPromptArg,
+    });
   } catch (error) {
     if (nonInteractiveConfig.getOutputFormat() === OutputFormat.JSON) {
       const formatter = new JsonFormatter();
@@ -997,8 +1095,7 @@ export async function main() {
         error instanceof Error ? error : new Error(String(error));
       process.stderr.write(`${formatter.formatError(normalizedError, 1)}\n`);
     } else {
-      const printableError =
-        error instanceof Error ? (error.stack ?? error.message) : String(error);
+      const printableError = formatNonInteractiveError(error);
       console.error(`Non-interactive run failed: ${printableError}`);
     }
     // Call cleanup before process.exit, which causes cleanup to not run

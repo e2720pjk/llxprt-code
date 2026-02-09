@@ -1,6 +1,5 @@
 import {
   type Profile,
-  type AuthType,
   type ModelParams,
   DebugLogger,
   LoadBalancingProvider,
@@ -44,7 +43,6 @@ export interface ProfileApplicationResult {
   infoMessages: string[];
   warnings: string[];
   providerChanged: boolean;
-  authType?: AuthType;
   didFallback: boolean;
   requestedProvider: string | null;
   baseUrl?: string;
@@ -536,6 +534,7 @@ export async function applyProfileWithGuards(
   // the auth-key in SettingsService (set in Step 2)
   // CRITICAL: Preserve the auth and base-url ephemerals we just set
   // Also preserve reasoning settings so they survive provider switches (fixes #890)
+  // Also preserve timeout settings so they survive provider switches (fixes #1049)
   const providerSwitch = await switchActiveProvider(targetProviderName, {
     autoOAuth: false,
     preserveEphemerals: [
@@ -549,6 +548,11 @@ export async function applyProfileWithGuards(
       'reasoning.budgetTokens',
       'reasoning.stripFromContext',
       'reasoning.includeInContext',
+      // Tool timeout settings - fixes #1049
+      'task-default-timeout-seconds',
+      'task-max-timeout-seconds',
+      'shell-default-timeout-seconds',
+      'shell-max-timeout-seconds',
     ],
   });
   const infoMessages = providerSwitch.infoMessages.filter(
@@ -668,11 +672,6 @@ export async function applyProfileWithGuards(
     );
   }
 
-  const authType: AuthType | undefined =
-    providerSwitch.authType ??
-    config.getContentGeneratorConfig()?.authType ??
-    undefined;
-
   const resolvedBaseUrl =
     appliedBaseUrl ??
     (config.getEphemeralSetting('base-url') as string | undefined);
@@ -683,7 +682,6 @@ export async function applyProfileWithGuards(
     infoMessages,
     warnings,
     providerChanged: providerSwitch.changed,
-    authType,
     didFallback: selection.didFallback,
     requestedProvider,
     baseUrl: resolvedBaseUrl,

@@ -6,7 +6,13 @@
 
 import updateNotifier, { UpdateInfo } from 'update-notifier';
 import semver from 'semver';
-import { getPackageJson } from '../../utils/package.js';
+import { getPackageJson } from '@vybestack/llxprt-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export const FETCH_TIMEOUT_MS = 2000;
 
@@ -38,13 +44,18 @@ function getBestAvailableUpdate(
   return semver.gt(stableVer, nightlyVer) ? stable : nightly;
 }
 
-export async function checkForUpdates(): Promise<UpdateObject | null> {
+export async function checkForUpdates(
+  settings: LoadedSettings,
+): Promise<UpdateObject | null> {
   try {
+    if (settings.merged.disableUpdateNag) {
+      return null;
+    }
     // Skip update check when running from source (development mode)
     if (process.env.DEV === 'true') {
       return null;
     }
-    const packageJson = await getPackageJson();
+    const packageJson = await getPackageJson(__dirname);
     if (!packageJson || !packageJson.name || !packageJson.version) {
       return null;
     }

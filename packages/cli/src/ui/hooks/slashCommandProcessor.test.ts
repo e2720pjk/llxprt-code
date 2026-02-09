@@ -114,6 +114,18 @@ const coreMocks = vi.hoisted(() => {
     uiTelemetryService,
     SessionMetrics: class {},
     ModelMetrics: class {},
+    DebugLogger: class {
+      static enabled = false;
+      log = vi.fn();
+      debug = vi.fn();
+      error = vi.fn();
+    },
+    IdeClient: {
+      getInstance: vi.fn().mockResolvedValue({
+        addStatusChangeListener: vi.fn(),
+        removeStatusChangeListener: vi.fn(),
+      }),
+    },
   };
 });
 
@@ -173,7 +185,9 @@ function createTestCommand(overrides: Partial<SlashCommand>): SlashCommand {
 
 describe('useSlashCommandProcessor', () => {
   let mockConfig: Config;
-  const mockSettings = {} as LoadedSettings;
+  const mockSettings = {
+    merged: {},
+  } as LoadedSettings;
   let addItem: ReturnType<typeof vi.fn>;
   let clearItems: ReturnType<typeof vi.fn>;
   let loadHistory: ReturnType<typeof vi.fn>;
@@ -183,7 +197,6 @@ describe('useSlashCommandProcessor', () => {
   let openAuthDialog: ReturnType<typeof vi.fn>;
   let openEditorDialog: ReturnType<typeof vi.fn>;
   let openProviderDialog: ReturnType<typeof vi.fn>;
-  let openProviderModelDialog: ReturnType<typeof vi.fn>;
   let openLoadProfileDialog: ReturnType<typeof vi.fn>;
   let openToolsDialog: ReturnType<typeof vi.fn>;
   let toggleCorgiMode: ReturnType<typeof vi.fn>;
@@ -246,7 +259,6 @@ describe('useSlashCommandProcessor', () => {
     openAuthDialog = vi.fn();
     openEditorDialog = vi.fn();
     openProviderDialog = vi.fn();
-    openProviderModelDialog = vi.fn();
     openLoadProfileDialog = vi.fn();
     openToolsDialog = vi.fn();
     toggleCorgiMode = vi.fn();
@@ -276,7 +288,6 @@ describe('useSlashCommandProcessor', () => {
       openAuthDialog,
       openEditorDialog,
       openProviderDialog,
-      openProviderModelDialog,
       openLoadProfileDialog,
       openToolsDialog,
       toggleCorgiMode,

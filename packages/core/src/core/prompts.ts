@@ -11,6 +11,7 @@ import { isGitRepository } from '../utils/gitUtils.js';
 import { PromptService } from '../prompt-config/prompt-service.js';
 import { getSettingsService } from '../settings/settingsServiceInstance.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
+import { DebugLogger } from '../debug/index.js';
 import type {
   PromptContext,
   PromptEnvironment,
@@ -21,6 +22,7 @@ const MAX_FOLDER_STRUCTURE_CHARS = 6000;
 const MAX_FOLDER_STRUCTURE_TOP_LEVEL = 20;
 const SESSION_STARTED_AT = new Date();
 const SESSION_STARTED_AT_LABEL = SESSION_STARTED_AT.toLocaleString();
+const logger = new DebugLogger('llxprt:core:prompts');
 
 // Singleton instance of PromptService
 let promptService: PromptService | null = null;
@@ -86,6 +88,8 @@ function getToolNameMapping(): Record<string, string> {
     delete_line_range: 'DeleteLineRange',
     insert_at_line: 'InsertAtLine',
     read_line_range: 'ReadLineRange',
+    list_subagents: 'ListSubagents',
+    task: 'Task',
   };
 }
 
@@ -165,13 +169,23 @@ function compactFolderStructureSnapshot(
 }
 
 /**
+ * Options for getCoreSystemPromptAsync
+ */
+export interface CoreSystemPromptOptions {
+  userMemory?: string;
+  model?: string;
+  tools?: string[];
+  provider?: string;
+  includeSubagentDelegation?: boolean;
+}
+
+/**
  * Build PromptContext from current environment and parameters
  */
 async function buildPromptContext(
-  model?: string,
-  tools?: string[],
-  provider?: string,
+  options: CoreSystemPromptOptions,
 ): Promise<PromptContext> {
+  const { model, tools, provider, includeSubagentDelegation } = options;
   const cwd = process.cwd();
 
   // Check if folder structure should be included (default: false for better cache hit rates)
@@ -205,7 +219,7 @@ async function buildPromptContext(
       folderStructure = compactFolderStructureSnapshot(folderStructure);
     } catch (error) {
       // If folder structure generation fails, continue without it
-      console.warn('Failed to generate folder structure:', error);
+      logger.debug(() => `Failed to generate folder structure: ${error}`);
     }
   }
 
@@ -303,19 +317,50 @@ async function buildPromptContext(
     enabledTools,
     environment,
     enableToolPrompts,
+    includeSubagentDelegation,
   };
 }
 
 /**
  * Async version of getCoreSystemPrompt that uses the new PromptService
+ * Supports both legacy positional arguments and options object for backward compatibility
  */
 export async function getCoreSystemPromptAsync(
-  userMemory?: string,
+  userMemoryOrOptions?: string | CoreSystemPromptOptions,
   model?: string,
   tools?: string[],
 ): Promise<string> {
   const service = await getPromptService();
-  const context = await buildPromptContext(model, tools);
+
+  // Handle both legacy positional args and options object
+  let userMemory: string | undefined = undefined;
+  let modelArg: string | undefined = undefined;
+  let toolsArg: string[] | undefined = undefined;
+  let providerArg: string | undefined = undefined;
+  let includeSubagentDelegation: boolean | undefined = undefined;
+
+  if (typeof userMemoryOrOptions === 'object' && userMemoryOrOptions !== null) {
+    // Options object mode
+    const opts = userMemoryOrOptions as CoreSystemPromptOptions;
+    userMemory = opts.userMemory;
+    modelArg = opts.model;
+    toolsArg = opts.tools;
+    providerArg = opts.provider;
+    includeSubagentDelegation = opts.includeSubagentDelegation;
+  } else {
+    // Legacy positional args mode
+    userMemory = userMemoryOrOptions as string | undefined;
+    modelArg = model;
+    toolsArg = tools;
+  }
+
+  const context = await buildPromptContext({
+    model: modelArg,
+    tools: toolsArg,
+    provider: providerArg,
+    includeSubagentDelegation,
+  });
+
   return await service.getPrompt(context, userMemory);
 }
 
@@ -335,11 +380,11 @@ export function getCompressionPrompt(): string {
   return `
 You are the component that summarizes internal chat history into a given structure.
 
-When the conversation history grows too large, you will be invoked to distill the entire history into a concise, structured XML snapshot. This snapshot is CRITICAL, as it will become the agent's *only* memory of the past. The agent will resume its work based solely on this snapshot. All crucial details, plans, errors, and user directives MUST be preserved.
+When the conversation history grows too large, you will be invoked to compress the MIDDLE portion of the history into a structured XML snapshot, reducing it by approximately 50%. This snapshot will be combined with preserved messages from the top and bottom of the conversation. The agent will have access to the full context: summary + preserved top messages + preserved bottom messages.
 
-First, you will think through the entire history in a private <scratchpad>. Review the user's overall goal, the agent's actions, tool outputs, file modifications, and any unresolved questions. Identify every piece of information that is essential for future actions.
+First, you will think through the middle portion of history in a private <scratchpad>. Review the user's overall goal, the agent's actions, tool outputs, file modifications, and any unresolved questions. Identify the most important information to preserve. Remember: user prompts and their exact phrasing are especially important to retain.
 
-After your reasoning is complete, generate the final <state_snapshot> XML object. Be incredibly dense with information. Omit any irrelevant conversational filler. Ensure you preserve enough context that the agent can continue its work seamlessly.
+After your reasoning is complete, generate the final <state_snapshot> XML object. Be thorough but concise. Focus on preserving essential context while eliminating redundancy. Ensure the agent has sufficient information to continue work effectively.
 
 The structure MUST be as follows:
 

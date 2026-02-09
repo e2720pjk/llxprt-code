@@ -16,11 +16,23 @@ import {
   FatalTurnLimitedError,
   EmojiFilter,
   OutputFormat,
+  JsonStreamEventType,
+  StreamJsonFormatter,
   uiTelemetryService,
+  coreEvents,
+  CoreEvent,
+  parseThought,
+  setActiveProviderRuntimeContext,
+  partToString,
+  type UserFeedbackPayload,
   type EmojiFilterMode,
   type ServerGeminiThoughtEvent,
+  type IContent,
+  type ProviderToolset,
+  type ServerGeminiStreamEvent,
 } from '@vybestack/llxprt-code-core';
 import { Content, Part } from '@google/genai';
+import readline from 'node:readline';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 
@@ -28,25 +40,137 @@ import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 
-export async function runNonInteractive(
-  config: Config,
-  settings: LoadedSettings,
-  input: string,
-  prompt_id: string,
-): Promise<void> {
+interface RunNonInteractiveParams {
+  config: Config;
+  settings: LoadedSettings;
+  input: string;
+  prompt_id: string;
+  hasDeprecatedPromptArg?: boolean;
+}
+
+export async function runNonInteractive({
+  config,
+  settings,
+  input,
+  prompt_id,
+  hasDeprecatedPromptArg,
+}: RunNonInteractiveParams): Promise<void> {
   const outputFormat =
     typeof config.getOutputFormat === 'function'
       ? config.getOutputFormat()
       : OutputFormat.TEXT;
   const jsonOutput = outputFormat === OutputFormat.JSON;
+  const streamJsonOutput = outputFormat === OutputFormat.STREAM_JSON;
+
+  const startTime = Date.now();
+  const streamFormatter = streamJsonOutput ? new StreamJsonFormatter() : null;
 
   const consolePatcher = new ConsolePatcher({
     stderr: !jsonOutput,
     debugMode: jsonOutput ? false : config.getDebugMode(),
   });
 
+  const handleUserFeedback = (payload: UserFeedbackPayload) => {
+    const prefix = payload.severity.toUpperCase();
+    process.stderr.write(`[${prefix}] ${payload.message}
+`);
+    if (payload.error && config.getDebugMode()) {
+      const errorToLog =
+        payload.error instanceof Error
+          ? payload.error.stack || payload.error.message
+          : String(payload.error);
+      process.stderr.write(`${errorToLog}
+`);
+    }
+  };
+
+  const abortController = new AbortController();
+
+  // Track cancellation state
+  let isAborting = false;
+  let cancelMessageTimer: NodeJS.Timeout | null = null;
+
+  // Setup stdin listener for Ctrl+C detection
+  let stdinWasRaw = false;
+  let rl: readline.Interface | null = null;
+
+  const setupStdinCancellation = () => {
+    // Only setup if stdin is a TTY (user can interact)
+    if (!process.stdin.isTTY) {
+      return;
+    }
+
+    // Save original raw mode state
+    stdinWasRaw = process.stdin.isRaw || false;
+
+    // Enable raw mode to capture individual keypresses
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+
+    // Setup readline to emit keypress events
+    rl = readline.createInterface({
+      input: process.stdin,
+      escapeCodeTimeout: 0,
+    });
+    readline.emitKeypressEvents(process.stdin, rl);
+
+    // Listen for Ctrl+C
+    const keypressHandler = (
+      str: string,
+      key: { name?: string; ctrl?: boolean },
+    ) => {
+      // Detect Ctrl+C: either ctrl+c key combo or raw character code 3
+      if ((key && key.ctrl && key.name === 'c') || str === '\u0003') {
+        // Only handle once
+        if (isAborting) {
+          return;
+        }
+
+        isAborting = true;
+
+        // Only show message if cancellation takes longer than 200ms
+        // This reduces verbosity for fast cancellations
+        cancelMessageTimer = setTimeout(() => {
+          process.stderr.write('\nCancelling...\n');
+        }, 200);
+
+        abortController.abort();
+        // Note: Don't exit here - let the abort flow through the system
+        // and trigger handleCancellationError() which will exit with proper code
+      }
+    };
+
+    process.stdin.on('keypress', keypressHandler);
+  };
+
+  const cleanupStdinCancellation = () => {
+    // Clear any pending cancel message timer
+    if (cancelMessageTimer) {
+      clearTimeout(cancelMessageTimer);
+      cancelMessageTimer = null;
+    }
+
+    // Cleanup readline and stdin listeners
+    if (rl) {
+      rl.close();
+      rl = null;
+    }
+
+    // Remove keypress listener
+    process.stdin.removeAllListeners('keypress');
+
+    // Restore stdin to original state
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(stdinWasRaw);
+      process.stdin.pause();
+    }
+  };
+
   try {
     consolePatcher.patch();
+    coreEvents.on(CoreEvent.UserFeedback, handleUserFeedback);
+    coreEvents.drainFeedbackBacklog();
+
     // Handle EPIPE errors when the output is piped to a command that closes early.
     process.stdout.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EPIPE') {
@@ -56,6 +180,28 @@ export async function runNonInteractive(
     });
 
     const geminiClient = config.getGeminiClient();
+    const providerManager =
+      typeof config.getProviderManager === 'function'
+        ? config.getProviderManager()
+        : undefined;
+    if (providerManager) {
+      setActiveProviderRuntimeContext({
+        settingsService: config.getSettingsService(),
+        config,
+        runtimeId: config.getSessionId?.(),
+        metadata: { source: 'nonInteractiveCli' },
+      });
+    }
+
+    // Emit init event for streaming JSON
+    if (streamFormatter) {
+      streamFormatter.emitEvent({
+        type: JsonStreamEventType.INIT,
+        timestamp: new Date().toISOString(),
+        session_id: config.getSessionId(),
+        model: config.getModel(),
+      });
+    }
 
     // Initialize emoji filter for non-interactive mode
     const emojiFilterMode =
@@ -68,7 +214,8 @@ export async function runNonInteractive(
         ? new EmojiFilter({ mode: emojiFilterMode })
         : undefined;
 
-    const abortController = new AbortController();
+    // Setup stdin cancellation listener
+    setupStdinCancellation();
 
     let query: Part[] | undefined;
 
@@ -107,11 +254,180 @@ export async function runNonInteractive(
       query = processedQuery as Part[];
     }
 
+    const toIContent = (parts: Part[]): IContent[] =>
+      parts.map((part) => {
+        if ('functionResponse' in part && part.functionResponse) {
+          const functionResponse = part.functionResponse as {
+            id?: string;
+            name?: string;
+            response?: Record<string, unknown>;
+          };
+          return {
+            speaker: 'tool',
+            blocks: [
+              {
+                type: 'tool_response',
+                callId: functionResponse.id ?? '',
+                toolName: functionResponse.name ?? '',
+                result: functionResponse.response ?? {},
+              },
+            ],
+          } as IContent;
+        }
+        if ('text' in part && typeof part.text === 'string') {
+          return {
+            speaker: 'human',
+            blocks: [{ type: 'text', text: part.text }],
+          } as IContent;
+        }
+        const fallbackText = partToString(part, { verbose: true }).trim();
+        if (fallbackText) {
+          return {
+            speaker: 'human',
+            blocks: [{ type: 'text', text: fallbackText }],
+          } as IContent;
+        }
+        throw new FatalInputError(
+          'Unsupported Part type in non-interactive provider path.',
+        );
+      });
+
+    const toProviderTools = (): ProviderToolset => [
+      {
+        functionDeclarations: config
+          .getToolRegistry()
+          .getFunctionDeclarations()
+          .filter((tool) => !!tool.name) as Array<{
+          name: string;
+          description?: string;
+          parametersJsonSchema?: unknown;
+          parameters?: unknown;
+        }>,
+      },
+    ];
+
+    const streamProviderEvents = async function* (
+      parts: Part[],
+    ): AsyncGenerator<ServerGeminiStreamEvent> {
+      if (!providerManager) {
+        throw new FatalInputError(
+          'No provider manager configured for non-interactive provider run.',
+        );
+      }
+      const provider = providerManager.getActiveProvider();
+      if (!provider) {
+        throw new FatalInputError(
+          'No active provider available for non-interactive run.',
+        );
+      }
+      if (!provider.generateChatCompletion) {
+        throw new FatalInputError(
+          `Active provider "${provider.name}" does not support generateChatCompletion.`,
+        );
+      }
+      const settingsService = config.getSettingsService();
+      const runtimeContext = {
+        settingsService,
+        config,
+        runtimeId: config.getSessionId?.(),
+        metadata: { source: 'nonInteractiveCli', requirement: 'REQ-SP4-004' },
+      };
+      const providerStream = provider.generateChatCompletion({
+        contents: toIContent(parts),
+        tools: toProviderTools(),
+        config,
+        runtime: runtimeContext,
+        settings: settingsService,
+        metadata: runtimeContext.metadata,
+      });
+
+      for await (const chunk of providerStream) {
+        if (chunk.speaker === 'ai') {
+          for (const block of chunk.blocks) {
+            if (block.type === 'thinking') {
+              yield {
+                type: GeminiEventType.Thought,
+                value: parseThought(block.thought),
+              };
+              continue;
+            }
+            if (block.type === 'text') {
+              yield { type: GeminiEventType.Content, value: block.text };
+              continue;
+            }
+            if (block.type === 'tool_call') {
+              yield {
+                type: GeminiEventType.ToolCallRequest,
+                value: {
+                  callId: block.id,
+                  name: block.name,
+                  args: (block.parameters ?? {}) as Record<string, unknown>,
+                  isClientInitiated: false,
+                  prompt_id,
+                },
+              };
+            }
+          }
+          continue;
+        }
+        if (chunk.speaker === 'tool') {
+          for (const block of chunk.blocks) {
+            if (block.type === 'tool_response') {
+              yield {
+                type: GeminiEventType.ToolCallResponse,
+                value: {
+                  callId: block.callId,
+                  responseParts: [
+                    {
+                      functionResponse: {
+                        id: block.callId,
+                        name: block.toolName,
+                        response: block.result as Record<string, unknown>,
+                      },
+                    },
+                  ],
+                  resultDisplay: undefined,
+                  error: undefined,
+                  errorType: undefined,
+                },
+              };
+            }
+          }
+        }
+      }
+    };
+
+    // Emit user message event for streaming JSON
+    if (streamFormatter) {
+      streamFormatter.emitEvent({
+        type: JsonStreamEventType.MESSAGE,
+        timestamp: new Date().toISOString(),
+        role: 'user',
+        content: input,
+      });
+    }
+
     let currentMessages: Content[] = [{ role: 'user', parts: query }];
+    let providerParts: Part[] = query;
 
     let jsonResponseText = '';
 
     let turnCount = 0;
+    const deprecateText =
+      'The --prompt (-p) flag has been deprecated and will be removed in a future version. Please use a positional argument for your prompt. See gemini --help for more information.\n';
+    if (hasDeprecatedPromptArg) {
+      if (streamFormatter) {
+        streamFormatter.emitEvent({
+          type: JsonStreamEventType.MESSAGE,
+          timestamp: new Date().toISOString(),
+          role: 'assistant',
+          content: deprecateText,
+          delta: true,
+        });
+      } else {
+        process.stderr.write(deprecateText);
+      }
+    }
     while (true) {
       turnCount++;
       if (
@@ -123,12 +439,36 @@ export async function runNonInteractive(
         );
       }
       const functionCalls: ToolCallRequestInfo[] = [];
+      let thoughtBuffer = '';
+      // Only emit thinking in plain text mode (not JSON or STREAM_JSON)
+      // In STREAM_JSON mode, thinking would corrupt the JSON event stream
+      const includeThinking =
+        !jsonOutput &&
+        !streamJsonOutput &&
+        (typeof config.getEphemeralSetting === 'function'
+          ? config.getEphemeralSetting('reasoning.includeInResponse') !== false
+          : true);
 
-      const responseStream = geminiClient.sendMessageStream(
-        currentMessages[0]?.parts || [],
-        abortController.signal,
-        prompt_id,
-      );
+      const flushThoughtBuffer = () => {
+        if (!includeThinking) {
+          thoughtBuffer = '';
+          return;
+        }
+        if (!thoughtBuffer.trim()) {
+          thoughtBuffer = '';
+          return;
+        }
+        process.stdout.write(`<think>${thoughtBuffer.trim()}</think>\n`);
+        thoughtBuffer = '';
+      };
+
+      const responseStream = providerManager
+        ? streamProviderEvents(providerParts)
+        : geminiClient.sendMessageStream(
+            currentMessages[0]?.parts || [],
+            abortController.signal,
+            prompt_id,
+          );
 
       for await (const event of responseStream) {
         if (abortController.signal.aborted) {
@@ -137,40 +477,40 @@ export async function runNonInteractive(
         }
 
         if (event.type === GeminiEventType.Thought) {
-          // Output thinking/reasoning content with <think> tags
-          // Check if reasoning.includeInResponse is enabled
-          if (jsonOutput) {
-            continue;
-          }
-          const includeThinking =
-            typeof config.getEphemeralSetting === 'function'
-              ? (config.getEphemeralSetting('reasoning.includeInResponse') ??
-                true)
-              : true;
-
           if (includeThinking) {
             const thoughtEvent = event as ServerGeminiThoughtEvent;
             const thought = thoughtEvent.value;
             // Format thought with subject and description
-            const thoughtText =
+            let thoughtText =
               thought.subject && thought.description
                 ? `${thought.subject}: ${thought.description}`
                 : thought.subject || thought.description || '';
 
             if (thoughtText.trim()) {
-              process.stdout.write(`<think>${thoughtText}</think>\n`);
+              // Apply emoji filter if enabled
+              if (emojiFilter) {
+                const filterResult = emojiFilter.filterText(thoughtText);
+                if (filterResult.blocked) {
+                  continue;
+                }
+                if (typeof filterResult.filtered === 'string') {
+                  thoughtText = filterResult.filtered;
+                }
+              }
+              // Buffer thoughts to prevent duplicate/pyramid output
+              thoughtBuffer = thoughtBuffer
+                ? `${thoughtBuffer} ${thoughtText}`
+                : thoughtText;
             }
           }
         } else if (event.type === GeminiEventType.Content) {
-          // Apply emoji filtering to content output
-          // Note: <think> tags are preserved in output to show thinking vs non-thinking content
+          flushThoughtBuffer();
           let outputValue = event.value;
 
           if (emojiFilter) {
             const filterResult = emojiFilter.filterStreamChunk(outputValue);
 
             if (filterResult.blocked) {
-              // In error mode: output error message and continue
               if (!jsonOutput) {
                 process.stderr.write(
                   '[Error: Response blocked due to emoji detection]\n',
@@ -184,7 +524,6 @@ export async function runNonInteractive(
                 ? (filterResult.filtered as string)
                 : '';
 
-            // Output system feedback if needed
             if (filterResult.systemFeedback) {
               if (!jsonOutput) {
                 process.stderr.write(
@@ -194,20 +533,62 @@ export async function runNonInteractive(
             }
           }
 
-          if (jsonOutput) {
+          if (streamFormatter) {
+            streamFormatter.emitEvent({
+              type: JsonStreamEventType.MESSAGE,
+              timestamp: new Date().toISOString(),
+              role: 'assistant',
+              content: outputValue,
+              delta: true,
+            });
+          } else if (jsonOutput) {
             jsonResponseText += outputValue;
           } else {
             process.stdout.write(outputValue);
           }
         } else if (event.type === GeminiEventType.ToolCallRequest) {
+          flushThoughtBuffer();
           const toolCallRequest = event.value;
+          if (streamFormatter) {
+            streamFormatter.emitEvent({
+              type: JsonStreamEventType.TOOL_USE,
+              timestamp: new Date().toISOString(),
+              tool_name: toolCallRequest.name,
+              tool_id:
+                toolCallRequest.callId ??
+                `${toolCallRequest.name}-${Date.now()}`,
+              parameters: toolCallRequest.args ?? {},
+            });
+          }
           const normalizedRequest: ToolCallRequestInfo = {
             ...toolCallRequest,
             agentId: toolCallRequest.agentId ?? 'primary',
           };
           functionCalls.push(normalizedRequest);
+        } else if (event.type === GeminiEventType.LoopDetected) {
+          if (streamFormatter) {
+            streamFormatter.emitEvent({
+              type: JsonStreamEventType.ERROR,
+              timestamp: new Date().toISOString(),
+              severity: 'warning',
+              message: 'Loop detected, stopping execution',
+            });
+          }
+        } else if (event.type === GeminiEventType.MaxSessionTurns) {
+          if (streamFormatter) {
+            streamFormatter.emitEvent({
+              type: JsonStreamEventType.ERROR,
+              timestamp: new Date().toISOString(),
+              severity: 'error',
+              message: 'Maximum session turns exceeded',
+            });
+          }
+        } else if (event.type === GeminiEventType.Error) {
+          throw event.value.error;
         }
       }
+
+      flushThoughtBuffer();
 
       const remainingBuffered = emojiFilter?.flushBuffer?.();
       if (remainingBuffered) {
@@ -266,8 +647,27 @@ export async function runNonInteractive(
           );
           const toolResponse = completed.response;
 
+          if (streamFormatter) {
+            streamFormatter.emitEvent({
+              type: JsonStreamEventType.TOOL_RESULT,
+              timestamp: new Date().toISOString(),
+              tool_id: requestInfo.callId,
+              status: toolResponse.error ? 'error' : 'success',
+              output:
+                typeof toolResponse.resultDisplay === 'string'
+                  ? toolResponse.resultDisplay
+                  : undefined,
+              error: toolResponse.error
+                ? {
+                    type: toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
+                    message: toolResponse.error.message,
+                  }
+                : undefined,
+            });
+          }
+
           if (toolResponse.error) {
-            if (!jsonOutput) {
+            if (!jsonOutput && !streamJsonOutput) {
               console.error(
                 `Error executing tool ${requestFromModel.name}: ${toolResponse.resultDisplay || toolResponse.error.message}`,
               );
@@ -279,8 +679,19 @@ export async function runNonInteractive(
           }
         }
         currentMessages = [{ role: 'user', parts: toolResponseParts }];
+        providerParts = toolResponseParts;
       } else {
-        if (jsonOutput) {
+        // Emit final result event for streaming JSON
+        if (streamFormatter) {
+          const metrics = uiTelemetryService.getMetrics();
+          const durationMs = Date.now() - startTime;
+          streamFormatter.emitEvent({
+            type: JsonStreamEventType.RESULT,
+            timestamp: new Date().toISOString(),
+            status: 'success',
+            stats: streamFormatter.convertToStreamStats(metrics, durationMs),
+          });
+        } else if (jsonOutput) {
           const payload = JSON.stringify(
             {
               response: jsonResponseText.trimEnd(),
@@ -298,16 +709,15 @@ export async function runNonInteractive(
     }
   } catch (error) {
     if (!jsonOutput) {
-      console.error(
-        parseAndFormatApiError(
-          error,
-          config.getContentGeneratorConfig()?.authType,
-        ),
-      );
+      console.error(parseAndFormatApiError(error));
     }
     throw error;
   } finally {
+    // Cleanup stdin cancellation before other cleanup
+    cleanupStdinCancellation();
+
     consolePatcher.cleanup();
+    coreEvents.off(CoreEvent.UserFeedback, handleUserFeedback);
     if (isTelemetrySdkInitialized()) {
       await shutdownTelemetry(config);
     }

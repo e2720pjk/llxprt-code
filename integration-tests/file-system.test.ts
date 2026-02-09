@@ -90,4 +90,113 @@ describe('file-system', () => {
       console.log('File written successfully with hello message.');
     }
   });
+
+  it('should correctly handle file paths with spaces', async () => {
+    const rig = new TestRig();
+    await rig.setup('should correctly handle file paths with spaces');
+    const fileName = 'my test file.txt';
+
+    const result = await rig.run(
+      `write "hello" to "${fileName}" and then stop. Do not perform any other actions.`,
+    );
+
+    const foundToolCall = await rig.waitForToolCall('write_file');
+    if (!foundToolCall) {
+      printDebugInfo(rig, result);
+    }
+    expect(
+      foundToolCall,
+      'Expected to find a write_file tool call',
+    ).toBeTruthy();
+
+    const newFileContent = rig.readFile(fileName);
+    expect(newFileContent).toBe('hello');
+  });
+
+  it('should perform a read-then-write sequence', async () => {
+    const rig = new TestRig();
+    await rig.setup('should perform a read-then-write sequence');
+    const fileName = 'version.txt';
+    rig.createFile(fileName, '1.0.0');
+
+    const prompt = `Read the version from ${fileName} and write the next version 1.0.1 back to the file.`;
+    const result = await rig.run(prompt);
+
+    await rig.waitForTelemetryReady();
+    const toolLogs = rig.readToolLogs();
+
+    const readCall = toolLogs.find(
+      (log) => log.toolRequest.name === 'read_file',
+    );
+    const writeCall = toolLogs.find(
+      (log) =>
+        log.toolRequest.name === 'write_file' ||
+        log.toolRequest.name === 'replace',
+    );
+
+    if (!readCall || !writeCall) {
+      printDebugInfo(rig, result, { readCall, writeCall });
+    }
+
+    expect(readCall, 'Expected to find a read_file tool call').toBeDefined();
+    expect(
+      writeCall,
+      'Expected to find a write_file or replace tool call',
+    ).toBeDefined();
+
+    const newFileContent = rig.readFile(fileName);
+    expect(newFileContent).toBe('1.0.1');
+  });
+
+  it('should replace multiple instances of a string', async () => {
+    const rig = new TestRig();
+    await rig.setup('should replace multiple instances of a string');
+    const fileName = 'ambiguous.txt';
+    const fileContent = 'Hey there, \ntest line\ntest line';
+    const expectedContent = 'Hey there, \nnew line\nnew line';
+    rig.createFile(fileName, fileContent);
+
+    const result = await rig.run(
+      `rewrite the file ${fileName} to replace all instances of "test line" with "new line"`,
+    );
+
+    const validTools = ['write_file', 'edit', 'replace'];
+    const foundToolCall = await rig.waitForAnyToolCall(validTools);
+    if (!foundToolCall) {
+      printDebugInfo(rig, result, {
+        'Tool call found': foundToolCall,
+        'Tool logs': rig.readToolLogs(),
+      });
+    }
+    expect(
+      foundToolCall,
+      `Expected to find one of ${validTools.join(', ')} tool calls`,
+    ).toBeTruthy();
+
+    const toolLogs = rig.readToolLogs();
+    const successfulEdit = toolLogs.some(
+      (log) =>
+        validTools.includes(log.toolRequest.name) && log.toolRequest.success,
+    );
+    if (!successfulEdit) {
+      console.error(
+        `Expected a successful edit tool call (${validTools.join(', ')}), but none was found.`,
+      );
+      printDebugInfo(rig, result);
+    }
+    expect(
+      successfulEdit,
+      `Expected a successful edit tool call (${validTools.join(', ')})`,
+    ).toBeTruthy();
+
+    const newFileContent = rig.readFile(fileName);
+    if (newFileContent !== expectedContent) {
+      printDebugInfo(rig, result, {
+        'Final file content': newFileContent,
+        'Expected file content': expectedContent,
+        'Tool logs': rig.readToolLogs(),
+      });
+    }
+    expect(newFileContent).toBe(expectedContent);
+  });
 });

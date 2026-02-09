@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { CompressionStatus } from '@vybestack/llxprt-code-core';
 import { HistoryItemCompression, MessageType } from '../types.js';
 import { CommandKind, SlashCommand } from './types.js';
 
@@ -38,31 +39,46 @@ export const compressCommand: SlashCommand = {
     try {
       ui.setPendingItem(pendingMessage);
       const promptId = `compress-${Date.now()}`;
-      const compressed = await context.services.config
-        ?.getGeminiClient()
-        ?.tryCompressChat(promptId, true);
-      if (compressed) {
-        ui.addItem(
-          {
-            type: MessageType.COMPRESSION,
-            compression: {
-              isPending: false,
-              originalTokenCount: compressed.originalTokenCount,
-              newTokenCount: compressed.newTokenCount,
-              compressionStatus: compressed.compressionStatus,
-            },
-          } as HistoryItemCompression,
-          Date.now(),
-        );
-      } else {
+      const geminiClient = context.services.config?.getGeminiClient();
+      if (!geminiClient || !geminiClient.hasChatInitialized()) {
         ui.addItem(
           {
             type: MessageType.ERROR,
-            text: 'Failed to compress chat history.',
+            text: 'Chat instance not available for compression.',
           },
           Date.now(),
         );
+        return;
       }
+      const chat = geminiClient.getChat();
+      const historyService = chat.getHistoryService();
+      if (!historyService) {
+        ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: 'Chat instance not available for compression.',
+          },
+          Date.now(),
+        );
+        return;
+      }
+      const originalTokenCount = historyService.getTotalTokens();
+      await chat.performCompression(promptId);
+      const newTokenCount = historyService.getTotalTokens();
+      const compressionStatus =
+        newTokenCount < originalTokenCount
+          ? CompressionStatus.COMPRESSED
+          : CompressionStatus.NOOP;
+      const compressionResult: HistoryItemCompression = {
+        type: MessageType.COMPRESSION,
+        compression: {
+          isPending: false,
+          originalTokenCount,
+          newTokenCount,
+          compressionStatus,
+        },
+      };
+      ui.addItem(compressionResult, Date.now());
     } catch (e) {
       ui.addItem(
         {

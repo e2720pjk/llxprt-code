@@ -1,14 +1,16 @@
 import { useCallback, useState, useRef, useEffect } from 'react';
-import type { Config, ToolCallRequestInfo } from '@vybestack/llxprt-code-core';
-import {
+import type {
+  Config,
+  ToolCallRequestInfo,
+  ToolConfirmationOutcome,
   CoreToolScheduler,
-  type ToolCall as CoreToolCall,
-  type CompletedToolCall,
-  type WaitingToolCall,
-  type ExecutingToolCall,
-  type CancelledToolCall,
-  type ToolCallConfirmationDetails,
-  type ToolConfirmationOutcome,
+  ToolCall as CoreToolCall,
+  CompletedToolCall,
+  WaitingToolCall,
+  ExecutingToolCall,
+  CancelledToolCall,
+  ToolCallConfirmationDetails,
+  AnsiOutput,
 } from '@vybestack/llxprt-code-core';
 import type { ToolStatus } from '../types/events';
 import { getLogger } from '../lib/logger';
@@ -102,6 +104,16 @@ type OnCompleteCallback = (
   completedTools: CompletedToolCall[],
 ) => Promise<void> | void;
 type OnUpdateCallback = (tools: TrackedToolCall[]) => void;
+
+/**
+ * Convert AnsiOutput to plain text by extracting token text content.
+ */
+function ansiOutputToText(output: AnsiOutput): string {
+  const newline = '\n';
+  return output
+    .map((line) => line.map((token) => token.text).join(''))
+    .join(newline);
+}
 
 /**
  * Update a single tool call with live output
@@ -270,6 +282,12 @@ export function useToolScheduler(
 ): UseToolSchedulerResult {
   const [toolCalls, setToolCalls] = useState<TrackedToolCall[]>([]);
   const schedulerRef = useRef<CoreToolScheduler | null>(null);
+  const pendingScheduleRequests = useRef<
+    {
+      request: ToolCallRequestInfo | ToolCallRequestInfo[];
+      signal: AbortSignal;
+    }[]
+  >([]);
 
   // Use refs to store callbacks so they don't trigger effect re-runs
   const onCompleteRef = useRef<OnCompleteCallback>(onAllToolCallsComplete);
@@ -291,14 +309,27 @@ export function useToolScheduler(
       return;
     }
 
+    const sessionId = config.getSessionId();
+    let mounted = true;
+
     const handleOutputUpdate = (
       toolCallId: string,
-      outputChunk: string,
+      outputChunk: string | AnsiOutput,
     ): void => {
-      setToolCalls((prev) => applyOutputUpdate(prev, toolCallId, outputChunk));
+      if (!mounted) {
+        return;
+      }
+      const text =
+        typeof outputChunk === 'string'
+          ? outputChunk
+          : ansiOutputToText(outputChunk);
+      setToolCalls((prev) => applyOutputUpdate(prev, toolCallId, text));
     };
 
     const handleToolCallsUpdate = (updatedCalls: CoreToolCall[]): void => {
+      if (!mounted) {
+        return;
+      }
       setToolCalls((prevCalls) => {
         if (updatedCalls.length === 0) {
           return [];
@@ -315,6 +346,9 @@ export function useToolScheduler(
     const handleAllComplete = async (
       completedToolCalls: CompletedToolCall[],
     ): Promise<void> => {
+      if (!mounted) {
+        return;
+      }
       logger.debug(
         'handleAllComplete called',
         'toolCount:',
@@ -332,20 +366,50 @@ export function useToolScheduler(
       handleToolCallsUpdate([]);
     };
 
-    const scheduler = new CoreToolScheduler({
-      config,
-      outputUpdateHandler: handleOutputUpdate,
-      onAllToolCallsComplete: handleAllComplete,
-      onToolCallsUpdate: handleToolCallsUpdate,
-      getPreferredEditor: () => undefined,
-      onEditorClose: () => {
-        /* no-op */
-      },
-    });
+    // Use the singleton scheduler from config to ensure all schedulers in a session
+    // share the same CoreToolScheduler instance, avoiding duplicate MessageBus
+    // subscriptions and "unknown correlationId" errors.
+    const initializeScheduler = async () => {
+      try {
+        const scheduler = await config.getOrCreateScheduler(sessionId, {
+          outputUpdateHandler: handleOutputUpdate,
+          onAllToolCallsComplete: handleAllComplete,
+          onToolCallsUpdate: handleToolCallsUpdate,
+          getPreferredEditor: () => undefined,
+          onEditorClose: () => {
+            /* no-op */
+          },
+        });
 
-    schedulerRef.current = scheduler;
+        if (!mounted) {
+          config.disposeScheduler(sessionId);
+          return;
+        }
+
+        schedulerRef.current = scheduler;
+
+        if (pendingScheduleRequests.current.length > 0) {
+          for (const { request, signal } of pendingScheduleRequests.current) {
+            if (signal.aborted) {
+              continue;
+            }
+            void scheduler.schedule(request, signal);
+          }
+          pendingScheduleRequests.current = [];
+        }
+      } catch (error) {
+        logger.error('Failed to initialize scheduler:', error);
+        if (mounted) {
+          schedulerRef.current = null;
+        }
+      }
+    };
+
+    void initializeScheduler();
 
     return () => {
+      mounted = false;
+      config.disposeScheduler(sessionId);
       schedulerRef.current = null;
     };
   }, [config]);
@@ -359,7 +423,10 @@ export function useToolScheduler(
       const scheduler = schedulerRef.current;
       if (scheduler) {
         void scheduler.schedule(request, signal);
+        return;
       }
+
+      pendingScheduleRequests.current.push({ request, signal });
     },
     [],
   );

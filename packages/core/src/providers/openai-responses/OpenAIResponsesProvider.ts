@@ -29,6 +29,7 @@ import { type IModel } from '../IModel.js';
 import {
   type IContent,
   type TextBlock,
+  type ThinkingBlock,
   type ToolCallBlock,
   type ToolResponseBlock,
 } from '../../services/history/IContent.js';
@@ -40,13 +41,11 @@ import { normalizeToOpenAIToolId } from '../utils/toolIdNormalization.js';
 import { type IProviderConfig } from '../types/IProviderConfig.js';
 import { RESPONSES_API_MODELS } from '../openai/RESPONSES_API_MODELS.js';
 import { CODEX_MODELS } from './CODEX_MODELS.js';
-import {
-  buildCodexSteeringPrompt,
-  CODEX_SYSTEM_PROMPT,
-} from './CODEX_PROMPT.js';
+
 import {
   parseResponsesStream,
   parseErrorResponse,
+  type ParseResponsesStreamOptions,
 } from '../openai/parseResponsesStream.js';
 import {
   BaseProvider,
@@ -56,9 +55,9 @@ import {
 import type { ToolFormat } from '../../tools/IToolFormatter.js';
 import { convertToolsToOpenAIResponses } from './schemaConverter.js';
 import { getCoreSystemPromptAsync } from '../../core/prompts.js';
+import { shouldIncludeSubagentDelegation } from '../../prompt-config/subagent-delegation.js';
 import { resolveUserMemory } from '../utils/userMemory.js';
 import { resolveRuntimeAuthToken } from '../utils/authToken.js';
-import { filterOpenAIRequestParams } from '../openai/openaiRequestParams.js';
 import { CodexOAuthTokenSchema } from '../../auth/types.js';
 import type { OAuthManager } from '../../auth/precedence.js';
 import {
@@ -66,6 +65,7 @@ import {
   getErrorStatus,
   isNetworkTransientError,
 } from '../../utils/retry.js';
+import { delay } from '../../utils/delay.js';
 
 export class OpenAIResponsesProvider extends BaseProvider {
   private logger: DebugLogger;
@@ -207,7 +207,7 @@ export class OpenAIResponsesProvider extends BaseProvider {
       return RESPONSES_API_MODELS.map((modelId) => ({
         id: modelId,
         name: modelId,
-        provider: 'openai-responses',
+        provider: this.name,
         supportedToolFormats: ['openai'],
       }));
     }
@@ -243,7 +243,7 @@ export class OpenAIResponsesProvider extends BaseProvider {
             models.push({
               id: model.id,
               name: model.id,
-              provider: 'openai-responses',
+              provider: this.name,
               supportedToolFormats: ['openai'],
             });
           }
@@ -254,7 +254,7 @@ export class OpenAIResponsesProvider extends BaseProvider {
           : RESPONSES_API_MODELS.map((modelId) => ({
               id: modelId,
               name: modelId,
-              provider: 'openai-responses',
+              provider: this.name,
               supportedToolFormats: ['openai'],
             }));
       }
@@ -266,7 +266,7 @@ export class OpenAIResponsesProvider extends BaseProvider {
     return RESPONSES_API_MODELS.map((modelId) => ({
       id: modelId,
       name: modelId,
-      provider: 'openai-responses',
+      provider: this.name,
       supportedToolFormats: ['openai'],
     }));
   }
@@ -295,10 +295,10 @@ export class OpenAIResponsesProvider extends BaseProvider {
 
   override getDefaultModel(): string {
     // @plan PLAN-20251213-ISSUE160.P04
-    // Return gpt-5.2 as default when in Codex mode
+    // Return gpt-5.3-codex as default when in Codex mode (issue #1308)
     const baseURL = this.getBaseURL();
     if (this.isCodexMode(baseURL)) {
-      return 'gpt-5.2';
+      return 'gpt-5.3-codex';
     }
     // Return the default model for responses API
     return 'o3-mini';
@@ -323,6 +323,88 @@ export class OpenAIResponsesProvider extends BaseProvider {
 
   override clearState(): void {
     super.clearState?.();
+  }
+
+  /**
+   * Generate a unique synthetic call ID to avoid collisions.
+   * @issue #966
+   */
+  private generateSyntheticCallId(): string {
+    const randomSuffix = Math.random().toString(36).substring(2, 10);
+    return `call_synthetic_${randomSuffix}`;
+  }
+
+  /**
+   * Inject a synthetic tool call/result pair that makes GPT think it already read AGENTS.md.
+   *
+   * The CODEX_SYSTEM_PROMPT instructs GPT to read AGENTS.md for project instructions.
+   * However, the user may have configured LLXPRT.md instead (or both), and sometimes
+   * AGENTS.md is deliberately reserved for a different agent (like Codex itself).
+   *
+   * This method:
+   * 1. Always claims to have read "AGENTS.md" in the synthetic function call
+   * 2. Returns the actual userMemory content (from LLXPRT.md, AGENTS.md, or both)
+   * 3. Prevents GPT from wasting a tool call trying to read AGENTS.md
+   *
+   * @issue #966
+   */
+  private injectSyntheticConfigFileRead(
+    requestInput: Array<
+      | { role: 'user' | 'assistant' | 'system'; content?: string }
+      | {
+          type: 'function_call';
+          call_id: string;
+          name: string;
+          arguments: string;
+        }
+      | { type: 'function_call_output'; call_id: string; output: string }
+      | {
+          type: 'reasoning';
+          id: string;
+          summary?: Array<{ type: string; text: string }>;
+          encrypted_content?: string;
+        }
+    >,
+    options: NormalizedGenerateChatOptions,
+    userMemory: string | undefined,
+  ): void {
+    const syntheticCallId = this.generateSyntheticCallId();
+
+    // Note: We intentionally don't use configRef/filePaths here anymore.
+    // The goal is to NOT reveal which files were actually loaded.
+    // We just need to know if userMemory has content.
+
+    let output: string;
+
+    // Always pretend we read AGENTS.md - this is what CODEX_SYSTEM_PROMPT tells GPT to do
+    const targetFile = 'AGENTS.md';
+
+    if (userMemory && userMemory.trim().length > 0) {
+      // Return the ACTUAL userMemory content so GPT sees what was loaded,
+      // while making it think this came from reading AGENTS.md.
+      // Do NOT reveal actual source files - the goal is to convince GPT it read AGENTS.md.
+      output = JSON.stringify({
+        content: userMemory,
+      });
+    } else {
+      output = JSON.stringify({
+        error: 'File not found: AGENTS.md',
+      });
+    }
+
+    requestInput.unshift(
+      {
+        type: 'function_call',
+        call_id: syntheticCallId,
+        name: 'read_file',
+        arguments: JSON.stringify({ absolute_path: targetFile }),
+      },
+      {
+        type: 'function_call_output',
+        call_id: syntheticCallId,
+        output,
+      },
+    );
   }
 
   /**
@@ -445,31 +527,49 @@ export class OpenAIResponsesProvider extends BaseProvider {
       () => options.invocation?.userMemory,
     );
 
-    const systemPrompt = await getCoreSystemPromptAsync(
-      userMemory,
-      resolvedModel,
-      toolNamesForPrompt,
+    const includeSubagentDelegation = await shouldIncludeSubagentDelegation(
+      toolNamesForPrompt ?? [],
+      () => options.config?.getSubagentManager?.(),
     );
+    const systemPrompt = await getCoreSystemPromptAsync({
+      userMemory,
+      model: resolvedModel,
+      tools: toolNamesForPrompt,
+      includeSubagentDelegation,
+    });
 
-    // Responses API input types: messages, function_call, function_call_output
+    // Responses API input types: messages, function_call, function_call_output, reasoning
     type ResponsesInputItem =
-      | { role: 'user' | 'assistant' | 'system'; content?: string }
+      | { role: 'user' | 'assistant'; content?: string }
       | {
           type: 'function_call';
           call_id: string;
           name: string;
           arguments: string;
         }
-      | { type: 'function_call_output'; call_id: string; output: string };
+      | { type: 'function_call_output'; call_id: string; output: string }
+      | {
+          type: 'reasoning';
+          id: string;
+          summary?: Array<{ type: string; text: string }>;
+          encrypted_content?: string;
+        };
 
     const input: ResponsesInputItem[] = [];
 
-    if (systemPrompt) {
-      input.push({
-        role: 'system',
-        content: systemPrompt,
-      });
-    }
+    // Check if reasoning should be included in context
+    // Precedence: invocation ephemerals > invocation modelBehavior > settings
+    const includeReasoningInContextSetting =
+      options.invocation?.ephemerals?.['reasoning.includeInContext'] ??
+      options.invocation?.getModelBehavior<boolean>(
+        'reasoning.includeInContext',
+      ) ??
+      options.settings?.get('reasoning.includeInContext');
+    const includeReasoningInContext =
+      includeReasoningInContextSetting !== false;
+
+    // Counter for generating unique reasoning IDs within a single request
+    let reasoningIdCounter = 0;
 
     for (const c of patchedContent) {
       if (c.speaker === 'human') {
@@ -487,8 +587,28 @@ export class OpenAIResponsesProvider extends BaseProvider {
         const toolCallBlocks = c.blocks.filter(
           (b) => b.type === 'tool_call',
         ) as ToolCallBlock[];
+        const thinkingBlocks = c.blocks.filter(
+          (b) => b.type === 'thinking',
+        ) as ThinkingBlock[];
 
         const contentText = textBlocks.map((b) => b.text).join('');
+
+        // Add reasoning items if they have encrypted_content and reasoning should be included
+        if (includeReasoningInContext) {
+          for (const thinkingBlock of thinkingBlocks) {
+            if (thinkingBlock.encryptedContent) {
+              // Guard against undefined/empty thought - use empty string as fallback
+              // to avoid creating invalid { type: 'summary_text', text: undefined }
+              const summaryText = thinkingBlock.thought ?? '';
+              input.push({
+                type: 'reasoning',
+                id: `reasoning_${Date.now()}_${reasoningIdCounter++}`,
+                summary: [{ type: 'summary_text', text: summaryText }],
+                encrypted_content: thinkingBlock.encryptedContent,
+              });
+            }
+          }
+        }
 
         // Add assistant text content if present
         if (contentText) {
@@ -579,26 +699,31 @@ export class OpenAIResponsesProvider extends BaseProvider {
     // @plan:PLAN-20251023-STATELESS-HARDENING.P08
     // @requirement:REQ-SP4-002/REQ-SP4-003
     // Source per-call request overrides from normalized options (ephemeral settings take precedence)
-    const runtimeConfigEphemeralSettings = options.invocation?.ephemerals;
-    const settingsServiceModelParams = options.settings?.getProviderSettings(
-      this.name,
-    );
-
-    const filteredSettingsParams = filterOpenAIRequestParams(
-      settingsServiceModelParams as Record<string, unknown> | undefined,
-    );
-    const filteredEphemeralParams = filterOpenAIRequestParams(
-      runtimeConfigEphemeralSettings as Record<string, unknown> | undefined,
-    );
-
-    // Include both ephemeral and persistent settings, with ephemeral settings taking precedence
     const mergedParams: Record<string, unknown> = {
-      ...(filteredSettingsParams ?? {}),
-      ...(filteredEphemeralParams ?? {}),
+      ...(options.invocation?.modelParams ?? {}),
     };
+
+    // Translate generic maxOutputTokens ephemeral to max_output_tokens for Responses API
+    const rawMaxOutput = options.settings?.get('maxOutputTokens');
+    const genericMaxOutput =
+      typeof rawMaxOutput === 'number' &&
+      Number.isFinite(rawMaxOutput) &&
+      rawMaxOutput > 0
+        ? rawMaxOutput
+        : undefined;
+    if (
+      genericMaxOutput !== undefined &&
+      mergedParams['max_tokens'] === undefined &&
+      mergedParams['max_completion_tokens'] === undefined &&
+      mergedParams['max_output_tokens'] === undefined
+    ) {
+      mergedParams['max_output_tokens'] = genericMaxOutput;
+    }
 
     // Translate max_tokens/max_completion_tokens to max_output_tokens for Responses API
     // The Responses API uses max_output_tokens, not max_tokens (GPT-5 models)
+    // Also filter out nested 'reasoning' object to avoid it being spread into request
+    // (reasoning settings are handled explicitly below via model-behavior settings)
     const requestOverrides: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(mergedParams)) {
       if (key === 'max_tokens' || key === 'max_completion_tokens') {
@@ -607,6 +732,13 @@ export class OpenAIResponsesProvider extends BaseProvider {
         this.logger.debug(
           () =>
             `Translated ${key}=${value} to max_output_tokens for Responses API`,
+        );
+      } else if (key === 'reasoning') {
+        // Skip 'reasoning' object - it gets handled explicitly below
+        // via model-behavior settings (reasoning.effort, reasoning.summary, etc.)
+        this.logger.debug(
+          () =>
+            `Skipping reasoning object in modelParams - handled via model-behavior settings`,
         );
       } else {
         requestOverrides[key] = value;
@@ -626,8 +758,6 @@ export class OpenAIResponsesProvider extends BaseProvider {
       'https://api.openai.com/v1';
     const baseURL = baseURLCandidate.replace(/\/+$/u, '');
 
-    // @plan PLAN-20251213-ISSUE160.P03
-    // Detect Codex mode and handle accordingly
     const isCodex = this.isCodexMode(baseURL);
 
     // Build request input - filter out system messages for Codex (uses instructions field instead)
@@ -635,22 +765,58 @@ export class OpenAIResponsesProvider extends BaseProvider {
     if (isCodex) {
       // In Codex mode, system prompt goes in instructions field, not input array
       // Only filter items that have a 'role' property (function_call/function_call_output don't)
+      // Cast role to string to avoid TS2367 error - ResponsesInputItem union includes both role-bearing
+      // and non-role-bearing items, and we need to filter only those with role='system'
       requestInput = requestInput.filter(
-        (msg) => !('role' in msg) || msg.role !== 'system',
+        (msg) => !('role' in msg) || (msg.role as string) !== 'system',
       );
 
-      const steeringPrompt = buildCodexSteeringPrompt(systemPrompt);
-      if (steeringPrompt) {
-        requestInput.unshift({ role: 'user', content: steeringPrompt });
-      }
+      // @issue #966: Pre-inject synthetic tool call/result for config files (LLXPRT.md/AGENTS.md)
+      // This prevents the model from wasting tool calls re-reading files already injected.
+      // Note: We no longer inject a steering prompt - the system prompt is properly
+      // conveyed via the `instructions` field (see below).
+      //
+      // Per OpenAI docs: "we highly recommend you pass back any reasoning items returned
+      // with the last function call... This allows the model to continue its reasoning
+      // process to produce better results in the most token-efficient manner."
+      // So we only filter reasoning for the injection helper (to find insertion point),
+      // but keep reasoning items in the final requestInput.
+      const itemsForInjection = requestInput.filter(
+        (item) => !('type' in item && item.type === 'reasoning'),
+      );
+      this.injectSyntheticConfigFileRead(
+        itemsForInjection,
+        options,
+        userMemory,
+      );
+      // Merge injected items back with reasoning items preserved
+      // The injection adds items at the start, so prepend those to reasoning + rest
+      const injectedItems = itemsForInjection.filter(
+        (item) => !requestInput.includes(item),
+      );
+      const reasoningItems = requestInput.filter(
+        (item) => 'type' in item && item.type === 'reasoning',
+      );
+      const nonReasoningItems = requestInput.filter(
+        (item) => !('type' in item && item.type === 'reasoning'),
+      );
+      // Rebuild: injected items first, then reasoning, then rest of non-reasoning
+      requestInput = [
+        ...injectedItems,
+        ...reasoningItems,
+        ...nonReasoningItems,
+      ];
     }
 
     const request: {
       model: string;
-      input: typeof requestInput;
+      input: typeof input;
       instructions?: string;
       tools?: typeof responsesTools;
+      tool_choice?: string;
+      parallel_tool_calls?: boolean;
       stream: boolean;
+      include?: string[];
       [key: string]: unknown;
     } = {
       model: resolvedModel,
@@ -659,18 +825,121 @@ export class OpenAIResponsesProvider extends BaseProvider {
       ...(requestOverrides || {}),
     };
 
-    if (responsesTools && responsesTools.length > 0) {
-      request.tools = responsesTools;
+    // Set the system prompt as instructions for the Responses API
+    if (systemPrompt) {
+      request.instructions = systemPrompt;
     }
 
-    // @plan PLAN-20251214-ISSUE160.P05
-    // Add Codex-specific request parameters
+    if (responsesTools && responsesTools.length > 0) {
+      request.tools = responsesTools;
+      // Per codex-rs: set tool_choice when tools are present, respecting user-specified values
+      // Only default to 'auto' if not already set (e.g., 'required' or a specific function name)
+      if (!request.tool_choice) {
+        request.tool_choice = 'auto';
+      }
+      request.parallel_tool_calls = true;
+    }
+
+    // Add include parameter for reasoning when reasoning is enabled
+    // Precedence: invocation ephemerals > invocation modelBehavior > settings
+    const reasoningEnabled =
+      (options.invocation?.ephemerals?.['reasoning.enabled'] ??
+        options.invocation?.getModelBehavior<boolean>('reasoning.enabled') ??
+        options.settings?.get('reasoning.enabled')) === true;
+    // Reasoning settings come from model-behavior (via invocation.getModelBehavior or settings)
+    // not from modelParams (which is for pass-through API params like temperature)
+    const reasoningEffort =
+      options.invocation?.ephemerals?.['reasoning.effort'] ??
+      options.invocation?.getModelBehavior<string>('reasoning.effort') ??
+      options.settings?.get('reasoning.effort');
+    const reasoningSummary =
+      options.invocation?.ephemerals?.['reasoning.summary'] ??
+      options.invocation?.getModelBehavior<string>('reasoning.summary') ??
+      options.settings?.get('reasoning.summary');
+    // Check if thinking blocks should be shown in the response (defaults to true)
+    // This respects the reasoning.includeInResponse setting (fixes #922)
+    // Precedence: invocation ephemerals > invocation modelBehavior > settings
+    const includeThinkingInResponseSetting =
+      options.invocation?.ephemerals?.['reasoning.includeInResponse'] ??
+      options.invocation?.getModelBehavior<boolean>(
+        'reasoning.includeInResponse',
+      ) ??
+      options.settings?.get('reasoning.includeInResponse');
+    const includeThinkingInResponse =
+      includeThinkingInResponseSetting !== false;
+    const shouldRequestReasoning =
+      reasoningEnabled || reasoningEffort !== undefined;
+
+    this.logger.debug(
+      () =>
+        `Reasoning check: enabled=${reasoningEnabled}, effort=${String(reasoningEffort)}, summary=${String(reasoningSummary)}, shouldRequest=${shouldRequestReasoning}, includeInResponse=${includeThinkingInResponse}`,
+    );
+
+    if (shouldRequestReasoning) {
+      request.include = ['reasoning.encrypted_content'];
+      this.logger.debug(
+        () => `Added include parameter: ${JSON.stringify(request.include)}`,
+      );
+
+      // Add reasoning.effort to request if set
+      // Per Responses API, reasoning goes inside the 'reasoning' field
+      if (reasoningEffort && typeof reasoningEffort === 'string') {
+        if (!request.reasoning) {
+          request.reasoning = {};
+        }
+        (request.reasoning as { effort?: string }).effort = reasoningEffort;
+        this.logger.debug(
+          () => `Added reasoning.effort to request: ${reasoningEffort}`,
+        );
+      }
+    }
+
+    // Add reasoning.summary to request if set and not 'none'
+    // Per codex-rs implementation, the summary goes inside reasoning.summary
+    if (
+      reasoningSummary &&
+      typeof reasoningSummary === 'string' &&
+      reasoningSummary !== 'none'
+    ) {
+      if (!request.reasoning) {
+        request.reasoning = {};
+      }
+      (request.reasoning as { summary?: string }).summary = reasoningSummary;
+      this.logger.debug(
+        () => `Added reasoning.summary to request: ${reasoningSummary}`,
+      );
+    }
+
+    // Debug: Log full request body for analysis
+    this.logger.debug(
+      () =>
+        `Full request reasoning config: ${JSON.stringify(request.reasoning)}`,
+    );
+
+    // @issue #922: Add text.verbosity to request for OpenAI Responses API
+    // This field controls response verbosity and enables thinking/reasoning summaries.
+    // codex-rs sends this via the 'text' field: { verbosity: "low" | "medium" | "high" }
+    const textVerbosity =
+      options.invocation?.ephemerals?.['text.verbosity'] ??
+      options.settings?.get('text.verbosity');
+    if (
+      textVerbosity &&
+      typeof textVerbosity === 'string' &&
+      ['low', 'medium', 'high'].includes(textVerbosity.toLowerCase())
+    ) {
+      request.text = {
+        verbosity: textVerbosity.toLowerCase(),
+      };
+      this.logger.debug(
+        () => `Added text.verbosity to request: ${textVerbosity}`,
+      );
+    }
+
+    // Codex-specific request parameters
     if (isCodex) {
-      // Codex API requires the official system prompt in instructions field
-      request.instructions = CODEX_SYSTEM_PROMPT;
+      // Store is set to false to prevent OpenAI from storing Codex conversations
       request.store = false;
       // Codex API (ChatGPT backend) doesn't support max_output_tokens parameter
-      // Remove it to prevent 400 errors
       if ('max_output_tokens' in request) {
         delete request.max_output_tokens;
         this.logger.debug(
@@ -678,13 +947,41 @@ export class OpenAIResponsesProvider extends BaseProvider {
             'Codex mode: removed unsupported max_output_tokens from request',
         );
       }
-      this.logger.debug(
-        () => 'Codex mode: setting instructions and store=false',
-      );
+    }
+
+    // Apply prompt caching for both Codex and non-Codex modes
+    // Check ephemeral settings first (from invocation snapshot), then provider settings
+    const promptCachingSetting =
+      (options.invocation?.ephemerals?.['prompt-caching'] as
+        | string
+        | undefined) ??
+      (options.settings?.getProviderSettings?.(this.name)?.[
+        'prompt-caching'
+      ] as string | undefined) ??
+      '1h'; // default to enabled
+
+    const isCachingEnabled = promptCachingSetting !== 'off';
+
+    if (isCachingEnabled) {
+      const cacheKey =
+        options.invocation?.runtimeId ?? options.runtime?.runtimeId;
+      if (cacheKey && typeof cacheKey === 'string' && cacheKey.trim() !== '') {
+        request.prompt_cache_key = cacheKey;
+        // Note: prompt_cache_retention is NOT supported by Codex API (causes 400 error)
+        // Only add it for non-Codex OpenAI Responses API
+        if (!isCodex) {
+          request.prompt_cache_retention = '24h';
+        }
+      }
     }
 
     const responsesURL = `${baseURL}/responses`;
     const requestBody = JSON.stringify(request);
+
+    // Debug: Log request summary (keys only to avoid PII/secret exposure)
+    this.logger.debug(
+      () => `Request body keys: ${JSON.stringify(Object.keys(request))}`,
+    );
 
     // @plan PLAN-20251214-ISSUE160.P05
     // Codex API requires Content-Type without charset suffix
@@ -712,17 +1009,38 @@ export class OpenAIResponsesProvider extends BaseProvider {
       const accountId = await this.getCodexAccountId();
       headers['ChatGPT-Account-ID'] = accountId;
       headers['originator'] = 'codex_cli_rs';
+
+      // @issue #1145: Add session_id header to bind requests into a single cache namespace
+      // This matches codex-rs behavior: tmp/codex/codex-rs/codex-api/src/requests/headers.rs
+      // The session_id header helps the Codex backend group requests for better cache hits
+      const sessionId =
+        options.invocation?.runtimeId ?? options.runtime?.runtimeId;
+      if (sessionId && typeof sessionId === 'string' && sessionId.trim()) {
+        headers['session_id'] = sessionId;
+      }
+
       this.logger.debug(
         () =>
-          `Codex mode: adding headers for account ${accountId.substring(0, 8)}...`,
+          `Codex mode: adding headers for account ${accountId.substring(0, 8)}..., session_id=${sessionId?.substring(0, 8) ?? 'none'}...`,
       );
     }
 
     // @plan PLAN-20251215-issue868: Retry responses streaming end-to-end
     // Retry must encompass both the initial fetch and the subsequent stream
     // consumption, because transient network failures can occur mid-stream.
-    const maxStreamingAttempts = 2;
+    // @issue #1187: Different maxStreamingAttempts for Codex vs regular mode
+    // Read retry configuration from ephemeral settings
+    const ephemeralRetries = options.invocation?.ephemerals?.['retries'] as
+      | number
+      | undefined;
+    const ephemeralRetryWait = options.invocation?.ephemerals?.['retrywait'] as
+      | number
+      | undefined;
+    const maxStreamingAttempts = ephemeralRetries ?? (isCodex ? 5 : 4);
+    const streamRetryInitialDelayMs = ephemeralRetryWait ?? 5000;
+    const streamRetryMaxDelayMs = 30000;
     let streamingAttempt = 0;
+    let currentDelay = streamRetryInitialDelayMs;
 
     while (streamingAttempt < maxStreamingAttempts) {
       streamingAttempt++;
@@ -736,6 +1054,8 @@ export class OpenAIResponsesProvider extends BaseProvider {
           }),
         {
           shouldRetryOnError: this.shouldRetryOnError.bind(this),
+          maxAttempts: maxStreamingAttempts,
+          initialDelayMs: streamRetryInitialDelayMs,
         },
       );
 
@@ -753,7 +1073,15 @@ export class OpenAIResponsesProvider extends BaseProvider {
       }
 
       try {
-        for await (const message of parseResponsesStream(response.body)) {
+        // Pass options to parseResponsesStream to respect reasoning.includeInResponse setting
+        // This fixes #922: thinking blocks should be suppressed when includeInResponse=false
+        const streamOptions: ParseResponsesStreamOptions = {
+          includeThinkingInResponse,
+        };
+        for await (const message of parseResponsesStream(
+          response.body,
+          streamOptions,
+        )) {
           yield message;
         }
         return;
@@ -761,12 +1089,18 @@ export class OpenAIResponsesProvider extends BaseProvider {
         const canRetryStream = this.shouldRetryOnError(error);
         this.logger.debug(
           () =>
-            `Responses stream error on attempt ${streamingAttempt}/${maxStreamingAttempts}: ${String(error)}`,
+            `Stream retry attempt ${streamingAttempt}/${maxStreamingAttempts}: Transient error detected, delay ${currentDelay}ms before retry. Error: ${String(error)}`,
         );
 
         if (!canRetryStream || streamingAttempt >= maxStreamingAttempts) {
           throw error;
         }
+
+        // @issue #1187: Add exponential backoff with jitter between stream retries
+        const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
+        const delayWithJitter = Math.max(0, currentDelay + jitter);
+        await delay(delayWithJitter);
+        currentDelay = Math.min(streamRetryMaxDelayMs, currentDelay * 2);
 
         // Retry by restarting the request from the beginning.
         // NOTE: This can re-yield partial content from a previous attempt.

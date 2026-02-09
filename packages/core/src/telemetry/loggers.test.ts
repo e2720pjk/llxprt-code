@@ -6,7 +6,6 @@
 
 import {
   AnyToolInvocation,
-  AuthType,
   CompletedToolCall,
   ContentGeneratorConfig,
   EditTool,
@@ -74,8 +73,6 @@ import { GenerateContentResponseUsageMetadata } from '@google/genai';
 import * as uiTelemetry from './uiTelemetry.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import { CallableTool } from '../tools/tool.js';
-import { AnyToolInvocation } from '../tools/invocation.js';
-import { CompletedToolCall } from '../tools/completed-tool-call.js';
 
 // Mock ClearcutLogger to avoid import errors
 const mockClearcutLogger = {
@@ -122,7 +119,6 @@ describe('loggers', () => {
         getContentGeneratorConfig: () => ({
           model: 'test-model',
           apiKey: 'test-api-key',
-          authType: AuthType.USE_VERTEX_AI,
         }),
         getTelemetryEnabled: () => true,
         getUsageStatisticsEnabled: () => true,
@@ -155,7 +151,7 @@ describe('loggers', () => {
           core_tools_enabled: 'ls,read-file',
           approval_mode: 'default',
           api_key_enabled: true,
-          vertex_ai_enabled: true,
+          vertex_ai_enabled: false,
           log_user_prompts_enabled: true,
           file_filtering_respect_git_ignore: true,
           debug_mode: true,
@@ -174,12 +170,7 @@ describe('loggers', () => {
     } as unknown as Config;
 
     it('should log a user prompt', () => {
-      const event = new UserPromptEvent(
-        11,
-        'prompt-id-8',
-        AuthType.USE_VERTEX_AI,
-        'test-prompt',
-      );
+      const event = new UserPromptEvent(11, 'prompt-id-8', 'test-prompt');
 
       logUserPrompt(mockConfig, event);
 
@@ -203,11 +194,7 @@ describe('loggers', () => {
         getTargetDir: () => 'target-dir',
         getUsageStatisticsEnabled: () => true,
       } as unknown as Config;
-      const event = new UserPromptEvent(
-        11,
-        'test-prompt',
-        AuthType.CLOUD_SHELL,
-      );
+      const event = new UserPromptEvent(11, 'test-prompt');
 
       logUserPrompt(mockConfig, event);
 
@@ -258,7 +245,6 @@ describe('loggers', () => {
         'test-model',
         100,
         'prompt-id-1',
-        AuthType.LOGIN_WITH_GOOGLE,
         usageData,
         'test-response',
       );
@@ -283,7 +269,6 @@ describe('loggers', () => {
           total_token_count: 0,
           response_text: 'test-response',
           prompt_id: 'prompt-id-1',
-          auth_type: 'oauth-personal',
         },
       });
 
@@ -321,7 +306,6 @@ describe('loggers', () => {
         'test-model',
         100,
         'prompt-id-1',
-        AuthType.USE_GEMINI,
         usageData,
         'test-response',
         'test-error',
@@ -426,7 +410,7 @@ describe('loggers', () => {
       }),
       getQuestion: () => 'test-question',
       getToolRegistry: () => new ToolRegistry(cfg1),
-      getFullContext: () => false,
+
       getUserMemory: () => 'user-memory',
       getComplexityAnalyzerSettings: () => ({
         complexityThreshold: 0.5,

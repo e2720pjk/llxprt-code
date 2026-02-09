@@ -6,6 +6,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import type { ClientOptions } from '@anthropic-ai/sdk';
+import { createHash } from 'node:crypto';
 import type {
   ToolUseBlock,
   TextDelta,
@@ -16,6 +17,7 @@ import { type IModel } from '../IModel.js';
 import type { ToolFormat } from '../../tools/IToolFormatter.js';
 import {
   convertToolsToAnthropic,
+  TOOL_PREFIX,
   type AnthropicTool,
 } from './schemaConverter.js';
 import { type IProviderConfig } from '../types/IProviderConfig.js';
@@ -35,12 +37,15 @@ import {
   type ToolResponseBlock,
   type TextBlock,
   type ThinkingBlock,
+  type CodeBlock,
 } from '../../services/history/IContent.js';
 import {
   processToolParameters,
   logDoubleEscapingInChunk,
 } from '../../tools/doubleEscapeUtils.js';
+import { coerceParametersToSchema } from '../../utils/parameterCoercion.js';
 import { getCoreSystemPromptAsync } from '../../core/prompts.js';
+import { shouldIncludeSubagentDelegation } from '../../prompt-config/subagent-delegation.js';
 import type { ProviderTelemetryContext } from '../types/providerRuntime.js';
 import { resolveUserMemory } from '../utils/userMemory.js';
 import { buildToolResponsePayload } from '../utils/toolResponsePayload.js';
@@ -49,12 +54,32 @@ import {
   getErrorStatus,
   isNetworkTransientError,
 } from '../../utils/retry.js';
+import { delay } from '../../utils/delay.js';
 import { getSettingsService } from '../../settings/settingsServiceInstance.js';
 import {
   shouldDumpSDKContext,
   dumpSDKContext,
 } from '../utils/dumpSDKContext.js';
 import type { DumpMode } from '../utils/dumpContext.js';
+
+type AnthropicMessageBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: unknown }
+  | {
+      type: 'tool_result';
+      tool_use_id: string;
+      content: string;
+      is_error?: boolean;
+    }
+  | { type: 'thinking'; thinking: string; signature?: string }
+  | { type: 'redacted_thinking'; data: string };
+
+type AnthropicMessageContent = string | AnthropicMessageBlock[];
+
+type AnthropicMessage = {
+  role: 'user' | 'assistant';
+  content: AnthropicMessageContent;
+};
 
 /**
  * Rate limit information from Anthropic API response headers
@@ -164,17 +189,19 @@ export class AnthropicProvider extends BaseProvider {
       dangerouslyAllowBrowser: true,
     };
 
-    if (baseURL && baseURL.trim() !== '') {
-      clientConfig.baseURL = baseURL;
-    }
-
     if (isOAuthToken) {
       clientConfig.authToken = authToken;
       clientConfig.defaultHeaders = {
-        'anthropic-beta': 'oauth-2025-04-20',
+        'anthropic-beta': 'oauth-2025-04-20, interleaved-thinking-2025-05-14',
       };
+      if (baseURL && baseURL.trim() !== '') {
+        clientConfig.baseURL = baseURL;
+      }
     } else {
       clientConfig.apiKey = authToken || '';
+      if (baseURL && baseURL.trim() !== '') {
+        clientConfig.baseURL = baseURL;
+      }
     }
 
     return new Anthropic(clientConfig as ClientOptions);
@@ -284,9 +311,17 @@ export class AnthropicProvider extends BaseProvider {
       );
       return [
         {
+          id: 'claude-opus-4-6',
+          name: 'Claude Opus 4.6',
+          provider: this.name,
+          supportedToolFormats: ['anthropic'],
+          contextWindow: 200000,
+          maxOutputTokens: 128000,
+        },
+        {
           id: 'claude-opus-4-5-20251101',
           name: 'Claude Opus 4.5',
-          provider: 'anthropic',
+          provider: this.name,
           supportedToolFormats: ['anthropic'],
           contextWindow: 500000,
           maxOutputTokens: 32000,
@@ -294,7 +329,7 @@ export class AnthropicProvider extends BaseProvider {
         {
           id: 'claude-opus-4-5',
           name: 'Claude Opus 4.5',
-          provider: 'anthropic',
+          provider: this.name,
           supportedToolFormats: ['anthropic'],
           contextWindow: 500000,
           maxOutputTokens: 32000,
@@ -302,7 +337,7 @@ export class AnthropicProvider extends BaseProvider {
         {
           id: 'claude-opus-4-1-20250805',
           name: 'Claude Opus 4.1',
-          provider: 'anthropic',
+          provider: this.name,
           supportedToolFormats: ['anthropic'],
           contextWindow: 500000,
           maxOutputTokens: 32000,
@@ -310,7 +345,7 @@ export class AnthropicProvider extends BaseProvider {
         {
           id: 'claude-opus-4-1',
           name: 'Claude Opus 4.1',
-          provider: 'anthropic',
+          provider: this.name,
           supportedToolFormats: ['anthropic'],
           contextWindow: 500000,
           maxOutputTokens: 32000,
@@ -318,7 +353,7 @@ export class AnthropicProvider extends BaseProvider {
         {
           id: 'claude-sonnet-4-5-20250929',
           name: 'Claude Sonnet 4.5',
-          provider: 'anthropic',
+          provider: this.name,
           supportedToolFormats: ['anthropic'],
           contextWindow: 400000,
           maxOutputTokens: 64000,
@@ -326,7 +361,7 @@ export class AnthropicProvider extends BaseProvider {
         {
           id: 'claude-sonnet-4-5',
           name: 'Claude Sonnet 4.5',
-          provider: 'anthropic',
+          provider: this.name,
           supportedToolFormats: ['anthropic'],
           contextWindow: 400000,
           maxOutputTokens: 64000,
@@ -334,7 +369,7 @@ export class AnthropicProvider extends BaseProvider {
         {
           id: 'claude-sonnet-4-20250514',
           name: 'Claude Sonnet 4',
-          provider: 'anthropic',
+          provider: this.name,
           supportedToolFormats: ['anthropic'],
           contextWindow: 400000,
           maxOutputTokens: 64000,
@@ -342,7 +377,7 @@ export class AnthropicProvider extends BaseProvider {
         {
           id: 'claude-sonnet-4',
           name: 'Claude Sonnet 4',
-          provider: 'anthropic',
+          provider: this.name,
           supportedToolFormats: ['anthropic'],
           contextWindow: 400000,
           maxOutputTokens: 64000,
@@ -350,7 +385,7 @@ export class AnthropicProvider extends BaseProvider {
         {
           id: 'claude-haiku-4-5-20251001',
           name: 'Claude Haiku 4.5',
-          provider: 'anthropic',
+          provider: this.name,
           supportedToolFormats: ['anthropic'],
           contextWindow: 500000,
           maxOutputTokens: 16000,
@@ -358,7 +393,7 @@ export class AnthropicProvider extends BaseProvider {
         {
           id: 'claude-haiku-4-5',
           name: 'Claude Haiku 4.5',
-          provider: 'anthropic',
+          provider: this.name,
           supportedToolFormats: ['anthropic'],
           contextWindow: 500000,
           maxOutputTokens: 16000,
@@ -380,7 +415,7 @@ export class AnthropicProvider extends BaseProvider {
         models.push({
           id: model.id,
           name: model.display_name || model.id,
-          provider: 'anthropic',
+          provider: this.name,
           supportedToolFormats: ['anthropic'],
           contextWindow: this.getContextWindowForModel(model.id),
           maxOutputTokens: this.getMaxTokensForModel(model.id),
@@ -435,9 +470,17 @@ export class AnthropicProvider extends BaseProvider {
   private getDefaultModels(): IModel[] {
     return [
       {
+        id: 'claude-opus-4-6',
+        name: 'Claude Opus 4.6',
+        provider: this.name,
+        supportedToolFormats: ['anthropic'],
+        contextWindow: 200000,
+        maxOutputTokens: 128000,
+      },
+      {
         id: 'claude-opus-4-5-20251101',
         name: 'Claude Opus 4.5',
-        provider: 'anthropic',
+        provider: this.name,
         supportedToolFormats: ['anthropic'],
         contextWindow: 500000,
         maxOutputTokens: 32000,
@@ -445,7 +488,7 @@ export class AnthropicProvider extends BaseProvider {
       {
         id: 'claude-opus-4-1-20250805',
         name: 'Claude Opus 4.1',
-        provider: 'anthropic',
+        provider: this.name,
         supportedToolFormats: ['anthropic'],
         contextWindow: 500000,
         maxOutputTokens: 32000,
@@ -453,7 +496,7 @@ export class AnthropicProvider extends BaseProvider {
       {
         id: 'claude-sonnet-4-5-20250929',
         name: 'Claude Sonnet 4.5',
-        provider: 'anthropic',
+        provider: this.name,
         supportedToolFormats: ['anthropic'],
         contextWindow: 400000,
         maxOutputTokens: 64000,
@@ -461,7 +504,7 @@ export class AnthropicProvider extends BaseProvider {
       {
         id: 'claude-haiku-4-5-20251001',
         name: 'Claude Haiku 4.5',
-        provider: 'anthropic',
+        provider: this.name,
         supportedToolFormats: ['anthropic'],
         contextWindow: 500000,
         maxOutputTokens: 16000,
@@ -490,7 +533,11 @@ export class AnthropicProvider extends BaseProvider {
   }
 
   private getMaxTokensForModel(modelId: string): number {
-    // Handle latest aliases explicitly
+    // Handle Opus 4.6 first - it has 128K max output (different from other opus-4 models)
+    if (modelId.includes('claude-opus-4-6')) {
+      return 128000;
+    }
+    // Handle latest aliases and other opus-4 models explicitly
     if (
       modelId === 'claude-opus-4-latest' ||
       modelId.includes('claude-opus-4')
@@ -517,7 +564,11 @@ export class AnthropicProvider extends BaseProvider {
   }
 
   private getContextWindowForModel(modelId: string): number {
-    // Claude 4 models have larger context windows
+    // Claude Opus 4.6 has 200K context (different from other opus-4 models)
+    if (modelId.includes('claude-opus-4-6')) {
+      return 200000;
+    }
+    // Other Claude 4 opus models have larger context windows
     if (modelId.includes('claude-opus-4')) {
       return 500000;
     }
@@ -558,52 +609,32 @@ export class AnthropicProvider extends BaseProvider {
     throw new Error('Server tools not supported by Anthropic provider');
   }
 
+  override getToolFormat(): ToolFormat {
+    const format = this.detectToolFormat();
+    const logger = new DebugLogger('llxprt:provider:anthropic');
+    logger.debug(() => `getToolFormat() called, returning: ${format}`, {
+      provider: this.name,
+      model: this.getModel(),
+      format,
+    });
+    return format;
+  }
+
+  getRateLimitInfo(): AnthropicRateLimitInfo | undefined {
+    return this.lastRateLimitInfo;
+  }
+
   /**
    * Get current model parameters from SettingsService per call
    * @returns Current parameters or undefined if not set
    * @plan PLAN-20251023-STATELESS-HARDENING.P08
+   * @plan PLAN-20260126-SETTINGS-SEPARATION.P09
    * @requirement REQ-SP4-003
    * Gets model parameters from SettingsService per call (stateless)
+   * Now uses pre-separated modelParams from invocation context
    */
   override getModelParams(): Record<string, unknown> | undefined {
-    try {
-      const settingsService = this.resolveSettingsService();
-      const providerSettings = settingsService.getProviderSettings(this.name);
-
-      const reservedKeys = new Set([
-        'enabled',
-        'apiKey',
-        'api-key',
-        'apiKeyfile',
-        'api-keyfile',
-        'baseUrl',
-        'base-url',
-        'model',
-        'toolFormat',
-        'tool-format',
-        'toolFormatOverride',
-        'tool-format-override',
-        'defaultModel',
-      ]);
-
-      const params: Record<string, unknown> = {};
-      if (providerSettings) {
-        for (const [key, value] of Object.entries(providerSettings)) {
-          if (reservedKeys.has(key) || value === undefined || value === null) {
-            continue;
-          }
-          params[key] = value;
-        }
-      }
-
-      return Object.keys(params).length > 0 ? params : undefined;
-    } catch (error) {
-      this.getLogger().debug(
-        () =>
-          `Failed to get Anthropic provider settings from SettingsService: ${error}`,
-      );
-      return undefined;
-    }
+    return undefined;
   }
 
   /**
@@ -673,37 +704,6 @@ export class AnthropicProvider extends BaseProvider {
     }
   }
 
-  override getToolFormat(): ToolFormat {
-    // Use the same detection logic as detectToolFormat()
-    return this.detectToolFormat();
-  }
-
-  /**
-   * Normalize tool IDs from various formats to Anthropic format
-   * Handles IDs from OpenAI (call_xxx), Anthropic (toolu_xxx), and history (hist_tool_xxx)
-   */
-  private normalizeToAnthropicToolId(id: string): string {
-    // If already in Anthropic format, return as-is
-    if (id.startsWith('toolu_')) {
-      return id;
-    }
-
-    // For history format, extract the UUID and add Anthropic prefix
-    if (id.startsWith('hist_tool_')) {
-      const uuid = id.substring('hist_tool_'.length);
-      return 'toolu_' + uuid;
-    }
-
-    // For OpenAI format, extract the UUID and add Anthropic prefix
-    if (id.startsWith('call_')) {
-      const uuid = id.substring('call_'.length);
-      return 'toolu_' + uuid;
-    }
-
-    // Unknown format - assume it's a raw UUID
-    return 'toolu_' + id;
-  }
-
   /**
    * Normalize tool IDs from Anthropic format to history format
    */
@@ -727,6 +727,57 @@ export class AnthropicProvider extends BaseProvider {
 
     // Unknown format - assume it's a raw UUID
     return 'hist_tool_' + id;
+  }
+  private unprefixToolName(name: string, isOAuth: boolean): string {
+    // Only unprefix for OAuth requests
+    if (!isOAuth) {
+      return name;
+    }
+
+    // Remove the prefix if it's present
+    if (name.startsWith(TOOL_PREFIX)) {
+      return name.substring(TOOL_PREFIX.length);
+    }
+
+    // Return as-is if no prefix
+    return name;
+  }
+
+  /**
+   * Find the JSON schema for a tool by name from the tools array.
+   * Used for schema-aware parameter coercion (issue #1146).
+   */
+  private findToolSchema(
+    tools:
+      | Array<{
+          functionDeclarations: Array<{
+            name: string;
+            parameters?: unknown;
+            parametersJsonSchema?: unknown;
+          }>;
+        }>
+      | undefined,
+    toolName: string,
+    isOAuth: boolean,
+  ): unknown {
+    if (!tools) return undefined;
+
+    // For OAuth, tool names in the tools array are prefixed (e.g., llxprt_read_file)
+    // but toolName from the response is unprefixed (e.g., read_file)
+    // So we need to unprefix the stored name before comparing
+    for (const group of tools) {
+      for (const decl of group.functionDeclarations) {
+        const declName = isOAuth
+          ? this.unprefixToolName(decl.name, true)
+          : decl.name;
+        if (declName === toolName) {
+          // Return parametersJsonSchema if available, otherwise parameters
+          return decl.parametersJsonSchema ?? decl.parameters;
+        }
+      }
+    }
+
+    return undefined;
   }
 
   /**
@@ -781,45 +832,47 @@ export class AnthropicProvider extends BaseProvider {
     );
     const { contents: content, tools } = options;
 
-    // Read reasoning settings from options.settings (SettingsService) - same pattern as OpenAI
-    // This is the correct way to access ephemeral settings that are applied via profiles
-    const reasoningEnabled = options.settings.get('reasoning.enabled') as
-      | boolean
-      | undefined;
-    const reasoningBudgetTokens = options.settings.get(
-      'reasoning.budgetTokens',
-    ) as number | undefined;
-    const stripFromContext = options.settings.get(
-      'reasoning.stripFromContext',
-    ) as 'all' | 'allButLast' | 'none' | undefined;
-    const includeInContext = options.settings.get(
-      'reasoning.includeInContext',
-    ) as boolean | undefined;
+    // Detect OAuth token for Claude Code compatibility
+    const isOAuth = authToken.startsWith('sk-ant-oat');
+
+    // Read reasoning settings from invocation.modelBehavior first, fallback to options.settings
+    // @plan PLAN-20260126-SETTINGS-SEPARATION.P09
+    // Guard: check if getModelBehavior exists before calling
+    const reasoningEnabled =
+      (typeof options.invocation?.getModelBehavior === 'function'
+        ? options.invocation.getModelBehavior('reasoning.enabled')
+        : undefined) ??
+      (options.settings.get('reasoning.enabled') as boolean | undefined);
+    const reasoningBudgetTokens =
+      (typeof options.invocation?.getModelBehavior === 'function'
+        ? options.invocation.getModelBehavior('reasoning.budgetTokens')
+        : undefined) ??
+      (options.settings.get('reasoning.budgetTokens') as number | undefined);
+    const stripFromContext =
+      (typeof options.invocation?.getCliSetting === 'function'
+        ? options.invocation.getCliSetting('reasoning.stripFromContext')
+        : undefined) ??
+      (options.settings.get('reasoning.stripFromContext') as
+        | 'all'
+        | 'allButLast'
+        | 'none'
+        | undefined);
+    const includeInContext =
+      (typeof options.invocation?.getCliSetting === 'function'
+        ? options.invocation.getCliSetting('reasoning.includeInContext')
+        : undefined) ??
+      (options.settings.get('reasoning.includeInContext') as
+        | boolean
+        | undefined);
 
     // Debug log reasoning settings source
     this.getLogger().debug(
       () =>
-        `[AnthropicProvider] Reasoning settings from options.settings: enabled=${String(reasoningEnabled)}, budgetTokens=${String(reasoningBudgetTokens)}, stripFromContext=${String(stripFromContext)}, includeInContext=${String(includeInContext)}`,
+        `[AnthropicProvider] Reasoning settings from invocation.modelBehavior (fallback to options.settings): enabled=${String(reasoningEnabled)}, budgetTokens=${String(reasoningBudgetTokens)}, stripFromContext=${String(stripFromContext)}, includeInContext=${String(includeInContext)}`,
     );
 
     // Convert IContent directly to Anthropic API format (no IMessage!)
-    const anthropicMessages: Array<{
-      role: 'user' | 'assistant';
-      content:
-        | string
-        | Array<
-            | { type: 'text'; text: string }
-            | { type: 'tool_use'; id: string; name: string; input: unknown }
-            | {
-                type: 'tool_result';
-                tool_use_id: string;
-                content: string;
-                is_error?: boolean;
-              }
-            | { type: 'thinking'; thinking: string; signature?: string }
-            | { type: 'redacted_thinking'; data: string }
-          >;
-    }> = [];
+    const anthropicMessages: AnthropicMessage[] = [];
 
     // Extract system message if present
     // let systemMessage: string | undefined;
@@ -840,22 +893,17 @@ export class AnthropicProvider extends BaseProvider {
     }
     const filteredContentRaw = content.slice(startIndex);
 
-    // Pre-process content to merge consecutive AI messages where one has only thinking
-    // and the next has tool calls. This handles the case where thinking and tool calls
-    // are streamed and stored separately during Anthropic Extended Thinking.
     const filteredContent: IContent[] = [];
-    for (let i = 0; i < filteredContentRaw.length; i++) {
-      const current = filteredContentRaw[i];
-      const next =
-        i + 1 < filteredContentRaw.length ? filteredContentRaw[i + 1] : null;
+    const consumedIndices = new Set<number>();
 
-      if (
-        reasoningEnabled &&
-        current.speaker === 'ai' &&
-        next &&
-        next.speaker === 'ai'
-      ) {
-        // Check if current has ONLY thinking blocks and next has tool_call blocks
+    for (let i = 0; i < filteredContentRaw.length; i++) {
+      if (consumedIndices.has(i)) {
+        continue;
+      }
+
+      const current = filteredContentRaw[i];
+
+      if (reasoningEnabled && current.speaker === 'ai') {
         const currentThinking = current.blocks.filter(
           (b) =>
             b.type === 'thinking' &&
@@ -866,63 +914,69 @@ export class AnthropicProvider extends BaseProvider {
             b.type !== 'thinking' ||
             (b as ThinkingBlock).sourceField !== 'thinking',
         );
-        const nextToolCalls = next.blocks.filter((b) => b.type === 'tool_call');
 
-        if (
-          currentThinking.length > 0 &&
-          currentOther.length === 0 &&
-          nextToolCalls.length > 0
-        ) {
-          // Merge: combine thinking from current with all blocks from next
-          this.getLogger().debug(
-            () =>
-              `[AnthropicProvider] Merging orphaned thinking block with subsequent tool_use message`,
-          );
-          filteredContent.push({
-            ...next,
-            blocks: [...currentThinking, ...next.blocks],
-          });
-          i++; // Skip the next item since we merged it
-          continue;
+        if (currentThinking.length > 0 && currentOther.length === 0) {
+          let endIndex = i;
+          while (
+            endIndex + 1 < filteredContentRaw.length &&
+            filteredContentRaw[endIndex + 1].speaker === 'ai'
+          ) {
+            endIndex++;
+          }
+
+          if (endIndex > i) {
+            const thinkingBlocks: ThinkingBlock[] = [
+              ...(currentThinking as ThinkingBlock[]),
+            ];
+            const textBlocks: Array<TextBlock | CodeBlock> = [];
+            const toolCallBlocks: ToolCallBlock[] = [];
+
+            const otherBlocks: ContentBlock[] = [];
+
+            for (let j = i + 1; j <= endIndex; j++) {
+              for (const block of filteredContentRaw[j].blocks) {
+                if (
+                  block.type === 'thinking' &&
+                  (block as ThinkingBlock).sourceField === 'thinking'
+                ) {
+                  thinkingBlocks.push(block as ThinkingBlock);
+                } else if (block.type === 'text' || block.type === 'code') {
+                  textBlocks.push(block);
+                } else if (block.type === 'tool_call') {
+                  toolCallBlocks.push(block as ToolCallBlock);
+                } else {
+                  // Catch-all for unknown block types to prevent silent data loss
+                  otherBlocks.push(block);
+                }
+              }
+              consumedIndices.add(j);
+            }
+
+            this.getLogger().debug(
+              () =>
+                `[AnthropicProvider] Merging ${endIndex - i + 1} consecutive AI messages (thinking-only followed by ${endIndex - i} message(s))`,
+            );
+
+            filteredContent.push({
+              ...filteredContentRaw[endIndex],
+              blocks: [
+                ...thinkingBlocks,
+                ...textBlocks,
+                ...otherBlocks,
+                ...toolCallBlocks,
+              ],
+            });
+            consumedIndices.add(i);
+            i = endIndex;
+            continue;
+          }
         }
       }
 
       filteredContent.push(current);
     }
 
-    // CRITICAL FIX: Check if there are tool calls in history without thinking blocks.
-    // Anthropic's API requires ALL assistant messages to start with thinking/redacted_thinking
-    // when thinking is enabled. Since our history system doesn't preserve thinking alongside
-    // tool calls, we must DISABLE thinking for multi-turn conversations with tool calls
-    // to avoid the API error "messages.1.content.0.type: Expected `thinking` or `redacted_thinking`"
-    //
-    // This is a workaround until thinking block preservation is fixed at the geminiChat level.
-    let effectiveReasoningEnabled = reasoningEnabled;
-    if (reasoningEnabled) {
-      for (const c of filteredContent) {
-        if (c.speaker === 'ai') {
-          const hasToolCalls = c.blocks.some((b) => b.type === 'tool_call');
-          const hasThinking = c.blocks.some(
-            (b) =>
-              b.type === 'thinking' &&
-              (b as ThinkingBlock).sourceField === 'thinking',
-          );
-
-          // If this AI message has tool calls but NO thinking, we must disable thinking
-          // to avoid API error
-          if (hasToolCalls && !hasThinking) {
-            this.getLogger().warn(
-              () =>
-                `[AnthropicProvider] Disabling extended thinking for this request: ` +
-                `history contains tool calls without associated thinking blocks. ` +
-                `This is a known limitation - thinking blocks are not preserved alongside tool calls in history.`,
-            );
-            effectiveReasoningEnabled = false;
-            break;
-          }
-        }
-      }
-    }
+    const shouldIncludeThinking = reasoningEnabled === true;
 
     // Group consecutive tool responses together for Anthropic API
     let pendingToolResults: Array<{
@@ -1087,9 +1141,6 @@ export class AnthropicProvider extends BaseProvider {
       } else if (c.speaker === 'ai') {
         // Flush any pending tool results before adding an AI message
         flushToolResults();
-        const textBlocks = c.blocks.filter(
-          (b) => b.type === 'text',
-        ) as TextBlock[];
         const toolCallBlocks = c.blocks.filter(
           (b) => b.type === 'tool_call',
         ) as ToolCallBlock[];
@@ -1098,7 +1149,7 @@ export class AnthropicProvider extends BaseProvider {
         ) as ThinkingBlock[];
 
         if (toolCallBlocks.length > 0 || thinkingBlocks.length > 0) {
-          // Build content array with text, thinking/redacted_thinking, and tool_use blocks
+          // Build content array preserving the original block order
           const contentArray: Array<
             | { type: 'text'; text: string }
             | { type: 'tool_use'; id: string; name: string; input: unknown }
@@ -1106,113 +1157,99 @@ export class AnthropicProvider extends BaseProvider {
             | { type: 'redacted_thinking'; data: string }
           > = [];
 
-          // Check if this message's thinking should be redacted (stripped but preserved as placeholder)
-          const shouldRedactThinking =
+          const shouldRedactThinkingBase =
             redactedThinkingIndices.has(contentIndex);
 
-          // Add thinking blocks first
-          // Only include thinking blocks with sourceField 'thinking' (Anthropic format)
-          // When redacting, convert to redacted_thinking to satisfy Anthropic's API requirement
-          // that assistant messages must start with thinking when thinking is enabled
-          //
-          // IMPORTANT: When thinking is enabled but the history has no thinking block for this
-          // assistant message (e.g., thinking was stored separately due to streaming), we need to
-          // look back at previous content items to find an orphaned thinking block to associate
-          // with this tool_use message. Anthropic requires ALL assistant messages to start with
-          // thinking/redacted_thinking when thinking mode is enabled.
-          let anthropicThinkingBlocks = thinkingBlocks.filter(
-            (tb) => tb.sourceField === 'thinking',
-          );
+          const shouldRedactBlock = (block: ThinkingBlock): boolean => {
+            if (block.sourceField !== 'thinking' || !block.signature) {
+              return false;
+            }
+            if (!shouldRedactThinkingBase) {
+              return false;
+            }
+            return true;
+          };
 
-          // If no thinking blocks found but we have tool calls and thinking is enabled,
-          // look back at the previous content item for orphaned thinking blocks
-          if (
-            anthropicThinkingBlocks.length === 0 &&
-            effectiveReasoningEnabled &&
-            toolCallBlocks.length > 0 &&
-            contentIndex > 0
-          ) {
-            const prevContent = processedContent[contentIndex - 1];
-            if (prevContent.speaker === 'ai') {
-              const prevThinkingBlocks = prevContent.blocks.filter(
-                (b) =>
-                  b.type === 'thinking' &&
-                  (b as ThinkingBlock).sourceField === 'thinking',
-              ) as ThinkingBlock[];
-              // Check if prev content was ONLY thinking (no other content)
-              const prevNonThinkingBlocks = prevContent.blocks.filter(
-                (b) =>
-                  b.type !== 'thinking' ||
-                  (b as ThinkingBlock).sourceField !== 'thinking',
-              );
+          for (const block of c.blocks) {
+            if (block.type === 'thinking') {
+              const thinkingBlock = block as ThinkingBlock;
               if (
-                prevThinkingBlocks.length > 0 &&
-                prevNonThinkingBlocks.length === 0
+                thinkingBlock.sourceField !== 'thinking' ||
+                !thinkingBlock.signature
               ) {
                 this.getLogger().debug(
                   () =>
-                    `[AnthropicProvider] Found orphaned thinking block in previous content item, merging with tool_use message`,
+                    `[AnthropicProvider] Skipping thinking block without signature at index ${contentIndex}`,
                 );
-                anthropicThinkingBlocks = prevThinkingBlocks;
+                continue;
               }
-            }
-          }
-
-          if (anthropicThinkingBlocks.length > 0) {
-            // Process existing thinking blocks
-            for (const tb of anthropicThinkingBlocks) {
-              if (shouldRedactThinking) {
-                // Use redacted_thinking with the signature as data
-                // This satisfies Anthropic's requirement while saving tokens
+              if (shouldRedactBlock(thinkingBlock)) {
                 contentArray.push({
                   type: 'redacted_thinking',
-                  data: tb.signature || '',
+                  data: thinkingBlock.signature,
                 });
               } else {
                 contentArray.push({
                   type: 'thinking',
-                  thinking: tb.thought,
-                  signature: tb.signature,
+                  thinking: thinkingBlock.thought,
+                  signature: thinkingBlock.signature,
                 });
               }
+              continue;
             }
-          }
 
-          // Add text if present
-          const contentText = textBlocks.map((b) => b.text).join('');
-          if (contentText) {
-            contentArray.push({ type: 'text', text: contentText });
-          }
+            if (block.type === 'text') {
+              contentArray.push({ type: 'text', text: block.text });
+              continue;
+            }
 
-          // Add tool uses
-          for (const tc of toolCallBlocks) {
-            // Ensure parameters are an object, not a string
-            let parametersObj = tc.parameters;
-            if (typeof parametersObj === 'string') {
-              try {
-                parametersObj = JSON.parse(parametersObj);
-              } catch (e) {
-                this.getToolsLogger().debug(
-                  () => `Failed to parse tool parameters as JSON: ${e}`,
-                );
-                parametersObj = {};
+            if (block.type === 'code') {
+              const language = block.language ? block.language : '';
+              const codeText = `
+
+\u0060\u0060\u0060${language}
+${block.code}
+\u0060\u0060\u0060
+`;
+              contentArray.push({ type: 'text', text: codeText });
+              continue;
+            }
+
+            if (block.type === 'tool_call') {
+              let parametersObj = block.parameters;
+              if (typeof parametersObj === 'string') {
+                try {
+                  parametersObj = JSON.parse(parametersObj);
+                } catch (e) {
+                  this.getToolsLogger().debug(
+                    () => `Failed to parse tool parameters as JSON: ${e}`,
+                  );
+                  parametersObj = {};
+                }
               }
+              contentArray.push({
+                type: 'tool_use',
+                id: this.normalizeToAnthropicToolId(block.id),
+                name: this.unprefixToolName(block.name, isOAuth),
+                input: parametersObj,
+              });
+              continue;
             }
-            contentArray.push({
-              type: 'tool_use',
-              id: this.normalizeToAnthropicToolId(tc.id),
-              name: tc.name,
-              input: parametersObj,
+          }
+          if (contentArray.length === 0) {
+            anthropicMessages.push({
+              role: 'assistant',
+              content: '',
+            });
+          } else {
+            anthropicMessages.push({
+              role: 'assistant',
+              content: contentArray,
             });
           }
-
-          anthropicMessages.push({
-            role: 'assistant',
-            content: contentArray,
-          });
         } else {
           // Text-only message
-          const contentText = textBlocks.map((b) => b.text).join('');
+          const contentText = blocksToText(c.blocks);
           anthropicMessages.push({
             role: 'assistant',
             content: contentText,
@@ -1287,6 +1324,168 @@ export class AnthropicProvider extends BaseProvider {
       anthropicMessages.push(...filteredMessages);
     }
 
+    for (let i = 0; i < anthropicMessages.length; i++) {
+      const msg = anthropicMessages[i];
+      if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+        const toolUseBlocks = msg.content.filter(
+          (block) => block.type === 'tool_use',
+        );
+
+        if (toolUseBlocks.length > 0) {
+          const toolUseIdsInMessage = toolUseBlocks.map(
+            (b) => (b as { id: string }).id,
+          );
+          const nextMsgIndex = i + 1;
+
+          if (
+            nextMsgIndex < anthropicMessages.length &&
+            anthropicMessages[nextMsgIndex].role === 'user'
+          ) {
+            const nextMsg = anthropicMessages[nextMsgIndex];
+            const nextMsgToolResults = Array.isArray(nextMsg.content)
+              ? nextMsg.content.filter((b) => b.type === 'tool_result')
+              : [];
+            const nextMsgToolResultIds = nextMsgToolResults.map(
+              (b) => (b as { tool_use_id: string }).tool_use_id,
+            );
+
+            const missingToolResultIds = toolUseIdsInMessage.filter(
+              (id) => !nextMsgToolResultIds.includes(id),
+            );
+
+            if (missingToolResultIds.length > 0) {
+              const collectedResults: Array<{
+                type: 'tool_result';
+                tool_use_id: string;
+                content: string;
+                is_error?: boolean;
+              }> = [];
+
+              const pendingRemovals: Array<{
+                msgIndex: number;
+                blockIndex: number;
+              }> = [];
+
+              for (const missingId of missingToolResultIds) {
+                let foundResult: {
+                  type: 'tool_result';
+                  tool_use_id: string;
+                  content: string;
+                  is_error?: boolean;
+                } | null = null;
+
+                for (
+                  let j = nextMsgIndex + 1;
+                  j < anthropicMessages.length;
+                  j++
+                ) {
+                  const laterMsg = anthropicMessages[j];
+                  if (
+                    laterMsg.role === 'user' &&
+                    Array.isArray(laterMsg.content)
+                  ) {
+                    const resultIdx = laterMsg.content.findIndex(
+                      (b) =>
+                        b.type === 'tool_result' &&
+                        (b as { tool_use_id: string }).tool_use_id ===
+                          missingId,
+                    );
+
+                    if (resultIdx >= 0) {
+                      foundResult = laterMsg.content[resultIdx] as {
+                        type: 'tool_result';
+                        tool_use_id: string;
+                        content: string;
+                        is_error?: boolean;
+                      };
+                      pendingRemovals.push({
+                        msgIndex: j,
+                        blockIndex: resultIdx,
+                      });
+                      break;
+                    }
+                  }
+                }
+
+                if (foundResult) {
+                  collectedResults.push(foundResult);
+                } else {
+                  collectedResults.push({
+                    type: 'tool_result',
+                    tool_use_id: missingId,
+                    content: '[tool execution interrupted]',
+                    is_error: true,
+                  });
+                }
+              }
+
+              for (const removal of pendingRemovals.sort(
+                (a, b) =>
+                  b.msgIndex - a.msgIndex || b.blockIndex - a.blockIndex,
+              )) {
+                const laterMsg = anthropicMessages[removal.msgIndex];
+                if (Array.isArray(laterMsg.content)) {
+                  laterMsg.content.splice(removal.blockIndex, 1);
+                  if (laterMsg.content.length === 0) {
+                    anthropicMessages.splice(removal.msgIndex, 1);
+                  }
+                }
+              }
+
+              if (collectedResults.length > 0) {
+                this.getToolsLogger().debug(
+                  () =>
+                    `Reordering ${collectedResults.length} tool_result(s) to immediately follow tool_use`,
+                );
+
+                if (Array.isArray(nextMsg.content)) {
+                  nextMsg.content.unshift(...collectedResults);
+                } else {
+                  const textBlock: { type: 'text'; text: string } = {
+                    type: 'text',
+                    text: nextMsg.content,
+                  };
+                  nextMsg.content = [...collectedResults, textBlock];
+                }
+              }
+            }
+          } else {
+            // Next message is not a user message - need to check if tool_result exists ANYWHERE
+            // Recompute the set of all tool_result IDs after adjacency enforcement mutations
+            const currentToolResultIds = new Set<string>();
+            for (const msg of anthropicMessages) {
+              if (msg.role === 'user' && Array.isArray(msg.content)) {
+                for (const block of msg.content) {
+                  if (block.type === 'tool_result') {
+                    currentToolResultIds.add(block.tool_use_id);
+                  }
+                }
+              }
+            }
+
+            const missingToolUseIds = toolUseIdsInMessage.filter(
+              (toolUseId) => !currentToolResultIds.has(toolUseId),
+            );
+            if (missingToolUseIds.length > 0) {
+              this.getToolsLogger().debug(
+                () =>
+                  `Synthesizing ${missingToolUseIds.length} missing tool_result(s) for orphaned tool_use`,
+              );
+              anthropicMessages.splice(nextMsgIndex, 0, {
+                role: 'user',
+                content: missingToolUseIds.map((toolUseId) => ({
+                  type: 'tool_result' as const,
+                  tool_use_id: toolUseId,
+                  content: '[tool execution interrupted]',
+                  is_error: true,
+                })),
+              });
+            }
+          }
+        }
+      }
+    }
+
     // Ensure the conversation starts with a valid message type
     // Anthropic requires the first message to be from the user
     if (anthropicMessages.length > 0 && anthropicMessages[0].role !== 'user') {
@@ -1308,8 +1507,51 @@ export class AnthropicProvider extends BaseProvider {
       });
     }
 
+    const isEmptyAnthropicContent = (
+      content: AnthropicMessageContent,
+    ): boolean => {
+      if (typeof content === 'string') {
+        return content.trim() === '';
+      }
+      if (content.length === 0) {
+        return true;
+      }
+      if (content.some((block) => block.type !== 'text')) {
+        return false;
+      }
+      return content.every(
+        (block) => block.type === 'text' && block.text.trim() === '',
+      );
+    };
+
+    const sanitizeEmptyAnthropicMessages = (
+      messages: AnthropicMessage[],
+    ): AnthropicMessage[] =>
+      messages.map((message, index) => {
+        const isLast = index === messages.length - 1;
+        const isEmpty = isEmptyAnthropicContent(message.content);
+        if (isLast) {
+          return message;
+        }
+        if (!isEmpty) {
+          return message;
+        }
+        const placeholder =
+          message.role === 'assistant'
+            ? '[No content generated]'
+            : '[Empty message]';
+        return {
+          ...message,
+          content: placeholder,
+        };
+      });
+
+    const sanitizedMessages = sanitizeEmptyAnthropicMessages(anthropicMessages);
+    anthropicMessages.length = 0;
+    anthropicMessages.push(...sanitizedMessages);
+
     // Convert Gemini format tools to Anthropic format using provider-specific converter
-    let anthropicTools = convertToolsToAnthropic(tools);
+    let anthropicTools = convertToolsToAnthropic(tools, isOAuth);
 
     // Stabilize tool ordering and JSON schema keys to prevent cache invalidation
     if (anthropicTools && anthropicTools.length > 0) {
@@ -1343,8 +1585,6 @@ export class AnthropicProvider extends BaseProvider {
             ),
           );
 
-    const isOAuth = authToken.startsWith('sk-ant-oat');
-
     // Get streaming setting from ephemeral settings (default: enabled)
     // Check invocation ephemerals first, then fall back to provider config
     const invocationEphemerals = options.invocation?.ephemerals ?? {};
@@ -1362,14 +1602,28 @@ export class AnthropicProvider extends BaseProvider {
       () => options.invocation?.userMemory,
     );
 
-    // Derive model parameters on demand from ephemeral settings
-    // Use invocation ephemerals for provider-specific request overrides (top_k, temperature, etc.)
-    // This maintains backward compatibility with the existing invocation context flow
+    // Get pre-separated model parameters from invocation context
+    // @plan PLAN-20260126-SETTINGS-SEPARATION.P09
+    const requestOverrides: Record<string, unknown> = {
+      ...(options.invocation?.modelParams ?? {}),
+    };
+
+    // Translate generic maxOutputTokens ephemeral to Anthropic's max_tokens
+    const rawMaxOutput = options.settings.get('maxOutputTokens');
+    const genericMaxOutput =
+      typeof rawMaxOutput === 'number' &&
+      Number.isFinite(rawMaxOutput) &&
+      rawMaxOutput > 0
+        ? rawMaxOutput
+        : undefined;
+    if (
+      genericMaxOutput !== undefined &&
+      requestOverrides['max_tokens'] === undefined
+    ) {
+      requestOverrides['max_tokens'] = genericMaxOutput;
+    }
+
     const configEphemeralSettings = options.invocation?.ephemerals ?? {};
-    const requestOverrides =
-      (configEphemeralSettings['anthropic'] as
-        | Record<string, unknown>
-        | undefined) ?? {};
 
     // Get caching setting from options.settings or provider settings
     const providerSettings =
@@ -1390,13 +1644,20 @@ export class AnthropicProvider extends BaseProvider {
       cacheLogger.debug(() => `Prompt caching enabled with TTL: ${ttl}`);
     }
 
+    // Determine whether to include subagent delegation prompt
+    const includeSubagentDelegation = await shouldIncludeSubagentDelegation(
+      toolNamesForPrompt ?? [],
+      () => options.config?.getSubagentManager?.(),
+    );
+
     // For OAuth mode, inject core system prompt as the first human message
     if (isOAuth) {
-      const corePrompt = await getCoreSystemPromptAsync(
+      const corePrompt = await getCoreSystemPromptAsync({
         userMemory,
-        currentModel,
-        toolNamesForPrompt,
-      );
+        model: currentModel,
+        tools: toolNamesForPrompt,
+        includeSubagentDelegation,
+      });
       if (corePrompt) {
         if (wantCaching) {
           anthropicMessages.unshift({
@@ -1426,11 +1687,12 @@ export class AnthropicProvider extends BaseProvider {
 
     // Build system field with caching support
     const systemPrompt = !isOAuth
-      ? await getCoreSystemPromptAsync(
+      ? await getCoreSystemPromptAsync({
           userMemory,
-          currentModel,
-          toolNamesForPrompt,
-        )
+          model: currentModel,
+          tools: toolNamesForPrompt,
+          includeSubagentDelegation,
+        })
       : undefined;
 
     let systemField: Record<string, unknown> = {};
@@ -1462,6 +1724,189 @@ export class AnthropicProvider extends BaseProvider {
     // Note: reasoningEnabled and reasoningBudgetTokens are now read from options.settings
     // at the start of this method (using options.settings.get() pattern like OpenAI)
 
+    // Attach cache_control to the last message's last non-thinking block when caching is enabled
+    // This marks the conversation history boundary for prompt caching
+    if (wantCaching && anthropicMessages.length > 0) {
+      const lastMessage = anthropicMessages[anthropicMessages.length - 1];
+
+      if (typeof lastMessage.content === 'string') {
+        if (lastMessage.content.trim() !== '') {
+          lastMessage.content = [
+            {
+              type: 'text',
+              text: lastMessage.content,
+              cache_control: { type: 'ephemeral', ttl },
+            },
+          ] as Array<
+            | {
+                type: 'text';
+                text: string;
+                cache_control: { type: 'ephemeral'; ttl?: '5m' | '1h' };
+              }
+            | {
+                type: 'tool_use';
+                id: string;
+                name: string;
+                input: unknown;
+                cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' };
+              }
+            | {
+                type: 'tool_result';
+                tool_use_id: string;
+                content: string;
+                is_error?: boolean;
+                cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' };
+              }
+          >;
+          cacheLogger.debug(
+            () =>
+              `Added cache_control to last message (converted string to array)`,
+          );
+        }
+      } else if (Array.isArray(lastMessage.content)) {
+        const content = lastMessage.content as Array<
+          | {
+              type: 'text';
+              text: string;
+              cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' };
+            }
+          | {
+              type: 'tool_use';
+              id: string;
+              name: string;
+              input: unknown;
+              cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' };
+            }
+          | {
+              type: 'tool_result';
+              tool_use_id: string;
+              content: string;
+              is_error?: boolean;
+              cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' };
+            }
+          | {
+              type: 'thinking';
+              thinking: string;
+              signature?: string;
+              cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' };
+            }
+          | {
+              type: 'redacted_thinking';
+              data: string;
+              cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' };
+            }
+        >;
+
+        let lastNonThinkingIndex = -1;
+        for (let i = content.length - 1; i >= 0; i--) {
+          const block = content[i];
+          if (block.type !== 'thinking' && block.type !== 'redacted_thinking') {
+            // Skipthinking blocks with empty text content
+            if (block.type === 'text' && block.text.trim() === '') {
+              continue;
+            }
+
+            // Skip tool_result blocks with empty content
+            if (block.type === 'tool_result' && block.content.trim() === '') {
+              continue;
+            }
+
+            lastNonThinkingIndex = i;
+            break;
+          }
+        }
+
+        if (lastNonThinkingIndex >= 0) {
+          content[lastNonThinkingIndex] = {
+            ...content[lastNonThinkingIndex],
+            cache_control: { type: 'ephemeral', ttl },
+          } as unknown as (typeof content)[number];
+          cacheLogger.debug(() => {
+            const block = content[lastNonThinkingIndex];
+            return `Added cache_control to last message's last ${block.type} block (index ${lastNonThinkingIndex})`;
+          });
+        }
+      }
+    }
+
+    // Read adaptive thinking and effort settings from invocation model-behavior, fallback to settings
+    // @issue #1307: Anthropic Opus 4.6 adaptive thinking support
+    const adaptiveThinking =
+      (typeof options.invocation?.getModelBehavior === 'function'
+        ? options.invocation.getModelBehavior('reasoning.adaptiveThinking')
+        : undefined) ??
+      (options.settings.get('reasoning.adaptiveThinking') as
+        | boolean
+        | undefined);
+
+    const rawEffort =
+      (typeof options.invocation?.getModelBehavior === 'function'
+        ? options.invocation.getModelBehavior('reasoning.effort')
+        : undefined) ??
+      (options.settings.get('reasoning.effort') as
+        | 'minimal'
+        | 'low'
+        | 'medium'
+        | 'high'
+        | 'xhigh'
+        | 'max'
+        | undefined);
+
+    // Map effort levels: minimal→low, low→low, medium→medium, high→high, xhigh/max→max
+    // Only allow max for Opus 4.6+; downgrade xhigh/max to high for older models
+    const isOpus46Plus = currentModel.includes('claude-opus-4-6');
+    let mappedEffort: 'low' | 'medium' | 'high' | 'max' | undefined;
+    if (rawEffort) {
+      if (rawEffort === 'minimal' || rawEffort === 'low') {
+        mappedEffort = 'low';
+      } else if (rawEffort === 'medium') {
+        mappedEffort = 'medium';
+      } else if (rawEffort === 'high') {
+        mappedEffort = 'high';
+      } else if (rawEffort === 'xhigh' || rawEffort === 'max') {
+        mappedEffort = isOpus46Plus ? 'max' : 'high';
+      }
+    }
+
+    // Build thinking configuration per Anthropic API semantics
+    // @issue #1307: Correct adaptive thinking support for Opus 4.6
+    // Adaptive mode: thinking.type='adaptive' (no budget_tokens)
+    // Manual mode: thinking.type='enabled' with budget_tokens
+    // Effort: sent in output_config.effort (not under thinking)
+    let thinkingConfig: {
+      thinking?: { type: 'adaptive' | 'enabled'; budget_tokens?: number };
+      output_config?: { effort: 'low' | 'medium' | 'high' | 'max' };
+    } = {};
+    if (shouldIncludeThinking) {
+      // For Opus 4.6+ with reasoning enabled, use adaptive thinking by default unless explicit budgetTokens
+      if (
+        isOpus46Plus &&
+        !reasoningBudgetTokens &&
+        adaptiveThinking !== false
+      ) {
+        // Adaptive thinking mode: type='adaptive', no budget_tokens
+        thinkingConfig = {
+          thinking: {
+            type: 'adaptive' as const,
+          },
+        };
+      } else {
+        // Manual mode with budget_tokens (for backwards compatibility or when budgetTokens is set)
+        thinkingConfig = {
+          thinking: {
+            type: 'enabled' as const,
+            budget_tokens:
+              (reasoningBudgetTokens as number | undefined) ?? 10000,
+          },
+        };
+      }
+
+      // Add effort to output_config if specified (not under thinking)
+      if (mappedEffort) {
+        thinkingConfig.output_config = { effort: mappedEffort };
+      }
+    }
+
     const requestBody = {
       model: currentModel,
       messages: anthropicMessages,
@@ -1472,15 +1917,7 @@ export class AnthropicProvider extends BaseProvider {
       ...(anthropicTools && anthropicTools.length > 0
         ? { tools: anthropicTools }
         : {}),
-      ...(effectiveReasoningEnabled
-        ? {
-            thinking: {
-              type: 'enabled' as const,
-              budget_tokens:
-                (reasoningBudgetTokens as number | undefined) ?? 10000,
-            },
-          }
-        : {}),
+      ...thinkingConfig,
     };
 
     // Debug log the tools being sent to Anthropic
@@ -1519,12 +1956,18 @@ export class AnthropicProvider extends BaseProvider {
       const existingBeta = customHeaders['anthropic-beta'] as
         | string
         | undefined;
+      const betaWithOAuth = this.mergeBetaHeaders(
+        existingBeta,
+        'oauth-2025-04-20',
+      );
+      const betaWithThinking = this.mergeBetaHeaders(
+        betaWithOAuth,
+        'interleaved-thinking-2025-05-14',
+      );
       customHeaders = {
         ...customHeaders,
-        'anthropic-beta': this.mergeBetaHeaders(
-          existingBeta,
-          'oauth-2025-04-20',
-        ),
+        'anthropic-beta': betaWithThinking,
+        'User-Agent': 'claude-cli/2.1.2 (external, cli)',
       };
     }
 
@@ -1580,14 +2023,68 @@ export class AnthropicProvider extends BaseProvider {
 
     // Bucket failover callback for 429 errors
     // @plan PLAN-20251213issue686 Bucket failover integration for AnthropicProvider
+    // @fix issue1029 - Enhanced failover handler lookup with multiple config sources
     const logger = this.getLogger();
     const onPersistent429Callback = async (): Promise<boolean | null> => {
-      // Try to get the bucket failover handler from runtime context config
-      const failoverHandler =
-        options.runtime?.config?.getBucketFailoverHandler();
+      // Try to get the bucket failover handler from multiple config sources
+      // Issue 1029: The handler may be set on a different Config instance than options.runtime?.config
+      // We need to check multiple sources to find it
+      const runtimeConfig = options.runtime?.config;
+      const optionsConfig = options.config;
+      const globalConfig = this.globalConfig;
+
+      // Debug logging to diagnose failover handler availability
+      logger.debug(
+        () =>
+          `[issue1029] Checking failover handler availability: ` +
+          `hasRuntimeConfig=${!!runtimeConfig}, ` +
+          `hasOptionsConfig=${!!optionsConfig}, ` +
+          `hasGlobalConfig=${!!globalConfig}`,
+      );
+
+      // Try to get failover handler from multiple config sources
+      let failoverHandler = runtimeConfig?.getBucketFailoverHandler?.();
+
+      if (!failoverHandler && optionsConfig) {
+        failoverHandler = optionsConfig.getBucketFailoverHandler?.();
+        if (failoverHandler) {
+          logger.debug(
+            () =>
+              '[issue1029] Found failover handler on options.config (not runtime.config)',
+          );
+        }
+      }
+
+      if (!failoverHandler && globalConfig) {
+        failoverHandler = globalConfig.getBucketFailoverHandler?.();
+        if (failoverHandler) {
+          logger.debug(
+            () =>
+              '[issue1029] Found failover handler on globalConfig (not runtime.config)',
+          );
+        }
+      }
+
+      // Log detailed state for debugging
+      if (failoverHandler) {
+        logger.debug(
+          () =>
+            `[issue1029] Failover handler found: enabled=${failoverHandler.isEnabled()}, ` +
+            `currentBucket=${failoverHandler.getCurrentBucket() ?? 'undefined'}, ` +
+            `buckets=${JSON.stringify(failoverHandler.getBuckets?.() ?? [])}`,
+        );
+      } else {
+        logger.debug(
+          () =>
+            '[issue1029] No failover handler found on any config. ' +
+            'Bucket failover will NOT be attempted. ' +
+            'Check that profile has auth.buckets configured and OAuthManager.setConfigGetter is wired.',
+        );
+      }
 
       if (failoverHandler && failoverHandler.isEnabled()) {
         logger.debug(() => 'Attempting bucket failover on persistent 429');
+        const currentBucket = failoverHandler.getCurrentBucket();
         const success = await failoverHandler.tryFailover();
         if (success) {
           // Clear runtime-scoped auth cache so subsequent auth resolution can pick up the new bucket.
@@ -1608,19 +2105,27 @@ export class AnthropicProvider extends BaseProvider {
             options.resolved.telemetry,
           );
           failoverClient = newClient;
+          const newBucket = failoverHandler.getCurrentBucket();
           logger.debug(
             () =>
-              `Bucket failover successful, new bucket: ${failoverHandler.getCurrentBucket()}`,
+              `Bucket failover successful: ${currentBucket} -> ${newBucket}`,
           );
           return true; // Signal retry with new bucket
         }
         logger.debug(
-          () => 'Bucket failover failed - no more buckets available',
+          () =>
+            `Bucket failover failed - no more buckets available after ${currentBucket}`,
         );
         return false; // No more buckets, stop retrying
       }
 
-      // No bucket failover configured
+      // No bucket failover configured or not enabled
+      if (failoverHandler && !failoverHandler.isEnabled()) {
+        logger.debug(
+          () =>
+            '[issue1029] Failover handler exists but is NOT enabled (likely single bucket profile)',
+        );
+      }
       return null;
     };
 
@@ -1744,218 +2249,314 @@ export class AnthropicProvider extends BaseProvider {
     }
 
     if (streamingEnabled) {
-      // Handle streaming response - response is already a Stream when streaming is enabled
-      const stream =
-        response as unknown as AsyncIterable<Anthropic.MessageStreamEvent>;
-      let currentToolCall:
-        | { id: string; name: string; input: string }
-        | undefined;
-      let currentThinkingBlock:
-        | { thinking: string; signature?: string }
-        | undefined;
+      // Handle streaming response with retry loop for transient network errors
+      // Similar to OpenAIResponsesProvider, we wrap the entire stream consumption
+      // in a retry loop to handle mid-stream disconnections (issue #1228)
+      // Use retry config from ephemeral settings
+      let streamingAttempt = 0;
+      let currentDelay = initialDelayMs;
+      const streamRetryMaxDelayMs = 30000;
+      const streamingLogger = this.getStreamingLogger();
 
-      this.getStreamingLogger().debug(() => 'Processing streaming response');
+      while (streamingAttempt < maxAttempts) {
+        streamingAttempt++;
 
-      try {
-        for await (const chunk of stream) {
-          if (chunk.type === 'message_start') {
-            // Extract cache metrics from message_start event
-            const usage = (
-              chunk as unknown as {
-                message?: {
-                  usage?: {
-                    input_tokens?: number;
-                    output_tokens?: number;
-                    cache_read_input_tokens?: number;
-                    cache_creation_input_tokens?: number;
+        // If this is a retry, make a fresh API call to get a new stream
+        if (streamingAttempt > 1) {
+          streamingLogger.debug(
+            () =>
+              `Stream retry attempt ${streamingAttempt}/${maxAttempts}: Making fresh API call`,
+          );
+          const retryResult = await retryWithBackoff(apiCallWithResponse, {
+            maxAttempts,
+            initialDelayMs,
+            shouldRetryOnError: this.shouldRetryAnthropicResponse.bind(this),
+            trackThrottleWaitTime: this.throttleTracker,
+            onPersistent429: onPersistent429Callback,
+          });
+          response = retryResult.data;
+        }
+
+        const stream =
+          response as unknown as AsyncIterable<Anthropic.MessageStreamEvent>;
+        let currentToolCall:
+          | { id: string; name: string; input: string }
+          | undefined;
+        let currentThinkingBlock:
+          | { thinking: string; signature?: string }
+          | undefined;
+
+        streamingLogger.debug(() => 'Processing streaming response');
+
+        try {
+          for await (const chunk of stream) {
+            if (chunk.type === 'message_start') {
+              // Extract cache metrics from message_start event
+              const usage = (
+                chunk as unknown as {
+                  message?: {
+                    usage?: {
+                      input_tokens?: number;
+                      output_tokens?: number;
+                      cache_read_input_tokens?: number;
+                      cache_creation_input_tokens?: number;
+                    };
                   };
+                }
+              ).message?.usage;
+              if (usage) {
+                const cacheRead = usage.cache_read_input_tokens ?? 0;
+                const cacheCreation = usage.cache_creation_input_tokens ?? 0;
+
+                cacheLogger.debug(
+                  () =>
+                    `[AnthropicProvider streaming] Emitting usage metadata: cacheRead=${cacheRead}, cacheCreation=${cacheCreation}, raw values: cache_read_input_tokens=${usage.cache_read_input_tokens}, cache_creation_input_tokens=${usage.cache_creation_input_tokens}`,
+                );
+
+                if (cacheRead > 0 || cacheCreation > 0) {
+                  cacheLogger.debug(() => {
+                    const hitRate =
+                      cacheRead + (usage.input_tokens ?? 0) > 0
+                        ? (cacheRead /
+                            (cacheRead + (usage.input_tokens ?? 0))) *
+                          100
+                        : 0;
+                    return `Cache metrics: read=${cacheRead}, creation=${cacheCreation}, hit_rate=${hitRate.toFixed(1)}%`;
+                  });
+                }
+
+                yield {
+                  speaker: 'ai',
+                  blocks: [],
+                  metadata: {
+                    usage: {
+                      promptTokens: usage.input_tokens ?? 0,
+                      completionTokens: usage.output_tokens ?? 0,
+                      totalTokens:
+                        (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
+                      cache_read_input_tokens: cacheRead,
+                      cache_creation_input_tokens: cacheCreation,
+                    },
+                  },
+                } as IContent;
+              }
+            } else if (chunk.type === 'content_block_start') {
+              if (chunk.content_block.type === 'tool_use') {
+                const toolBlock = chunk.content_block as ToolUseBlock;
+                this.getStreamingLogger().debug(
+                  () => `Starting tool use: ${toolBlock.name}`,
+                );
+                currentToolCall = {
+                  id: toolBlock.id,
+                  name: this.unprefixToolName(toolBlock.name, isOAuth),
+                  input: '',
+                };
+              } else if (chunk.content_block.type === 'thinking') {
+                this.getStreamingLogger().debug(
+                  () => 'Starting thinking block',
+                );
+                currentThinkingBlock = {
+                  thinking: '',
+                  signature: chunk.content_block.signature,
                 };
               }
-            ).message?.usage;
-            if (usage) {
+            } else if (chunk.type === 'content_block_delta') {
+              if (chunk.delta.type === 'text_delta') {
+                const textDelta = chunk.delta as TextDelta;
+                this.getStreamingLogger().debug(
+                  () => `Received text delta: ${textDelta.text.length} chars`,
+                );
+                // Emit text immediately as IContent
+                yield {
+                  speaker: 'ai',
+                  blocks: [{ type: 'text', text: textDelta.text }],
+                } as IContent;
+              } else if (
+                chunk.delta.type === 'input_json_delta' &&
+                currentToolCall
+              ) {
+                const jsonDelta = chunk.delta as InputJSONDelta;
+                currentToolCall.input += jsonDelta.partial_json;
+
+                // Check for double-escaping patterns
+                logDoubleEscapingInChunk(
+                  jsonDelta.partial_json,
+                  currentToolCall.name,
+                  'anthropic',
+                );
+              } else if (
+                chunk.delta.type === 'thinking_delta' &&
+                currentThinkingBlock
+              ) {
+                const thinkingDelta = chunk.delta as {
+                  type: 'thinking_delta';
+                  thinking: string;
+                };
+                currentThinkingBlock.thinking += thinkingDelta.thinking;
+                this.getStreamingLogger().debug(
+                  () =>
+                    `Thinking delta chunk (${thinkingDelta.thinking.length} chars): ${thinkingDelta.thinking}`,
+                );
+              } else if (
+                chunk.delta.type === 'signature_delta' &&
+                currentThinkingBlock
+              ) {
+                // Signature delta is sent just before content_block_stop for thinking blocks
+                // This contains the cryptographic signature for the thinking block
+                const signatureDelta = chunk.delta as {
+                  type: 'signature_delta';
+                  signature: string;
+                };
+                this.getStreamingLogger().debug(
+                  () =>
+                    `Received signature_delta: ${signatureDelta.signature.substring(0, 50)}...`,
+                );
+                currentThinkingBlock.signature = signatureDelta.signature;
+              }
+            } else if (chunk.type === 'content_block_stop') {
+              if (currentToolCall) {
+                const activeToolCall = currentToolCall;
+                this.getStreamingLogger().debug(
+                  () => `Completed tool use: ${activeToolCall.name}`,
+                );
+                // Process tool parameters with double-escape handling
+                let processedParameters = processToolParameters(
+                  activeToolCall.input,
+                  activeToolCall.name,
+                  'anthropic',
+                );
+
+                // Apply schema-aware type coercion to fix LLM type errors (issue #1146)
+                // Look up the tool schema from the tools passed to this request
+                const toolSchema = this.findToolSchema(
+                  tools,
+                  activeToolCall.name,
+                  isOAuth,
+                );
+                if (
+                  toolSchema &&
+                  processedParameters &&
+                  typeof processedParameters === 'object'
+                ) {
+                  processedParameters = coerceParametersToSchema(
+                    processedParameters,
+                    toolSchema,
+                  );
+                }
+
+                yield {
+                  speaker: 'ai',
+                  blocks: [
+                    {
+                      type: 'tool_call',
+                      id: this.normalizeToHistoryToolId(activeToolCall.id),
+                      name: activeToolCall.name,
+                      parameters: processedParameters,
+                    },
+                  ],
+                } as IContent;
+                currentToolCall = undefined;
+              } else if (currentThinkingBlock) {
+                const activeThinkingBlock = currentThinkingBlock;
+                this.getStreamingLogger().debug(
+                  () =>
+                    `Completed thinking block: ${activeThinkingBlock.thinking.length} chars`,
+                );
+                this.getStreamingLogger().debug(
+                  () =>
+                    `Thinking block content: ${activeThinkingBlock.thinking}`,
+                );
+
+                // Extract signature from content_block if present
+                const contentBlock = (
+                  chunk as unknown as {
+                    content_block?: {
+                      type: string;
+                      thinking?: string;
+                      signature?: string;
+                    };
+                  }
+                ).content_block;
+                if (contentBlock?.signature) {
+                  activeThinkingBlock.signature = contentBlock.signature;
+                }
+
+                yield {
+                  speaker: 'ai',
+                  blocks: [
+                    {
+                      type: 'thinking',
+                      thought: activeThinkingBlock.thinking,
+                      sourceField: 'thinking',
+                      signature: activeThinkingBlock.signature,
+                    } as ThinkingBlock,
+                  ],
+                } as IContent;
+                currentThinkingBlock = undefined;
+              }
+            } else if (chunk.type === 'message_delta' && chunk.usage) {
+              // Emit usage metadata including cache fields
+              const usage = chunk.usage as {
+                input_tokens: number;
+                output_tokens: number;
+                cache_read_input_tokens?: number;
+                cache_creation_input_tokens?: number;
+              };
+
               const cacheRead = usage.cache_read_input_tokens ?? 0;
               const cacheCreation = usage.cache_creation_input_tokens ?? 0;
 
-              cacheLogger.debug(
+              this.getStreamingLogger().debug(
                 () =>
-                  `[AnthropicProvider streaming] Emitting usage metadata: cacheRead=${cacheRead}, cacheCreation=${cacheCreation}, raw values: cache_read_input_tokens=${usage.cache_read_input_tokens}, cache_creation_input_tokens=${usage.cache_creation_input_tokens}`,
+                  `Received usage metadata from message_delta: promptTokens=${usage.input_tokens || 0}, completionTokens=${usage.output_tokens || 0}, cacheRead=${cacheRead}, cacheCreation=${cacheCreation}`,
               );
-
-              if (cacheRead > 0 || cacheCreation > 0) {
-                cacheLogger.debug(() => {
-                  const hitRate =
-                    cacheRead + (usage.input_tokens ?? 0) > 0
-                      ? (cacheRead / (cacheRead + (usage.input_tokens ?? 0))) *
-                        100
-                      : 0;
-                  return `Cache metrics: read=${cacheRead}, creation=${cacheCreation}, hit_rate=${hitRate.toFixed(1)}%`;
-                });
-              }
 
               yield {
                 speaker: 'ai',
                 blocks: [],
                 metadata: {
                   usage: {
-                    promptTokens: usage.input_tokens ?? 0,
-                    completionTokens: usage.output_tokens ?? 0,
+                    promptTokens: usage.input_tokens || 0,
+                    completionTokens: usage.output_tokens || 0,
                     totalTokens:
-                      (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
+                      (usage.input_tokens || 0) + (usage.output_tokens || 0),
                     cache_read_input_tokens: cacheRead,
                     cache_creation_input_tokens: cacheCreation,
                   },
                 },
               } as IContent;
             }
-          } else if (chunk.type === 'content_block_start') {
-            if (chunk.content_block.type === 'tool_use') {
-              const toolBlock = chunk.content_block as ToolUseBlock;
-              this.getStreamingLogger().debug(
-                () => `Starting tool use: ${toolBlock.name}`,
-              );
-              currentToolCall = {
-                id: toolBlock.id,
-                name: toolBlock.name,
-                input: '',
-              };
-            } else if (chunk.content_block.type === 'thinking') {
-              this.getStreamingLogger().debug(() => 'Starting thinking block');
-              currentThinkingBlock = {
-                thinking: '',
-              };
-            }
-          } else if (chunk.type === 'content_block_delta') {
-            if (chunk.delta.type === 'text_delta') {
-              const textDelta = chunk.delta as TextDelta;
-              this.getStreamingLogger().debug(
-                () => `Received text delta: ${textDelta.text.length} chars`,
-              );
-              // Emit text immediately as IContent
-              yield {
-                speaker: 'ai',
-                blocks: [{ type: 'text', text: textDelta.text }],
-              } as IContent;
-            } else if (
-              chunk.delta.type === 'input_json_delta' &&
-              currentToolCall
-            ) {
-              const jsonDelta = chunk.delta as InputJSONDelta;
-              currentToolCall.input += jsonDelta.partial_json;
-
-              // Check for double-escaping patterns
-              logDoubleEscapingInChunk(
-                jsonDelta.partial_json,
-                currentToolCall.name,
-                'anthropic',
-              );
-            } else if (
-              chunk.delta.type === 'thinking_delta' &&
-              currentThinkingBlock
-            ) {
-              const thinkingDelta = chunk.delta as {
-                type: 'thinking_delta';
-                thinking: string;
-              };
-              currentThinkingBlock.thinking += thinkingDelta.thinking;
-            }
-          } else if (chunk.type === 'content_block_stop') {
-            if (currentToolCall) {
-              const activeToolCall = currentToolCall;
-              this.getStreamingLogger().debug(
-                () => `Completed tool use: ${activeToolCall.name}`,
-              );
-              // Process tool parameters with double-escape handling
-              const processedParameters = processToolParameters(
-                activeToolCall.input,
-                activeToolCall.name,
-                'anthropic',
-              );
-
-              yield {
-                speaker: 'ai',
-                blocks: [
-                  {
-                    type: 'tool_call',
-                    id: this.normalizeToHistoryToolId(activeToolCall.id),
-                    name: activeToolCall.name,
-                    parameters: processedParameters,
-                  },
-                ],
-              } as IContent;
-              currentToolCall = undefined;
-            } else if (currentThinkingBlock) {
-              const activeThinkingBlock = currentThinkingBlock;
-              this.getStreamingLogger().debug(
-                () =>
-                  `Completed thinking block: ${activeThinkingBlock.thinking.length} chars`,
-              );
-
-              // Extract signature from content_block if present
-              const contentBlock = (
-                chunk as unknown as {
-                  content_block?: {
-                    type: string;
-                    thinking?: string;
-                    signature?: string;
-                  };
-                }
-              ).content_block;
-              if (contentBlock?.signature) {
-                activeThinkingBlock.signature = contentBlock.signature;
-              }
-
-              yield {
-                speaker: 'ai',
-                blocks: [
-                  {
-                    type: 'thinking',
-                    thought: activeThinkingBlock.thinking,
-                    sourceField: 'thinking',
-                    signature: activeThinkingBlock.signature,
-                  } as ThinkingBlock,
-                ],
-              } as IContent;
-              currentThinkingBlock = undefined;
-            }
-          } else if (chunk.type === 'message_delta' && chunk.usage) {
-            // Emit usage metadata including cache fields
-            const usage = chunk.usage as {
-              input_tokens: number;
-              output_tokens: number;
-              cache_read_input_tokens?: number;
-              cache_creation_input_tokens?: number;
-            };
-
-            const cacheRead = usage.cache_read_input_tokens ?? 0;
-            const cacheCreation = usage.cache_creation_input_tokens ?? 0;
-
-            this.getStreamingLogger().debug(
-              () =>
-                `Received usage metadata from message_delta: promptTokens=${usage.input_tokens || 0}, completionTokens=${usage.output_tokens || 0}, cacheRead=${cacheRead}, cacheCreation=${cacheCreation}`,
-            );
-
-            yield {
-              speaker: 'ai',
-              blocks: [],
-              metadata: {
-                usage: {
-                  promptTokens: usage.input_tokens || 0,
-                  completionTokens: usage.output_tokens || 0,
-                  totalTokens:
-                    (usage.input_tokens || 0) + (usage.output_tokens || 0),
-                  cache_read_input_tokens: cacheRead,
-                  cache_creation_input_tokens: cacheCreation,
-                },
-              },
-            } as IContent;
           }
+          // Stream completed successfully, return
+          return;
+        } catch (error) {
+          // Check if error is retryable and attempts remain
+          const canRetryStream = isNetworkTransientError(error);
+          streamingLogger.debug(
+            () =>
+              `Stream attempt ${streamingAttempt}/${maxAttempts} error: ${error}`,
+          );
+
+          if (!canRetryStream || streamingAttempt >= maxAttempts) {
+            streamingLogger.debug(
+              () =>
+                `Stream error not retryable or max attempts reached, throwing: ${error}`,
+            );
+            throw error;
+          }
+
+          // Wait with exponential backoff + jitter before retrying
+          const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
+          const delayWithJitter = Math.max(0, currentDelay + jitter);
+          streamingLogger.debug(
+            () =>
+              `Stream retry attempt ${streamingAttempt}/${maxAttempts}: Transient error detected, waiting ${Math.round(delayWithJitter)}ms before retry`,
+          );
+          await delay(delayWithJitter);
+          currentDelay = Math.min(streamRetryMaxDelayMs, currentDelay * 2);
+
+          // Loop continues to retry
         }
-      } catch (error) {
-        // Streaming errors should be propagated for retry logic
-        this.getStreamingLogger().debug(
-          () => `Streaming iteration error: ${error}`,
-        );
-        throw error;
       }
     } else {
       // Handle non-streaming response
@@ -1967,17 +2568,41 @@ export class AnthropicProvider extends BaseProvider {
         if (contentBlock.type === 'text') {
           blocks.push({ type: 'text', text: contentBlock.text } as TextBlock);
         } else if (contentBlock.type === 'tool_use') {
-          // Process tool parameters with double-escape handling
-          const processedParameters = processToolParameters(
-            JSON.stringify(contentBlock.input),
+          // Unprefix tool name for OAuth requests
+          const unprefixName = this.unprefixToolName(
             contentBlock.name,
-            'anthropic',
+            isOAuth,
           );
+
+          // Process tool parameters with double-escape handling
+          // Anthropic SDK returns contentBlock.input as already-parsed object, not string
+          // Only call processToolParameters (which expects string) if input is actually a string
+          let processedParameters =
+            typeof contentBlock.input === 'string'
+              ? processToolParameters(
+                  contentBlock.input,
+                  unprefixName,
+                  'anthropic',
+                )
+              : (contentBlock.input as Record<string, unknown>);
+
+          // Apply schema-aware type coercion to fix LLM type errors (issue #1146)
+          const toolSchema = this.findToolSchema(tools, unprefixName, isOAuth);
+          if (
+            toolSchema &&
+            processedParameters &&
+            typeof processedParameters === 'object'
+          ) {
+            processedParameters = coerceParametersToSchema(
+              processedParameters,
+              toolSchema,
+            );
+          }
 
           blocks.push({
             type: 'tool_call',
             id: this.normalizeToHistoryToolId(contentBlock.id),
-            name: contentBlock.name,
+            name: unprefixName,
             parameters: processedParameters,
           } as ToolCallBlock);
         } else if (contentBlock.type === 'thinking') {
@@ -2221,11 +2846,35 @@ export class AnthropicProvider extends BaseProvider {
   }
 
   /**
-   * Get current rate limit information
-   * Returns the last known rate limit state from the most recent API call
+   * Normalize tool IDs from various formats to Anthropic format.
+   * Sanitizes invalid characters (not matching ^[a-zA-Z0-9_-]+$) by replacing with hyphens.
    */
-  getRateLimitInfo(): AnthropicRateLimitInfo | undefined {
-    return this.lastRateLimitInfo;
+  private normalizeToAnthropicToolId(id: string): string {
+    if (!id) {
+      // Generate a unique deterministic fallback using timestamp + hash
+      const timestamp = Date.now().toString();
+      const hash = createHash('sha256')
+        .update(timestamp + Math.random())
+        .digest('hex')
+        .substring(0, 16);
+      return `toolu_${hash}`;
+    }
+
+    if (id.startsWith('toolu_')) {
+      return id;
+    }
+
+    if (id.startsWith('hist_tool_')) {
+      const suffix = id.substring('hist_tool_'.length);
+      return `toolu_${suffix.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+    }
+
+    if (id.startsWith('call_')) {
+      const suffix = id.substring('call_'.length);
+      return `toolu_${suffix.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+    }
+
+    return `toolu_${id.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
   }
 
   /**

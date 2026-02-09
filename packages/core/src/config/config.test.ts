@@ -12,14 +12,17 @@ import {
   ApprovalMode,
   DEFAULT_FILE_FILTERING_OPTIONS,
 } from './config.js';
+import type { HookDefinition } from '../hooks/types.js';
+import { HookType, HookEventName } from '../hooks/types.js';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import { setLlxprtMdFilename as mockSetLlxprtMdFilename } from '../tools/memoryTool.js';
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
 } from '../telemetry/index.js';
 import {
-  AuthType,
   ContentGeneratorConfig,
   createContentGeneratorConfig,
 } from '../core/contentGenerator.js';
@@ -48,6 +51,7 @@ vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
+  ToolRegistryMock.prototype.sortTools = vi.fn();
   ToolRegistryMock.prototype.getAllTools = vi.fn(() => []); // Mock methods if needed
   ToolRegistryMock.prototype.getTool = vi.fn();
   ToolRegistryMock.prototype.getFunctionDeclarations = vi.fn(() => []);
@@ -160,6 +164,20 @@ vi.mock('../ide/ide-client.js', () => ({
   },
 }));
 
+const mockCoreEvents = vi.hoisted(() => ({
+  emitFeedback: vi.fn(),
+  emitModelChanged: vi.fn(),
+}));
+
+const mockSetGlobalProxy = vi.hoisted(() => vi.fn());
+
+vi.mock('../utils/events.js', () => ({
+  coreEvents: mockCoreEvents,
+}));
+
+vi.mock('../utils/fetch.js', () => ({
+  setGlobalProxy: mockSetGlobalProxy,
+}));
 describe('Server Config (config.ts)', () => {
   const MODEL = 'gemini-pro';
   const SANDBOX: SandboxConfig = {
@@ -169,7 +187,7 @@ describe('Server Config (config.ts)', () => {
   const TARGET_DIR = '/path/to/target';
   const DEBUG_MODE = false;
   const QUESTION = 'test question';
-  const FULL_CONTEXT = false;
+
   const USER_MEMORY = 'Test User Memory';
   const TELEMETRY_SETTINGS = { enabled: false };
   const EMBEDDING_MODEL = 'gemini-embedding';
@@ -183,7 +201,7 @@ describe('Server Config (config.ts)', () => {
     targetDir: TARGET_DIR,
     debugMode: DEBUG_MODE,
     question: QUESTION,
-    fullContext: FULL_CONTEXT,
+
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
     sessionId: SESSION_ID,
@@ -240,7 +258,6 @@ describe('Server Config (config.ts)', () => {
       // Initialize config to create GeminiClient instance
       await config.initialize();
 
-      const authType = AuthType.USE_GEMINI;
       const newModel = 'gemini-flash';
       const mockContentConfig = {
         model: newModel,
@@ -253,12 +270,9 @@ describe('Server Config (config.ts)', () => {
       config.setFallbackMode(true);
       expect(config.isInFallbackMode()).toBe(true);
 
-      await config.refreshAuth(authType);
+      await config.refreshAuth();
 
-      expect(createContentGeneratorConfig).toHaveBeenCalledWith(
-        config,
-        authType,
-      );
+      expect(createContentGeneratorConfig).toHaveBeenCalledWith(config);
       // Verify that contentGeneratorConfig is updated with the new model
       expect(config.getContentGeneratorConfig()).toEqual(mockContentConfig);
       expect(config.getContentGeneratorConfig()?.model).toBe(newModel);
@@ -276,7 +290,6 @@ describe('Server Config (config.ts)', () => {
 
     it('should preserve conversation history when refreshing auth', async () => {
       const config = new Config(baseParams);
-      const authType = AuthType.USE_GEMINI;
       const mockContentConfig = {
         model: 'gemini-pro',
         apiKey: 'test-key',
@@ -312,7 +325,7 @@ describe('Server Config (config.ts)', () => {
       ).geminiClient = mockExistingClient;
       (GeminiClient as Mock).mockImplementation(() => mockNewClient);
 
-      await config.refreshAuth(authType);
+      await config.refreshAuth();
 
       // Verify that existing history was retrieved
       expect(mockExistingClient.getHistory).toHaveBeenCalled();
@@ -336,7 +349,6 @@ describe('Server Config (config.ts)', () => {
 
     it('should handle case when no existing client is initialized', async () => {
       const config = new Config(baseParams);
-      const authType = AuthType.USE_GEMINI;
       const mockContentConfig = {
         model: 'gemini-pro',
         apiKey: 'test-key',
@@ -357,7 +369,7 @@ describe('Server Config (config.ts)', () => {
       (config as unknown as { geminiClient: null }).geminiClient = null;
       (GeminiClient as Mock).mockImplementation(() => mockNewClient);
 
-      await config.refreshAuth(authType);
+      await config.refreshAuth();
 
       // Verify that new client was created and initialized
       expect(GeminiClient).toHaveBeenCalledWith(
@@ -377,7 +389,7 @@ describe('Server Config (config.ts)', () => {
       const mockContentConfig = {
         model: 'gemini-pro',
         apiKey: 'test-key',
-        authType: AuthType.USE_GEMINI,
+        vertexai: false,
       };
       (
         config as unknown as { contentGeneratorConfig: ContentGeneratorConfig }
@@ -385,7 +397,7 @@ describe('Server Config (config.ts)', () => {
 
       (createContentGeneratorConfig as Mock).mockReturnValue({
         ...mockContentConfig,
-        authType: AuthType.LOGIN_WITH_GOOGLE,
+        vertexai: true,
       });
 
       const mockExistingHistory = [
@@ -410,7 +422,7 @@ describe('Server Config (config.ts)', () => {
       ).geminiClient = mockExistingClient;
       (GeminiClient as Mock).mockImplementation(() => mockNewClient);
 
-      await config.refreshAuth(AuthType.LOGIN_WITH_GOOGLE);
+      await config.refreshAuth();
 
       // When switching from GenAI to Vertex, thoughts should be stripped
       // The history is stored with thoughts stripped before initialize
@@ -427,7 +439,7 @@ describe('Server Config (config.ts)', () => {
       const mockContentConfig = {
         model: 'gemini-pro',
         apiKey: 'test-key',
-        authType: AuthType.LOGIN_WITH_GOOGLE,
+        vertexai: true,
       };
       (
         config as unknown as { contentGeneratorConfig: ContentGeneratorConfig }
@@ -435,7 +447,7 @@ describe('Server Config (config.ts)', () => {
 
       (createContentGeneratorConfig as Mock).mockReturnValue({
         ...mockContentConfig,
-        authType: AuthType.USE_GEMINI,
+        vertexai: false,
       });
 
       const mockExistingHistory = [
@@ -460,7 +472,7 @@ describe('Server Config (config.ts)', () => {
       ).geminiClient = mockExistingClient;
       (GeminiClient as Mock).mockImplementation(() => mockNewClient);
 
-      await config.refreshAuth(AuthType.USE_GEMINI);
+      await config.refreshAuth();
 
       // When switching from Vertex to GenAI, thoughts should NOT be stripped
       expect(mockNewClient.storeHistoryForLaterUse).toHaveBeenCalledWith(
@@ -496,7 +508,6 @@ describe('Server Config (config.ts)', () => {
 
       const mockContentConfig = {
         model: 'claude-3-5-sonnet-20241022',
-        authType: AuthType.USE_PROVIDER,
         oauthManager: mockOAuthManager,
       };
 
@@ -513,8 +524,8 @@ describe('Server Config (config.ts)', () => {
 
       (GeminiClient as Mock).mockImplementation(() => mockNewClient);
 
-      // Call refreshAuth - this should NOT trigger OAuth
-      await config.refreshAuth(AuthType.USE_PROVIDER);
+      // Call initializeContentGeneratorConfig - this should NOT trigger OAuth
+      await config.initializeContentGeneratorConfig();
 
       // Verify OAuth authenticate was NOT called
       expect(mockOAuthManager.authenticate).not.toHaveBeenCalled();
@@ -557,7 +568,6 @@ describe('Server Config (config.ts)', () => {
       const mockContentConfig = {
         model: 'gemini-pro',
         apiKey: 'test-key',
-        authType: AuthType.USE_GEMINI,
         oauthManager: mockOAuthManager,
       };
 
@@ -575,7 +585,7 @@ describe('Server Config (config.ts)', () => {
       (GeminiClient as Mock).mockImplementation(() => mockNewClient);
 
       // Refresh auth
-      await config.refreshAuth(AuthType.USE_GEMINI);
+      await config.refreshAuth();
 
       // Verify history was preserved
       expect(mockExistingClient.getHistory).toHaveBeenCalled();
@@ -596,9 +606,8 @@ describe('Server Config (config.ts)', () => {
 
     it('should dispose the previous Gemini client before replacing it', async () => {
       const config = new Config(baseParams);
-      const authType = AuthType.USE_GEMINI;
       const mockContentConfig = {
-        model: 'gemini-flash',
+        model: 'gemini-pro',
         apiKey: 'test-key',
       };
 
@@ -625,7 +634,7 @@ describe('Server Config (config.ts)', () => {
       ).geminiClient = mockExistingClient;
       (GeminiClient as Mock).mockImplementation(() => mockNewClient);
 
-      await config.refreshAuth(authType);
+      await config.refreshAuth();
 
       expect(dispose).toHaveBeenCalledTimes(1);
       expect(mockNewClient.initialize).toHaveBeenCalledWith(mockContentConfig);
@@ -682,20 +691,33 @@ describe('Server Config (config.ts)', () => {
   });
 
   it('should initialize WorkspaceContext with includeDirectories', () => {
-    const includeDirectories = ['/path/to/dir1', '/path/to/dir2'];
-    const paramsWithIncludeDirs: ConfigParameters = {
-      ...baseParams,
-      includeDirectories,
-    };
-    const config = new Config(paramsWithIncludeDirs);
-    const workspaceContext = config.getWorkspaceContext();
-    const directories = workspaceContext.getDirectories();
-
-    // Should include the target directory plus the included directories
-    expect(directories).toHaveLength(3);
-    expect(directories).toContain(path.resolve(baseParams.targetDir));
-    expect(directories).toContain('/path/to/dir1');
-    expect(directories).toContain('/path/to/dir2');
+    // Use real directories that exist for this test
+    const tempDir = os.tmpdir();
+    const resolved = fs.realpathSync(tempDir);
+    // Create test subdirectories
+    const dir1 = path.join(tempDir, `test-include-dir1-${Date.now()}`);
+    const dir2 = path.join(tempDir, `test-include-dir2-${Date.now()}`);
+    fs.mkdirSync(dir1, { recursive: true });
+    fs.mkdirSync(dir2, { recursive: true });
+    try {
+      const paramsWithIncludeDirs: ConfigParameters = {
+        ...baseParams,
+        targetDir: tempDir,
+        includeDirectories: [dir1, dir2],
+      };
+      const config = new Config(paramsWithIncludeDirs);
+      const workspaceContext = config.getWorkspaceContext();
+      const directories = workspaceContext.getDirectories();
+      // Should include the target directory plus the included directories
+      expect(directories).toHaveLength(3);
+      expect(directories).toContain(resolved);
+      expect(directories).toContain(fs.realpathSync(dir1));
+      expect(directories).toContain(fs.realpathSync(dir2));
+    } finally {
+      // Cleanup
+      fs.rmSync(dir1, { recursive: true, force: true });
+      fs.rmSync(dir2, { recursive: true, force: true });
+    }
   });
 
   it('Config constructor should set telemetry to true when provided as true', () => {
@@ -1113,6 +1135,28 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('PTY terminal size configuration', () => {
+    it('should accept only positive finite PTY dimensions', () => {
+      const config = new Config(baseParams);
+
+      config.setPtyTerminalSize(120.9, 40.1);
+      expect(config.getPtyTerminalWidth()).toBe(120);
+      expect(config.getPtyTerminalHeight()).toBe(40);
+
+      config.setPtyTerminalSize(0, 25);
+      expect(config.getPtyTerminalWidth()).toBeUndefined();
+      expect(config.getPtyTerminalHeight()).toBe(25);
+
+      config.setPtyTerminalSize(-10, Number.NaN);
+      expect(config.getPtyTerminalWidth()).toBeUndefined();
+      expect(config.getPtyTerminalHeight()).toBeUndefined();
+
+      config.setPtyTerminalSize(Number.POSITIVE_INFINITY, -1);
+      expect(config.getPtyTerminalWidth()).toBeUndefined();
+      expect(config.getPtyTerminalHeight()).toBeUndefined();
+    });
+  });
+
   describe('createToolRegistry', () => {
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
       const params: ConfigParameters = {
@@ -1140,6 +1184,63 @@ describe('Server Config (config.ts)', () => {
         registerToolMock as Mock
       ).mock.calls.some((call) => call[0] instanceof vi.mocked(ReadFileTool));
       expect(wasReadFileToolRegistered).toBe(false);
+    });
+  });
+
+  describe('Proxy Configuration Error Handling', () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it('should call setGlobalProxy when proxy is configured', () => {
+      const paramsWithProxy: ConfigParameters = {
+        ...baseParams,
+        proxy: 'http://proxy.example.com:8080',
+      };
+      new Config(paramsWithProxy);
+
+      expect(mockSetGlobalProxy).toHaveBeenCalledWith(
+        'http://proxy.example.com:8080',
+      );
+    });
+
+    it('should not call setGlobalProxy when proxy is not configured', () => {
+      new Config(baseParams);
+
+      expect(mockSetGlobalProxy).not.toHaveBeenCalled();
+    });
+
+    it('should emit error feedback when setGlobalProxy throws an error', () => {
+      const proxyError = new Error('Invalid proxy URL');
+      mockSetGlobalProxy.mockImplementation(() => {
+        throw proxyError;
+      });
+
+      const paramsWithProxy: ConfigParameters = {
+        ...baseParams,
+        proxy: 'invalid-proxy',
+      };
+      new Config(paramsWithProxy);
+
+      expect(mockCoreEvents.emitFeedback).toHaveBeenCalledWith(
+        'error',
+        'Invalid proxy configuration detected. Check debug drawer for more details (F12)',
+        proxyError,
+      );
+    });
+
+    it('should not emit error feedback when setGlobalProxy succeeds', () => {
+      mockSetGlobalProxy.mockImplementation(() => {
+        // Success - no error thrown
+      });
+
+      const paramsWithProxy: ConfigParameters = {
+        ...baseParams,
+        proxy: 'http://proxy.example.com:8080',
+      };
+      new Config(paramsWithProxy);
+
+      expect(mockCoreEvents.emitFeedback).not.toHaveBeenCalled();
     });
   });
 });
@@ -1189,5 +1290,168 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
+  });
+});
+
+describe('Config getHooks', () => {
+  const baseParams: ConfigParameters = {
+    cwd: '/tmp',
+    targetDir: '/path/to/target',
+    debugMode: false,
+    sessionId: 'test-session-id',
+    model: 'gemini-pro',
+    usageStatisticsEnabled: false,
+  };
+
+  it('should return undefined when no hooks are provided', () => {
+    const config = new Config(baseParams);
+    expect(config.getHooks()).toBeUndefined();
+  });
+
+  it('should return empty object when empty hooks are provided', () => {
+    const configWithEmptyHooks = new Config({
+      ...baseParams,
+      hooks: {},
+    });
+    expect(configWithEmptyHooks.getHooks()).toEqual({});
+  });
+
+  it('should return the hooks configuration when provided', () => {
+    const mockHooks: { [K in HookEventName]?: HookDefinition[] } = {
+      [HookEventName.BeforeTool]: [
+        {
+          matcher: 'write_file',
+          hooks: [
+            {
+              type: HookType.Command,
+              command: 'echo "test hook"',
+              timeout: 5000,
+            },
+          ],
+        },
+      ],
+      [HookEventName.AfterTool]: [
+        {
+          hooks: [
+            {
+              type: HookType.Command,
+              command: './hooks/after-tool.sh',
+              timeout: 10000,
+            },
+          ],
+        },
+      ],
+    };
+
+    const config = new Config({
+      ...baseParams,
+      hooks: mockHooks,
+    });
+
+    const retrievedHooks = config.getHooks();
+    expect(retrievedHooks).toEqual(mockHooks);
+    expect(retrievedHooks).toBe(mockHooks); // Should return the same reference
+  });
+
+  it('should return hooks with all supported event types', () => {
+    const allEventHooks: { [K in HookEventName]?: HookDefinition[] } = {
+      [HookEventName.BeforeAgent]: [
+        { hooks: [{ type: HookType.Command, command: 'test1' }] },
+      ],
+      [HookEventName.AfterAgent]: [
+        { hooks: [{ type: HookType.Command, command: 'test2' }] },
+      ],
+      [HookEventName.BeforeTool]: [
+        { hooks: [{ type: HookType.Command, command: 'test3' }] },
+      ],
+      [HookEventName.AfterTool]: [
+        { hooks: [{ type: HookType.Command, command: 'test4' }] },
+      ],
+      [HookEventName.BeforeModel]: [
+        { hooks: [{ type: HookType.Command, command: 'test5' }] },
+      ],
+      [HookEventName.AfterModel]: [
+        { hooks: [{ type: HookType.Command, command: 'test6' }] },
+      ],
+      [HookEventName.BeforeToolSelection]: [
+        { hooks: [{ type: HookType.Command, command: 'test7' }] },
+      ],
+      [HookEventName.Notification]: [
+        { hooks: [{ type: HookType.Command, command: 'test8' }] },
+      ],
+      [HookEventName.SessionStart]: [
+        { hooks: [{ type: HookType.Command, command: 'test9' }] },
+      ],
+      [HookEventName.SessionEnd]: [
+        { hooks: [{ type: HookType.Command, command: 'test10' }] },
+      ],
+      [HookEventName.PreCompress]: [
+        { hooks: [{ type: HookType.Command, command: 'test11' }] },
+      ],
+    };
+
+    const config = new Config({
+      ...baseParams,
+      hooks: allEventHooks,
+    });
+
+    const retrievedHooks = config.getHooks();
+    expect(retrievedHooks).toEqual(allEventHooks);
+    expect(Object.keys(retrievedHooks!)).toHaveLength(11); // All hook event types
+  });
+});
+
+describe('Config setModel', () => {
+  const baseParams: ConfigParameters = {
+    cwd: '/tmp',
+    targetDir: '/path/to/target',
+    debugMode: false,
+    sessionId: 'test-session-id',
+    model: 'gemini-pro',
+    usageStatisticsEnabled: false,
+  };
+
+  it('should allow setting a pro (any) model and disable fallback mode', () => {
+    const config = new Config(baseParams);
+    config.setFallbackMode(true);
+    expect(config.isInFallbackMode()).toBe(true);
+
+    const proModel = 'gemini-2.5-pro';
+    config.setModel(proModel);
+
+    expect(config.getModel()).toBe(proModel);
+    expect(config.isInFallbackMode()).toBe(false);
+    expect(mockCoreEvents.emitModelChanged).toHaveBeenCalledWith(proModel);
+  });
+
+  it('should allow setting auto model from non-auto model and disable fallback mode', () => {
+    const config = new Config(baseParams);
+    config.setFallbackMode(true);
+    expect(config.isInFallbackMode()).toBe(true);
+
+    config.setModel('auto');
+
+    expect(config.getModel()).toBe('auto');
+    expect(config.isInFallbackMode()).toBe(false);
+    expect(mockCoreEvents.emitModelChanged).toHaveBeenCalledWith('auto');
+  });
+
+  it('should allow setting auto model from auto model if it is in the fallback mode', () => {
+    const config = new Config({
+      cwd: '/tmp',
+      targetDir: '/path/to/target',
+      debugMode: false,
+      sessionId: 'test-session-id',
+      model: 'auto',
+      usageStatisticsEnabled: false,
+    });
+    config.setFallbackMode(true);
+    expect(config.isInFallbackMode()).toBe(true);
+
+    config.setModel('auto');
+
+    expect(config.getModel()).toBe('auto');
+    expect(config.isInFallbackMode()).toBe(false);
+    expect(mockCoreEvents.emitModelChanged).toHaveBeenCalledWith('auto');
   });
 });

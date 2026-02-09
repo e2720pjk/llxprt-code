@@ -8,30 +8,23 @@ import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { ConfirmationRequiredError, ShellProcessor } from './shellProcessor.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { CommandContext } from '../../ui/commands/types.js';
-import { ApprovalMode, Config } from '@vybestack/llxprt-code-core';
-import os from 'os';
-import { quote } from 'shell-quote';
+import {
+  ApprovalMode,
+  Config,
+  escapeShellArg,
+  getShellConfiguration,
+} from '@vybestack/llxprt-code-core';
 
 // Helper function to determine the expected escaped string based on the current OS,
 // mirroring the logic in the actual `escapeShellArg` implementation. This makes
 // our tests robust and platform-agnostic.
 function getExpectedEscapedArgForPlatform(arg: string): string {
-  if (os.platform() === 'win32') {
-    const comSpec = (process.env['ComSpec'] || 'cmd.exe').toLowerCase();
-    const isPowerShell =
-      comSpec.endsWith('powershell.exe') || comSpec.endsWith('pwsh.exe');
-
-    if (isPowerShell) {
-      return `'${arg.replace(/'/g, "''")}'`;
-    } else {
-      return `"${arg.replace(/"/g, '""')}"`;
-    }
-  } else {
-    return quote([arg]);
-  }
+  const { shell } = getShellConfiguration();
+  return escapeShellArg(arg, shell);
 }
 
 const mockCheckCommandPermissions = vi.hoisted(() => vi.fn());
+
 const mockShellExecute = vi.hoisted(() => vi.fn());
 
 vi.mock('@vybestack/llxprt-code-core', async (importOriginal) => {
@@ -64,6 +57,12 @@ describe('ShellProcessor', () => {
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
+      getShellExecutionConfig: vi.fn().mockReturnValue({
+        showColor: false,
+        scrollback: 600000,
+        terminalWidth: 80,
+        terminalHeight: 24,
+      }),
     };
 
     context = createMockCommandContext({
@@ -136,6 +135,7 @@ describe('ShellProcessor', () => {
       expect.any(Function),
       expect.any(Object),
       false,
+      expect.any(Object), // shellExecutionConfig
     );
     expect(result).toBe('The current status is: On branch main');
   });
@@ -201,6 +201,7 @@ describe('ShellProcessor', () => {
       expect.any(Function),
       expect.any(Object),
       false,
+      expect.any(Object), // shellExecutionConfig
     );
     expect(result).toBe('Do something dangerous: deleted');
   });
@@ -362,6 +363,7 @@ describe('ShellProcessor', () => {
       expect.any(Function),
       expect.any(Object),
       false,
+      expect.any(Object), // shellExecutionConfig
     );
   });
 
@@ -400,6 +402,7 @@ describe('ShellProcessor', () => {
         expect.any(Function),
         expect.any(Object),
         false,
+        expect.any(Object), // shellExecutionConfig
       );
       expect(result).toBe('Output: result');
     });
@@ -419,6 +422,7 @@ describe('ShellProcessor', () => {
         expect.any(Function),
         expect.any(Object),
         false,
+        expect.any(Object), // shellExecutionConfig
       );
       expect(result).toBe('{{a},{b}}');
     });
@@ -572,6 +576,7 @@ describe('ShellProcessor', () => {
         expect.any(Function),
         expect.any(Object),
         false,
+        expect.any(Object), // shellExecutionConfig
       );
 
       expect(result).toBe('Command: match found');
@@ -594,6 +599,7 @@ describe('ShellProcessor', () => {
         expect.any(Function),
         expect.any(Object),
         false,
+        expect.any(Object), // shellExecutionConfig
       );
 
       expect(result).toBe(`User "(${rawArgs})" requested search: results`);
@@ -658,6 +664,7 @@ describe('ShellProcessor', () => {
         expect.any(Function),
         expect.any(Object),
         false,
+        expect.any(Object), // shellExecutionConfig
       );
     });
 
@@ -686,6 +693,7 @@ describe('ShellProcessor', () => {
         expect.any(Function),
         expect.any(Object),
         false,
+        expect.any(Object), // shellExecutionConfig
       );
     });
   });

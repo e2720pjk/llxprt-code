@@ -5,7 +5,8 @@
  */
 
 import { vi } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook } from '../../test-utils/render.js';
+import { act } from 'react';
 import { useFolderTrust } from './useFolderTrust.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { FolderTrustChoice } from '../components/FolderTrustDialog.js';
@@ -126,7 +127,7 @@ describe('useFolderTrust', () => {
 
     expect(loadTrustedFoldersSpy).toHaveBeenCalled();
     expect(mockTrustedFolders.setValue).toHaveBeenCalledWith(
-      '/test/path',
+      process.cwd(),
       TrustLevel.TRUST_FOLDER,
     );
     expect(result.current.isFolderTrustDialogOpen).toBe(false);
@@ -147,7 +148,7 @@ describe('useFolderTrust', () => {
     });
 
     expect(mockTrustedFolders.setValue).toHaveBeenCalledWith(
-      '/test/path',
+      process.cwd(),
       TrustLevel.TRUST_PARENT,
     );
     expect(result.current.isFolderTrustDialogOpen).toBe(false);
@@ -168,7 +169,7 @@ describe('useFolderTrust', () => {
     });
 
     expect(mockTrustedFolders.setValue).toHaveBeenCalledWith(
-      '/test/path',
+      process.cwd(),
       TrustLevel.DO_NOT_TRUST,
     );
     // Config trust state is managed by trustedFolders, not directly on config

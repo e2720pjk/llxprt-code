@@ -9,19 +9,14 @@ import { Box, Text } from 'ink';
 import { Colors } from '../colors.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { LoadedSettings, SettingScope } from '../../config/settings.js';
-import { AuthType } from '@vybestack/llxprt-code-core';
-import { validateAuthMethod as _validateAuthMethod } from '../../config/auth.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { useRuntimeApi } from '../contexts/RuntimeContext.js';
 
 interface AuthDialogProps {
-  onSelect: (authMethod: AuthType | undefined, scope: SettingScope) => void;
+  onSelect: (authMethod: string | undefined, scope: SettingScope) => void;
   settings: LoadedSettings;
   initialErrorMessage?: string | null;
 }
-
-// TODO: Re-add _parseDefaultAuthType if needed for future auth type parsing
-// function was removed as it was unused
 
 export function AuthDialog({
   onSelect,
@@ -146,13 +141,18 @@ export function AuthDialog({
       flexDirection="column"
       padding={1}
       width="100%"
+      backgroundColor={Colors.Background}
     >
-      <Text bold>OAuth Authentication</Text>
+      <Text bold color={Colors.Foreground}>
+        OAuth Authentication
+      </Text>
       <Box marginTop={1}>
-        <Text>Select an OAuth provider to authenticate:</Text>
+        <Text color={Colors.Foreground}>
+          Select an OAuth provider to authenticate:
+        </Text>
       </Box>
       <Box marginTop={1}>
-        <Text dimColor>
+        <Text color={Colors.DimComment}>
           Note: You can also use API keys via /key, /keyfile, --key, --keyfile,
           or environment variables
         </Text>
@@ -173,7 +173,9 @@ export function AuthDialog({
         <Text color={Colors.Gray}>(Use Enter to select, ESC to close)</Text>
       </Box>
       <Box marginTop={1}>
-        <Text>Terms of Services and Privacy Notice for Gemini CLI</Text>
+        <Text color={Colors.Foreground}>
+          Terms of Services and Privacy Notice for Gemini CLI
+        </Text>
       </Box>
       <Box marginTop={1}>
         <Text color={Colors.AccentBlue}>

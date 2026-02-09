@@ -11,7 +11,6 @@ import * as dotenv from 'dotenv';
 
 import type { TelemetryTarget } from '@vybestack/llxprt-code-core';
 import {
-  AuthType,
   Config,
   type ConfigParameters,
   FileDiscoveryService,
@@ -44,7 +43,6 @@ export async function loadConfig(
     targetDir: workspaceDir, // Or a specific directory the agent operates on
     debugMode: process.env['DEBUG'] === 'true' || false,
     question: '', // Not used in server mode directly like CLI
-    fullContext: false, // Server might have different context needs
     coreTools: settings.coreTools || undefined,
     excludeTools: settings.excludeTools || undefined,
     showMemoryUsage: settings.showMemoryUsage || false,
@@ -69,16 +67,17 @@ export async function loadConfig(
         settings.fileFiltering?.enableRecursiveFileSearch,
     },
     ideMode: false,
+    folderTrust: settings.folderTrust === true,
+    extensions,
   };
 
   const fileService = new FileDiscoveryService(workspaceDir);
-  const extensionContextFilePaths = extensions.flatMap((e) => e.contextFiles);
   const { memoryContent, fileCount } = await loadServerHierarchicalMemory(
     workspaceDir,
     [workspaceDir],
     false,
     fileService,
-    extensionContextFilePaths,
+    extensions,
     true, /// TODO: Wire up folder trust logic here.
   );
   configParams.userMemory = memoryContent;
@@ -100,17 +99,26 @@ export async function loadConfig(
         `[Config] USE_CCPA env var is true but unable to resolve GOOGLE_APPLICATION_CREDENTIALS file path ${adcFilePath}. Error ${e}`,
       );
     }
-    await config.refreshAuth(AuthType.LOGIN_WITH_GOOGLE);
+    await config.refreshAuth('vertex-ai');
     logger.info(
       `[Config] GOOGLE_CLOUD_PROJECT: ${process.env['GOOGLE_CLOUD_PROJECT']}`,
     );
   } else if (process.env['GEMINI_API_KEY']) {
     logger.info('[Config] Using Gemini API Key');
-    await config.refreshAuth(AuthType.USE_GEMINI);
+    await config.refreshAuth('gemini-api-key');
+  } else if (
+    process.env['GOOGLE_APPLICATION_CREDENTIALS'] ||
+    process.env['GOOGLE_CLOUD_PROJECT'] ||
+    process.env['GOOGLE_CLOUD_LOCATION'] ||
+    process.env['GOOGLE_API_KEY']
+  ) {
+    logger.info('[Config] Using Vertex AI credentials');
+    await config.refreshAuth('vertex-ai');
   } else {
-    logger.error(
-      `[Config] Unable to set GeneratorConfig. Please provide a GEMINI_API_KEY or set USE_CCPA.`,
+    logger.warn(
+      `[Config] No GEMINI_API_KEY, USE_CCPA, or Vertex AI credentials configured. Falling back to OAuth.`,
     );
+    await config.refreshAuth('oauth-personal');
   }
 
   return config;

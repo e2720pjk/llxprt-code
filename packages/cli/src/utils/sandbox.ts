@@ -53,6 +53,35 @@ const BUILTIN_SEATBELT_PROFILES = [
   'restrictive-proxied',
 ];
 
+const PASSTHROUGH_VARIABLES = [
+  'LLXPRT_CODE_IDE_SERVER_PORT',
+  'LLXPRT_CODE_IDE_WORKSPACE_PATH',
+  'LLXPRT_CODE_WELCOME_CONFIG_PATH',
+  'TERM_PROGRAM',
+] as const;
+
+export function getPassthroughEnvVars(
+  env: NodeJS.ProcessEnv,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+
+  for (const envVar of PASSTHROUGH_VARIABLES) {
+    const value = env[envVar];
+    if (typeof value === 'string' && value.length > 0) {
+      result[envVar] = value;
+    }
+  }
+
+  return result;
+}
+
+export function buildSandboxEnvArgs(env: NodeJS.ProcessEnv): string[] {
+  return Object.entries(getPassthroughEnvVars(env)).flatMap(([key, value]) => [
+    '--env',
+    `${key}=${value}`,
+  ]);
+}
+
 /**
  * Determines whether the sandbox container should be run with the current user's UID and GID.
  * This is often necessary on Linux systems (especially Debian/Ubuntu based) when using
@@ -232,7 +261,7 @@ export async function start_sandbox(
 
       const profile = (process.env.SEATBELT_PROFILE ??= 'permissive-open');
       let profileFile = fileURLToPath(
-        new URL(`sandbox-macos-${profile}.sb`, import.meta.url),
+        new URL(`./sandbox-macos-${profile}.sb`, import.meta.url),
       );
       // if profile name is not recognized, then look for file under project settings directory
       if (!BUILTIN_SEATBELT_PROFILES.includes(profile)) {
@@ -311,7 +340,11 @@ export async function start_sandbox(
       const proxyCommand = process.env.LLXPRT_SANDBOX_PROXY_COMMAND;
       let proxyProcess: ChildProcess | undefined = undefined;
       let sandboxProcess: ChildProcess | undefined = undefined;
-      const sandboxEnv = { ...process.env };
+      const sandboxEnv = {
+        ...process.env,
+      };
+      Object.assign(sandboxEnv, getPassthroughEnvVars(process.env));
+
       if (proxyCommand) {
         const proxy =
           process.env.HTTPS_PROXY ||
@@ -376,6 +409,7 @@ export async function start_sandbox(
 
       if (process.stdin.isTTY) {
         try {
+          // Issue #1020: Wrap setRawMode with error handling to prevent EIO crashes
           // Best-effort: restore cooked mode before handing the terminal to the sandbox.
           process.stdin.setRawMode(false);
         } catch {
@@ -391,6 +425,7 @@ export async function start_sandbox(
       // spawn child and let it inherit stdio
       sandboxProcess = spawn(config.command, args, {
         stdio: 'inherit',
+        env: sandboxEnv,
       });
 
       // Restore parent stdin mode/state after the sandbox exits.
@@ -407,12 +442,17 @@ export async function start_sandbox(
           }
         }
 
+        // Issue #1020: Wrap setRawMode with error handling to prevent EIO crashes
         // Do not force raw mode on if it was off when we entered.
         if (stdinHadRawMode) {
           try {
             process.stdin.setRawMode(true);
-          } catch {
-            // ignore
+          } catch (err) {
+            // Issue #1020: Log I/O errors but don't crash
+            // This can happen after long-running sessions on macOS
+            if (cliConfig?.getDebugMode()) {
+              console.error('[sandbox] Failed to restore raw mode:', err);
+            }
           }
         }
       });
@@ -501,6 +541,34 @@ export async function start_sandbox(
       args.push(...flags);
     }
 
+    const resourceCpus =
+      process.env.LLXPRT_SANDBOX_CPUS ?? process.env.SANDBOX_CPUS;
+    if (resourceCpus) {
+      args.push('--cpus', resourceCpus);
+    }
+
+    const resourceMemory =
+      process.env.LLXPRT_SANDBOX_MEMORY ?? process.env.SANDBOX_MEMORY;
+    if (resourceMemory) {
+      args.push('--memory', resourceMemory);
+    }
+
+    const resourcePids =
+      process.env.LLXPRT_SANDBOX_PIDS ?? process.env.SANDBOX_PIDS;
+    if (resourcePids) {
+      args.push('--pids-limit', resourcePids);
+    }
+
+    const networkMode =
+      process.env.LLXPRT_SANDBOX_NETWORK ?? process.env.SANDBOX_NETWORK;
+    if (networkMode === 'off') {
+      args.push('--network', 'none');
+    } else if (networkMode === 'proxied') {
+      console.warn(
+        'Sandbox network mode "proxied" is not implemented yet; falling back to default networking.',
+      );
+    }
+
     // Add a TTY if the parent process is interacting with a terminal.
     //
     // IMPORTANT: On macOS, process.stdin.isTTY/process.stdout.isTTY can be undefined when the
@@ -513,10 +581,11 @@ export async function start_sandbox(
     // - Else if TERM is set (typical interactive shells) => add -t.
     // - Else => do not force -t.
     const hasParentTty =
-      process.stdin.isTTY === true ||
-      process.stdout.isTTY === true ||
-      (typeof process.env.TERM === 'string' && process.env.TERM.length > 0);
+      process.stdin.isTTY === true || process.stdout.isTTY === true;
 
+    // In CI we typically do not have a TTY. Passing `-t` causes docker to emit
+    // "the input device is not a TTY" and fail the sandbox. Keep `-t` for real
+    // interactive terminals only.
     if (hasParentTty) {
       args.push('-t');
     }
@@ -568,9 +637,15 @@ export async function start_sandbox(
       }
     }
 
-    // mount paths listed in SANDBOX_MOUNTS
-    if (process.env.SANDBOX_MOUNTS) {
-      for (let mount of process.env.SANDBOX_MOUNTS.split(',')) {
+    // mount paths listed in SANDBOX_MOUNTS / LLXPRT_SANDBOX_MOUNTS
+    const mountsEnv =
+      process.env.LLXPRT_SANDBOX_MOUNTS ?? process.env.SANDBOX_MOUNTS;
+    const mountsEnvName = process.env.LLXPRT_SANDBOX_MOUNTS
+      ? 'LLXPRT_SANDBOX_MOUNTS'
+      : 'SANDBOX_MOUNTS';
+
+    if (mountsEnv) {
+      for (let mount of mountsEnv.split(',')) {
         if (mount.trim()) {
           // parse mount as from:to:opts
           let [from, to, opts] = mount.trim().split(':');
@@ -580,18 +655,51 @@ export async function start_sandbox(
           // check that from path is absolute
           if (!path.isAbsolute(from)) {
             throw new FatalSandboxError(
-              `Path '${from}' listed in SANDBOX_MOUNTS must be absolute`,
+              `Path '${from}' listed in ${mountsEnvName} must be absolute`,
             );
           }
           // check that from path exists on host
           if (!fs.existsSync(from)) {
             throw new FatalSandboxError(
-              `Missing mount path '${from}' listed in SANDBOX_MOUNTS`,
+              `Missing mount path '${from}' listed in ${mountsEnvName}`,
             );
           }
-          console.error(`SANDBOX_MOUNTS: ${from} -> ${to} (${opts})`);
+          console.error(`${mountsEnvName}: ${from} -> ${to} (${opts})`);
           args.push('--volume', mount);
         }
+      }
+    }
+
+    const sshAgentSetting =
+      process.env.LLXPRT_SANDBOX_SSH_AGENT ?? process.env.SANDBOX_SSH_AGENT;
+    const shouldEnableSshAgent =
+      sshAgentSetting === 'on' ||
+      (sshAgentSetting !== 'off' && !!process.env.SSH_AUTH_SOCK);
+
+    if (shouldEnableSshAgent) {
+      const sshAuthSock = process.env.SSH_AUTH_SOCK;
+      if (!sshAuthSock) {
+        console.warn('SSH agent requested but SSH_AUTH_SOCK is not set.');
+      } else if (!fs.existsSync(sshAuthSock)) {
+        console.warn(`SSH_AUTH_SOCK not found at ${sshAuthSock}.`);
+      } else {
+        const containerSocket = '/ssh-agent';
+        let mountSpec = `${sshAuthSock}:${containerSocket}`;
+
+        if (config.command === 'podman' && os.platform() === 'linux') {
+          mountSpec = `${sshAuthSock}:${containerSocket}:z`;
+        }
+
+        if (config.command === 'podman' && os.platform() === 'darwin') {
+          if (sshAuthSock.includes('/private/tmp/com.apple.launchd')) {
+            console.warn(
+              'Podman on macOS may not access launchd SSH sockets reliably. Consider Docker or a custom SSH_AUTH_SOCK path.',
+            );
+          }
+        }
+
+        args.push('--volume', mountSpec);
+        args.push('--env', `SSH_AUTH_SOCK=${containerSocket}`);
       }
     }
 
@@ -712,16 +820,8 @@ export async function start_sandbox(
       args.push('--env', `COLORTERM=${process.env.COLORTERM}`);
     }
 
-    // Pass through IDE mode environment variables
-    for (const envVar of [
-      'LLXPRT_CODE_IDE_SERVER_PORT',
-      'LLXPRT_CODE_IDE_WORKSPACE_PATH',
-      'TERM_PROGRAM',
-    ]) {
-      if (process.env[envVar]) {
-        args.push('--env', `${envVar}=${process.env[envVar]}`);
-      }
-    }
+    // Pass through curated CLI environment variables.
+    args.push(...buildSandboxEnvArgs(process.env));
 
     // copy VIRTUAL_ENV if under working directory
     // also mount-replace VIRTUAL_ENV directory with <project_settings>/sandbox.venv
@@ -895,6 +995,7 @@ export async function start_sandbox(
 
     if (process.stdin.isTTY) {
       try {
+        // Issue #1020: Wrap setRawMode with error handling to prevent EIO crashes
         // Best-effort: restore cooked mode before handing the terminal to the sandbox.
         process.stdin.setRawMode(false);
       } catch {
@@ -926,12 +1027,17 @@ export async function start_sandbox(
         }
       }
 
+      // Issue #1020: Wrap setRawMode with error handling to prevent EIO crashes
       // Do not force raw mode on if it was off when we entered.
       if (stdinHadRawMode) {
         try {
           process.stdin.setRawMode(true);
-        } catch {
-          // ignore
+        } catch (err) {
+          // Issue #1020: Log I/O errors but don't crash
+          // This can happen after long-running sessions on macOS
+          if (cliConfig?.getDebugMode()) {
+            console.error('[sandbox] Failed to restore raw mode:', err);
+          }
         }
       }
     });

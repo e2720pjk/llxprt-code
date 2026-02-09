@@ -58,7 +58,6 @@ describe('executeToolCall', () => {
       getDebugMode: () => false,
       getContentGeneratorConfig: () => ({
         model: 'test-model',
-        authType: 'oauth-personal',
       }),
       getEphemeralSetting: vi.fn(),
       getEphemeralSettings: vi.fn().mockReturnValue({}),
@@ -93,6 +92,9 @@ describe('executeToolCall', () => {
     );
 
     // Behavior verified via response structure - no mock interaction checks needed
+    // responseParts now contains only functionResponse (not functionCall)
+    // The functionCall is already recorded in history from the original assistant message.
+    // Including it again would create duplicate tool_use blocks for Anthropic. (Issue #1150)
     expect(response).toStrictEqual({
       callId: 'call1',
       agentId: 'primary',
@@ -100,13 +102,6 @@ describe('executeToolCall', () => {
       errorType: undefined,
       resultDisplay: 'Success!',
       responseParts: [
-        {
-          functionCall: {
-            name: 'testTool',
-            id: 'call1',
-            args: { param1: 'value1' },
-          },
-        },
         {
           functionResponse: {
             name: 'testTool',
@@ -354,14 +349,10 @@ describe('executeToolCall', () => {
       error: undefined,
       errorType: undefined,
       resultDisplay: 'Image processed',
+      // responseParts now contains only functionResponse + inlineData (not functionCall)
+      // The functionCall is already recorded in history from the original assistant message.
+      // Including it again would create duplicate tool_use blocks for Anthropic. (Issue #1150)
       responseParts: [
-        {
-          functionCall: {
-            name: 'testTool',
-            id: 'call6',
-            args: {},
-          },
-        },
         {
           functionResponse: {
             name: 'testTool',
@@ -463,11 +454,14 @@ describe('executeToolCall response structure (Phase 3b.1)', () => {
       expect(response.callId).toBe('call1');
       expect(response.resultDisplay).toBe('Success!');
       expect(response.responseParts).toBeDefined();
-      expect(response.responseParts.length).toBeGreaterThanOrEqual(2);
+      // responseParts now contains only functionResponse (not functionCall)
+      // The functionCall is already recorded in history from the original assistant message.
+      // Including it again would create duplicate tool_use blocks for Anthropic. (Issue #1150)
+      expect(response.responseParts.length).toBeGreaterThanOrEqual(1);
       expect(response.agentId).toBeDefined();
     });
 
-    it('should include functionCall and functionResponse in responseParts', async () => {
+    it('should include functionResponse in responseParts', async () => {
       vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
       mockTool.executeFn.mockReturnValue({
         llmContent: 'Success',
@@ -481,15 +475,15 @@ describe('executeToolCall response structure (Phase 3b.1)', () => {
       );
 
       const parts = response.responseParts;
-      expect(parts.length).toBeGreaterThanOrEqual(2);
+      // responseParts now contains only functionResponse (not functionCall)
+      // The functionCall is already recorded in history from the original assistant message.
+      // Including it again would create duplicate tool_use blocks for Anthropic. (Issue #1150)
+      expect(parts.length).toBeGreaterThanOrEqual(1);
 
-      expect(parts[0].functionCall).toBeDefined();
-      expect(parts[0].functionCall?.id).toBe(request.callId);
-      expect(parts[0].functionCall?.name).toBe(request.name);
-
-      expect(parts[1].functionResponse).toBeDefined();
-      expect(parts[1].functionResponse?.id).toBe(request.callId);
-      expect(parts[1].functionResponse?.name).toBe(request.name);
+      // First part should be functionResponse (not functionCall anymore)
+      expect(parts[0].functionResponse).toBeDefined();
+      expect(parts[0].functionResponse?.id).toBe(request.callId);
+      expect(parts[0].functionResponse?.name).toBe(request.name);
     });
   });
 
@@ -554,6 +548,43 @@ describe('executeToolCall response structure (Phase 3b.1)', () => {
       results.forEach((response) => {
         expect(response.error).toBeUndefined();
       });
+    });
+
+    it('should not emit MaxListenersExceededWarning when reusing an abort signal', async () => {
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+      mockTool.executeFn.mockReturnValue({
+        llmContent: 'Success',
+        returnDisplay: 'Success!',
+      });
+
+      const warnings: Error[] = [];
+      const onWarning = (warning: Error): void => {
+        warnings.push(warning);
+      };
+
+      process.on('warning', onWarning);
+      try {
+        for (let i = 0; i < 15; i++) {
+          const { response } = await executeToolCall(
+            createMockConfig(),
+            { ...request, callId: `call-${i}` },
+            abortController.signal,
+          );
+          expect(response.error).toBeUndefined();
+        }
+      } finally {
+        process.removeListener('warning', onWarning);
+      }
+
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+
+      const maxListenerWarnings = warnings.filter(
+        (warning) => warning.name === 'MaxListenersExceededWarning',
+      );
+
+      expect(maxListenerWarnings).toHaveLength(0);
     });
 
     it('should allow subsequent executions after failure', async () => {
@@ -646,7 +677,7 @@ describe('executeToolCall response structure (Phase 3b.1)', () => {
       expect(response.callId).toBe(request.callId);
     });
 
-    it('should include functionCall and functionResponse in error responseParts', async () => {
+    it('should include functionResponse in error responseParts', async () => {
       vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
       mockTool.executeFn.mockImplementation(() => {
         throw new Error('Execution failed');
@@ -659,6 +690,8 @@ describe('executeToolCall response structure (Phase 3b.1)', () => {
       );
 
       const parts = response.responseParts;
+      // Error responses still need functionCall + functionResponse for proper pairing
+      // in nonInteractiveToolExecutor (different from coreToolScheduler)
       expect(parts.length).toBeGreaterThanOrEqual(2);
       expect(parts[0].functionCall?.id).toBe(request.callId);
       expect(parts[1].functionResponse?.id).toBe(request.callId);
@@ -694,57 +727,11 @@ describe('executeToolCall response structure (Phase 3b.1)', () => {
     });
   });
 
-  describe('emoji filtering with systemFeedback', () => {
-    it('should append systemFeedback to successful response when emoji filtering warns', async () => {
-      const ephemerals = { emojifilter: 'warn' as const };
-      const config = createMockConfig({ ephemerals });
-
-      vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
-      mockTool.executeFn.mockReturnValue({
-        llmContent: 'Tool completed',
-        returnDisplay: 'Success',
-      });
-
-      const { response } = await executeToolCall(
-        config,
-        {
-          ...request,
-          name: 'write_file',
-          args: { content: 'Has content 😀' },
-        },
-        abortController.signal,
-      );
-
-      expect(response.error).toBeUndefined();
-      expect(getFullResponseText(response)).toContain('<system-reminder>');
-    });
-
-    it('should produce at most one system-reminder per execution', async () => {
-      const ephemerals = { emojifilter: 'warn' as const };
-      const config = createMockConfig({ ephemerals });
-
-      vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
-      mockTool.executeFn.mockReturnValue({
-        llmContent: 'Tool completed',
-        returnDisplay: 'Success',
-      });
-
-      const { response } = await executeToolCall(
-        config,
-        {
-          ...request,
-          name: 'write_file',
-          args: { content: 'Content here 😀' },
-        },
-        abortController.signal,
-      );
-
-      const responseText = getFullResponseText(response);
-      const reminderCount = (responseText.match(/<system-reminder>/g) || [])
-        .length;
-      expect(reminderCount).toBeLessThanOrEqual(1);
-    });
-  });
+  // Note: emoji filtering is now handled by the individual tools (edit.ts, write-file.ts)
+  // rather than in nonInteractiveToolExecutor. The tools themselves add system-reminder
+  // when emojis are filtered in 'warn' mode. These tests verified the old behavior
+  // where nonInteractiveToolExecutor did the filtering and appended the reminder.
+  // The actual filtering behavior is tested in write-file.test.ts and edit.test.ts.
 });
 
 function getFullResponseText(response: ToolCallResponseInfo): string {
@@ -761,3 +748,90 @@ function getFullResponseText(response: ToolCallResponseInfo): string {
   }
   return chunks.join('\n');
 }
+
+describe('policy handling when policyEngine is undefined', () => {
+  it('should load default policies and allow todo_write when policyEngine is undefined', async () => {
+    // Create a mock todo_write tool
+    const todoWriteTool = new MockTool('todo_write');
+    todoWriteTool.executeFn.mockReturnValue({
+      llmContent: 'Todo updated',
+      returnDisplay: 'Todo updated',
+    });
+
+    const mockToolRegistry = {
+      getTool: vi.fn().mockImplementation((name: string) => {
+        if (name === 'todo_write') return todoWriteTool;
+        return undefined;
+      }),
+      getAllToolNames: vi.fn().mockReturnValue(['todo_write']),
+      getAllTools: vi.fn().mockReturnValue([todoWriteTool]),
+    } as unknown as ToolRegistry;
+
+    // Config with NO policyEngine (getPolicyEngine returns undefined)
+    const config: ToolExecutionConfig = {
+      getToolRegistry: () => mockToolRegistry,
+      getSessionId: () => 'test-session-id',
+      getTelemetryLogPromptsEnabled: () => false,
+      getExcludeTools: () => [],
+      getEphemeralSettings: () => ({}),
+      getEphemeralSetting: () => undefined,
+      getPolicyEngine: () => undefined as unknown as PolicyEngine,
+      // No getMessageBus - will create one internally
+    };
+
+    const request: ToolCallRequestInfo = {
+      callId: 'todo-call',
+      name: 'todo_write',
+      args: { todos: [] },
+      isClientInitiated: false,
+      prompt_id: 'prompt-todo',
+    };
+
+    const { response } = await executeToolCall(config, request);
+
+    // Should NOT be denied - todo_write is in read-only.toml as allow
+    expect(response.error).toBeUndefined();
+    expect(response.errorType).toBeUndefined();
+    expect(response.resultDisplay).toBe('Todo updated');
+  });
+
+  it('should load default policies and allow todo_read when policyEngine is undefined', async () => {
+    const todoReadTool = new MockTool('todo_read');
+    todoReadTool.executeFn.mockReturnValue({
+      llmContent: 'Todos: []',
+      returnDisplay: 'Todos: []',
+    });
+
+    const mockToolRegistry = {
+      getTool: vi.fn().mockImplementation((name: string) => {
+        if (name === 'todo_read') return todoReadTool;
+        return undefined;
+      }),
+      getAllToolNames: vi.fn().mockReturnValue(['todo_read']),
+      getAllTools: vi.fn().mockReturnValue([todoReadTool]),
+    } as unknown as ToolRegistry;
+
+    const config: ToolExecutionConfig = {
+      getToolRegistry: () => mockToolRegistry,
+      getSessionId: () => 'test-session-id',
+      getTelemetryLogPromptsEnabled: () => false,
+      getExcludeTools: () => [],
+      getEphemeralSettings: () => ({}),
+      getEphemeralSetting: () => undefined,
+      getPolicyEngine: () => undefined as unknown as PolicyEngine,
+    };
+
+    const request: ToolCallRequestInfo = {
+      callId: 'todo-read-call',
+      name: 'todo_read',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-todo-read',
+    };
+
+    const { response } = await executeToolCall(config, request);
+
+    expect(response.error).toBeUndefined();
+    expect(response.errorType).toBeUndefined();
+  });
+});

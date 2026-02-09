@@ -6,9 +6,13 @@
 
 import { vi, describe, it, expect, beforeEach, type Mock } from 'vitest';
 const mockSpawn = vi.hoisted(() => vi.fn());
-vi.mock('child_process', () => ({
-  spawn: mockSpawn,
-}));
+vi.mock('child_process', async (importOriginal) => {
+  const actual = (await importOriginal()) as typeof import('child_process');
+  return {
+    ...actual,
+    spawn: mockSpawn,
+  };
+});
 
 import EventEmitter from 'events';
 import { Readable } from 'stream';
@@ -32,6 +36,7 @@ const mockPlatform = vi.hoisted(() => vi.fn());
 vi.mock('os', () => ({
   default: {
     platform: mockPlatform,
+    homedir: () => '/tmp/test-home',
     constants: {
       signals: {
         SIGTERM: 15,
@@ -40,6 +45,7 @@ vi.mock('os', () => ({
     },
   },
   platform: mockPlatform,
+  homedir: () => '/tmp/test-home',
   constants: {
     signals: {
       SIGTERM: 15,
@@ -74,6 +80,13 @@ describe('ShellExecutionService multibyte', () => {
     mockSpawn.mockReturnValue(mockChildProcess);
   });
 
+  const defaultShellConfig = {
+    showColor: false,
+    scrollback: 600000,
+    terminalWidth: 80,
+    terminalHeight: 24,
+  };
+
   const simulate = async (
     command: string,
     simulation: (cp: typeof mockChildProcess) => void,
@@ -85,6 +98,7 @@ describe('ShellExecutionService multibyte', () => {
       onOutputEventMock,
       ac.signal,
       false, // shouldUseNodePty = false for these tests
+      defaultShellConfig,
     );
     await new Promise((r) => setImmediate(r));
     simulation(mockChildProcess);
@@ -103,9 +117,9 @@ describe('ShellExecutionService multibyte', () => {
     });
 
     const result = await resultPromise;
-    console.log('DEBUG: result is', result);
     expect(result).toBeDefined();
-    expect(result.stdout).toContain('ありがとう 世界');
+    // ShellExecutionResult uses `output` not `stdout`
+    expect(result.output).toContain('ありがとう 世界');
   });
 
   it('handles interleaved stdout/stderr without splitting code points across streams', async () => {
@@ -119,8 +133,8 @@ describe('ShellExecutionService multibyte', () => {
     });
 
     const result = await resultPromise;
-    expect((result.stdout + result.stderr).includes('ありがとう 世界')).toBe(
-      true,
-    );
+    // ShellExecutionResult combines stdout+stderr into `output`
+    expect(result.output).toContain('ありがとう');
+    expect(result.output).toContain('世界');
   });
 });

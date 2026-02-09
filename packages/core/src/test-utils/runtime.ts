@@ -158,6 +158,8 @@ export function createRuntimeConfigStub(
     setModel: noop,
     getQuotaErrorOccurred: () => false,
     setQuotaErrorOccurred: noop,
+    getLlxprtMdFilePaths: () => [] as string[],
+    getLlxprtMdFileCount: () => 0,
   };
 
   return Object.assign(base, overrides) as unknown as Config;
@@ -217,7 +219,6 @@ interface GeminiChatConfigShape {
   getUsageStatisticsEnabled: () => boolean;
   getDebugMode: () => boolean;
   getContentGeneratorConfig: () => {
-    authType?: string;
     model?: string;
   };
   getModel: ReturnType<ReturnType<typeof requireVi>['fn']>;
@@ -305,7 +306,6 @@ export function createGeminiChatRuntime(
     getUsageStatisticsEnabled: () => true,
     getDebugMode: () => false,
     getContentGeneratorConfig: () => ({
-      authType: 'oauth-personal',
       model: 'test-model',
     }),
     getModel: vi.fn().mockReturnValue('gemini-pro'),

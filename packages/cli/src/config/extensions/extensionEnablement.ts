@@ -6,7 +6,11 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import type { GeminiCLIExtension } from '@vybestack/llxprt-code-core';
+import {
+  coreEvents,
+  type GeminiCLIExtension,
+} from '@vybestack/llxprt-code-core';
+import { SettingScope } from '../settings.js';
 
 export interface ExtensionEnablementConfig {
   overrides: string[];
@@ -111,6 +115,8 @@ export class ExtensionEnablementManager {
   // If non-empty, this overrides all other extension configuration and enables
   // only the ones in this list.
   private enabledExtensionNamesOverride: string[];
+  // Session-only state - in-memory overrides that don't persist to disk
+  private sessionState: Map<string, boolean> = new Map();
 
   constructor(configDir: string, enabledExtensionNames?: string[]) {
     this.configDir = configDir;
@@ -125,7 +131,7 @@ export class ExtensionEnablementManager {
       if (
         !extensions.some((ext) => ext.name.toLowerCase() === name.toLowerCase())
       ) {
-        console.error(`Extension not found: ${name}`);
+        coreEvents.emitFeedback('error', `Extension not found: ${name}`);
       }
     }
   }
@@ -139,6 +145,11 @@ export class ExtensionEnablementManager {
    * @returns True if the extension is enabled, false otherwise.
    */
   isEnabled(extensionName: string, currentPath: string): boolean {
+    // Session state takes precedence over all other configuration
+    if (this.sessionState.has(extensionName)) {
+      return this.sessionState.get(extensionName)!;
+    }
+
     // If we have a single override called 'none', this disables all extensions.
     // Typically, this comes from the user passing `-e none`.
     if (
@@ -184,7 +195,11 @@ export class ExtensionEnablementManager {
       ) {
         return {};
       }
-      console.error('Error reading extension enablement config:', error);
+      coreEvents.emitFeedback(
+        'error',
+        'Failed to read extension enablement config.',
+        error,
+      );
       return {};
     }
   }
@@ -197,8 +212,17 @@ export class ExtensionEnablementManager {
   enable(
     extensionName: string,
     includeSubdirs: boolean,
-    scopePath: string,
+    scopeOrPath: SettingScope | string,
   ): void {
+    // Handle Session scope - in-memory only
+    if (scopeOrPath === SettingScope.Session) {
+      // For Session scope, includeSubdirs param is repurposed as the enabled state
+      this.sessionState.set(extensionName, includeSubdirs);
+      return;
+    }
+
+    // Handle string path - existing disk-based logic
+    const scopePath = scopeOrPath as string;
     const config = this.readConfig();
     if (!config[extensionName]) {
       config[extensionName] = { overrides: [] };
@@ -222,8 +246,16 @@ export class ExtensionEnablementManager {
   disable(
     extensionName: string,
     includeSubdirs: boolean,
-    scopePath: string,
+    scopeOrPath: SettingScope | string,
   ): void {
+    // Handle Session scope - in-memory only
+    if (scopeOrPath === SettingScope.Session) {
+      this.sessionState.set(extensionName, false);
+      return;
+    }
+
+    // Handle string path - existing disk-based logic
+    const scopePath = scopeOrPath as string;
     this.enable(extensionName, includeSubdirs, `!${scopePath}`);
   }
 
@@ -233,5 +265,9 @@ export class ExtensionEnablementManager {
       delete config[extensionName];
       this.writeConfig(config);
     }
+  }
+
+  resetSessionState(): void {
+    this.sessionState.clear();
   }
 }

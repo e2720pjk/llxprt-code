@@ -18,7 +18,6 @@ import {
 } from '../runtime/providerRuntimeContext.js';
 import { SettingsService } from '../settings/SettingsService.js';
 import type { ContentGenerator } from './contentGenerator.js';
-import { AuthType } from './contentGenerator.js';
 import { createAgentRuntimeState } from '../runtime/AgentRuntimeState.js';
 import { createAgentRuntimeContext } from '../runtime/createAgentRuntimeContext.js';
 import {
@@ -43,7 +42,7 @@ function createConfigParams(
     targetDir: '/tmp/project',
     debugMode: false,
     question: undefined,
-    fullContext: false,
+
     userMemory: '',
     embeddingModel: 'gemini-embedding',
     sandbox: undefined,
@@ -119,7 +118,6 @@ describe('GeminiChat runtime context', () => {
       runtimeId: 'runtime-test',
       provider: provider.name,
       model: config.getModel(),
-      authType: AuthType.USE_NONE,
       sessionId: config.getSessionId(),
     });
     const historyService = new HistoryService();
@@ -134,12 +132,14 @@ describe('GeminiChat runtime context', () => {
           enabled: true,
           target: null,
         },
+        'reasoning.includeInContext': true,
       },
       provider: createProviderAdapterFromManager(config.getProviderManager()),
       telemetry: createTelemetryAdapterFromConfig(config),
       tools: createToolRegistryViewFromRegistry(config.getToolRegistry()),
       providerRuntime: { ...providerRuntime },
     });
+
     const chat = new GeminiChat(
       view,
       {} as unknown as ContentGenerator,
@@ -195,7 +195,6 @@ describe('GeminiChat runtime context', () => {
       runtimeId: 'runtime-test',
       provider: provider.name,
       model: config.getModel(),
-      authType: AuthType.USE_NONE,
       sessionId: config.getSessionId(),
     });
     const historyService = new HistoryService();
@@ -210,12 +209,14 @@ describe('GeminiChat runtime context', () => {
           enabled: true,
           target: null,
         },
+        'reasoning.includeInContext': true,
       },
       provider: createProviderAdapterFromManager(config.getProviderManager()),
       telemetry: createTelemetryAdapterFromConfig(config),
       tools: createToolRegistryViewFromRegistry(config.getToolRegistry()),
       providerRuntime: { ...providerRuntime },
     });
+
     const chat = new GeminiChat(
       view,
       {} as unknown as ContentGenerator,
@@ -271,6 +272,98 @@ describe('GeminiChat runtime context', () => {
     expect(toolResponseBlock.callId).toBe(toolCallBlock.id);
   });
 
+  it('retains thinking parts alongside tool calls when includeInContext is enabled', async () => {
+    const calls: GenerateChatOptions[] = [];
+
+    const generateChatCompletionMock = vi.fn(async function* (
+      options: GenerateChatOptions,
+    ) {
+      calls.push(options);
+      yield {
+        speaker: 'ai',
+        blocks: [
+          {
+            type: 'thinking',
+            thought: 'Follow-up reasoning',
+            signature: 'sig-1',
+          },
+          {
+            type: 'tool_call',
+            id: 'hist_tool_reasoned_1',
+            name: 'run_shell_command',
+            parameters: { command: 'ls -lt packages' },
+          },
+        ],
+      };
+    });
+
+    const provider: IProvider = {
+      name: 'stub',
+      isDefault: true,
+      getModels: vi.fn(async () => []),
+      getDefaultModel: () => 'stub-model',
+      generateChatCompletion: generateChatCompletionMock,
+      getServerTools: () => [],
+      invokeServerTool: vi.fn(),
+      getAuthToken: vi.fn(async () => 'stub-auth-token'),
+    };
+
+    manager.registerProvider(provider);
+
+    const runtimeState = createAgentRuntimeState({
+      runtimeId: 'runtime-test',
+      provider: provider.name,
+      model: config.getModel(),
+      sessionId: config.getSessionId(),
+    });
+    const historyService = new HistoryService();
+    const view = createAgentRuntimeContext({
+      state: runtimeState,
+      history: historyService,
+      settings: {
+        compressionThreshold: 0.8,
+        contextLimit: 128000,
+        preserveThreshold: 0.2,
+        telemetry: {
+          enabled: true,
+          target: null,
+        },
+        'reasoning.includeInContext': true,
+      },
+      provider: createProviderAdapterFromManager(config.getProviderManager()),
+      telemetry: createTelemetryAdapterFromConfig(config),
+      tools: createToolRegistryViewFromRegistry(config.getToolRegistry()),
+      providerRuntime: { ...providerRuntime },
+    });
+
+    const chat = new GeminiChat(
+      view,
+      {} as unknown as ContentGenerator,
+      {},
+      [],
+    );
+
+    const stream = await chat.sendMessageStream(
+      { message: 'Trigger tool call' },
+      'prompt-123',
+    );
+    for await (const _event of stream) {
+      // exhaust stream to trigger history recording
+    }
+
+    const curated = historyService.getCuratedForProvider();
+    const toolCallEntry = curated.find(
+      (content) =>
+        content.speaker === 'ai' &&
+        content.blocks.some((block) => block.type === 'tool_call'),
+    );
+
+    expect(toolCallEntry).toBeDefined();
+    expect(
+      toolCallEntry?.blocks.some((block) => block.type === 'thinking'),
+    ).toBe(true);
+  });
+
   it('closes pending tool calls in provider payload when sending a new user message', async () => {
     const calls: GenerateChatOptions[] = [];
 
@@ -301,7 +394,6 @@ describe('GeminiChat runtime context', () => {
       runtimeId: 'runtime-test',
       provider: provider.name,
       model: config.getModel(),
-      authType: AuthType.USE_NONE,
       sessionId: config.getSessionId(),
     });
     const historyService = new HistoryService();
@@ -416,8 +508,7 @@ describe('GeminiChat runtime context', () => {
     const runtimeState = createAgentRuntimeState({
       runtimeId: 'runtime-test',
       provider: 'anthropic',
-      model: 'claude-test',
-      authType: AuthType.USE_NONE,
+      model: config.getModel(),
       sessionId: config.getSessionId(),
     });
 

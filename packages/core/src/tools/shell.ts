@@ -10,6 +10,14 @@ import os, { EOL } from 'os';
 import crypto from 'crypto';
 import { spawnSync } from 'child_process';
 import { Config } from '../config/config.js';
+import type { AnyToolInvocation } from '../index.js';
+import { initializeParser } from '../utils/shell-parser.js';
+
+// Initialize tree-sitter parser (async, non-blocking)
+// Failures are handled gracefully with fallback to regex
+initializeParser().catch(() => {
+  // Initialization errors are already handled in shell-parser.ts
+});
 import { ToolErrorType } from './tool-error.js';
 import {
   BaseDeclarativeTool,
@@ -27,6 +35,9 @@ import { getErrorMessage } from '../utils/errors.js';
 import {
   limitOutputTokens,
   formatLimitedOutput,
+  getOutputLimits,
+  getEffectiveTokenLimit,
+  clipMiddle,
 } from '../utils/toolOutputLimiter.js';
 import { summarizeToolOutput } from '../utils/summarizer.js';
 import { stripShellMarkers } from '../utils/shell-markers.js';
@@ -34,61 +45,23 @@ import {
   ShellExecutionService,
   type ShellOutputEvent,
 } from '../services/shellExecutionService.js';
+import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import {
   getCommandRoots,
   isCommandAllowed,
-  SHELL_TOOL_NAMES,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
+import { isShellInvocationAllowlisted } from '../utils/tool-utils.js';
+import { DebugLogger } from '../debug/DebugLogger.js';
 
-export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
+// Throttle interval for shell output updates to avoid excessive UI updates.
+// Using 100ms provides responsive feedback without overwhelming the system.
+export const OUTPUT_UPDATE_INTERVAL_MS = 100;
 
-/**
- * Parses the `--allowed-tools` flag to determine which sub-commands of the
- * ShellTool are allowed. The flag can be provided multiple times.
- *
- * @param allowedTools The list of allowed tools from the config.
- * @returns A Set of allowed sub-commands, or null if all commands are allowed.
- *  - `null`: All sub-commands are allowed (e.g., --allowed-tools="ShellTool").
- *  - `Set<string>`: A set of specifically allowed sub-commands (e.g., --allowed-tools="ShellTool(wc)" --allowed-tools="ShellTool(ls)").
- *  - `Set<>` (empty): No sub-commands are allowed (e.g., --allowed-tools="ShellTool()").
- */
-function parseAllowedSubcommands(
-  allowedTools: readonly string[],
-): Set<string> | null {
-  const shellToolEntries = allowedTools.filter((tool) =>
-    SHELL_TOOL_NAMES.some((name) => tool.startsWith(name)),
-  );
-
-  if (shellToolEntries.length === 0) {
-    return new Set(); // ShellTool not mentioned, so no subcommands are allowed.
-  }
-
-  // If any entry is just "run_shell_command" or "ShellTool", all subcommands are allowed.
-  if (shellToolEntries.some((entry) => SHELL_TOOL_NAMES.includes(entry))) {
-    return null;
-  }
-
-  const allSubcommands = new Set<string>();
-  const toolNamePattern = SHELL_TOOL_NAMES.join('|');
-  const regex = new RegExp(`^(${toolNamePattern})\\((.*)\\)$`);
-
-  for (const entry of shellToolEntries) {
-    const match = entry.match(regex);
-    if (match) {
-      const subcommands = match[2];
-      if (subcommands) {
-        subcommands
-          .split(',')
-          .map((s) => s.trim())
-          .forEach((s) => s && allSubcommands.add(s));
-      }
-    }
-  }
-
-  return allSubcommands;
-}
+// Tool timeout settings (Issue #1049)
+const DEFAULT_SHELL_TIMEOUT_SECONDS = 300;
+const MAX_SHELL_TIMEOUT_SECONDS = 900;
 
 export interface ShellToolParams {
   /**
@@ -103,6 +76,12 @@ export interface ShellToolParams {
 
   /**
    * Optional directory to execute the command in, relative to the target directory
+   */
+  dir_path?: string;
+
+  /**
+   * Optional directory to execute the command in, relative to the target directory
+   * @deprecated Use dir_path instead. Kept for backward compatibility.
    */
   directory?: string;
 
@@ -125,12 +104,19 @@ export interface ShellToolParams {
    * Optional grep flags (e.g., -i for case-insensitive, -v for inverted)
    */
   grep_flags?: string[];
+
+  /**
+   * Optional timeout in seconds (-1 for unlimited).
+   */
+  timeout_seconds?: number;
 }
 
 class ShellToolInvocation extends BaseToolInvocation<
   ShellToolParams,
   ToolResult
 > {
+  private readonly logger = DebugLogger.getLogger('llxprt:shell');
+
   constructor(
     private readonly config: Config,
     params: ShellToolParams,
@@ -144,12 +130,19 @@ class ShellToolInvocation extends BaseToolInvocation<
     return ShellTool.Name;
   }
 
+  private getDirPath(): string | undefined {
+    return this.params.dir_path || this.params.directory;
+  }
+
   override getDescription(): string {
     let description = `${this.params.command}`;
     // append optional [in directory]
     // note description is needed even if validation fails due to absolute path
-    if (this.params.directory) {
-      description += ` [in ${this.params.directory}]`;
+    const dirPath = this.getDirPath();
+    if (dirPath) {
+      description += ` [in ${dirPath}]`;
+    } else {
+      description += ` [current working directory ${process.cwd()}]`;
     }
     // append optional (description), replacing any line breaks with spaces
     if (this.params.description) {
@@ -172,19 +165,14 @@ class ShellToolInvocation extends BaseToolInvocation<
       !this.config.isInteractive() &&
       this.config.getApprovalMode() !== ApprovalMode.YOLO
     ) {
-      const allowed = this.config.getAllowedTools() || [];
-      const allowedSubcommands = parseAllowedSubcommands(allowed);
-      if (allowedSubcommands !== null) {
-        // Not all commands are allowed, so we need to check.
-        const allCommandsAllowed = rootCommands.every((cmd) =>
-          allowedSubcommands.has(cmd),
-        );
-        if (!allCommandsAllowed) {
-          throw new Error(
-            `Command "${command}" is not in the list of allowed tools for non-interactive mode.`,
-          );
-        }
+      if (this.isInvocationAllowlisted(command)) {
+        // If it's an allowed shell command, we don't need to confirm execution.
+        return false;
       }
+
+      throw new Error(
+        `Command "${command}" is not in the list of allowed tools for non-interactive mode.`,
+      );
     }
 
     const commandsToConfirm = rootCommands.filter(
@@ -212,9 +200,10 @@ class ShellToolInvocation extends BaseToolInvocation<
 
   async execute(
     signal: AbortSignal,
-    updateOutput?: (output: string) => void,
+    updateOutput?: (output: string | AnsiOutput) => void,
     terminalColumns?: number,
     terminalRows?: number,
+    setPidCallback?: (pid: number) => void,
   ): Promise<ToolResult> {
     // Validate filtering parameters
     if (this.params.head_lines) {
@@ -234,12 +223,49 @@ class ShellToolInvocation extends BaseToolInvocation<
 
     const strippedCommand = stripShellWrapper(this.params.command);
 
+    const ephemeralSettings = this.config.getEphemeralSettings();
+    const defaultTimeoutSeconds =
+      (ephemeralSettings['shell-default-timeout-seconds'] as
+        | number
+        | undefined) ?? DEFAULT_SHELL_TIMEOUT_SECONDS;
+    const maxTimeoutSeconds =
+      (ephemeralSettings['shell-max-timeout-seconds'] as number | undefined) ??
+      MAX_SHELL_TIMEOUT_SECONDS;
+    const timeoutSeconds = this.resolveTimeoutSeconds(
+      this.params.timeout_seconds,
+      defaultTimeoutSeconds,
+      maxTimeoutSeconds,
+    );
+    // Convert seconds to milliseconds for setTimeout
+    const timeoutMs =
+      timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000;
+    const timeoutController = new AbortController();
+    const timeoutId =
+      timeoutMs === undefined
+        ? null
+        : setTimeout(() => timeoutController.abort(), timeoutMs);
+
+    const onUserAbort = () => {
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+      timeoutController.abort();
+    };
     if (signal.aborted) {
+      onUserAbort();
       return {
         llmContent: 'Command was cancelled by user before it could start.',
         returnDisplay: 'Command cancelled by user.',
+        error: {
+          message: 'Command was cancelled by user before it could start.',
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
       };
     }
+
+    signal.addEventListener('abort', onUserAbort, { once: true });
+
+    const combinedSignal = timeoutController.signal;
 
     const isWindows = os.platform() === 'win32';
     const tempFileName = `shell_pgrep_${crypto
@@ -280,12 +306,12 @@ class ShellToolInvocation extends BaseToolInvocation<
 
       const cwd = path.resolve(
         this.config.getTargetDir(),
-        this.params.directory || '',
+        this.getDirPath() || '',
       );
 
-      let cumulativeOutput = '';
-      let outputChunks: string[] = [cumulativeOutput];
-      let lastUpdateTime = Date.now();
+      let cumulativeOutput: string | AnsiOutput = '';
+      // Initialize to 0 to allow immediate first update
+      let lastUpdateTime = 0;
       let isBinaryStream = false;
 
       const executionResult = await ShellExecutionService.execute(
@@ -296,29 +322,25 @@ class ShellToolInvocation extends BaseToolInvocation<
             return;
           }
 
-          let currentDisplayOutput = '';
           let shouldUpdate = false;
 
           switch (event.type) {
-            case 'data':
+            case 'data': {
               if (isBinaryStream) break;
-              outputChunks.push(event.chunk);
-              if (Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS) {
-                cumulativeOutput = outputChunks.join('');
-                outputChunks = [cumulativeOutput];
-                currentDisplayOutput = cumulativeOutput;
-                shouldUpdate = true;
-              }
+              // In PTY mode, event.chunk is AnsiOutput (full screen state)
+              // In child_process mode, event.chunk is string (incremental)
+              cumulativeOutput = event.chunk;
+              shouldUpdate = true;
               break;
+            }
             case 'binary_detected':
               isBinaryStream = true;
-              currentDisplayOutput =
-                '[Binary output detected. Halting stream...]';
+              cumulativeOutput = '[Binary output detected. Halting stream...]';
               shouldUpdate = true;
               break;
             case 'binary_progress':
               isBinaryStream = true;
-              currentDisplayOutput = `[Receiving binary output... ${formatMemoryUsage(
+              cumulativeOutput = `[Receiving binary output... ${formatMemoryUsage(
                 event.bytesReceived,
               )} received]`;
               if (Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS) {
@@ -331,15 +353,30 @@ class ShellToolInvocation extends BaseToolInvocation<
           }
 
           if (shouldUpdate) {
-            updateOutput(currentDisplayOutput);
+            updateOutput(cumulativeOutput);
             lastUpdateTime = Date.now();
           }
         },
-        signal,
+        combinedSignal,
         this.config.getShouldUseNodePtyShell(),
-        terminalColumns,
-        terminalRows,
+        {
+          ...this.config.getShellExecutionConfig(),
+          terminalWidth: terminalColumns ?? this.config.getPtyTerminalWidth(),
+          terminalHeight: terminalRows ?? this.config.getPtyTerminalHeight(),
+        },
       );
+
+      // Propagate PID immediately (before awaiting result) so the UI can
+      // offer Ctrl+F interactive shell focus while the process is running.
+      const pid = executionResult.pid;
+      if (
+        pid &&
+        setPidCallback &&
+        this.config.getShouldUseNodePtyShell() &&
+        ShellExecutionService.isActivePty(pid)
+      ) {
+        setPidCallback(pid);
+      }
 
       const result = await executionResult.result;
 
@@ -396,19 +433,33 @@ class ShellToolInvocation extends BaseToolInvocation<
           returnDisplayMessage = llmContent;
         }
       } else if (result.aborted) {
-        llmContent = 'Command was cancelled by user before it could complete.';
-        if (rawOutput && rawOutput.trim()) {
-          llmContent += ` Below is the output before it was cancelled:\n${rawOutput}`;
-        } else {
-          llmContent += ' There was no output before it was cancelled.';
-        }
+        const timeoutTriggered =
+          timeoutController.signal.aborted && !signal.aborted;
+        if (timeoutTriggered) {
+          llmContent = `Command timed out after ${timeoutSeconds ?? defaultTimeoutSeconds}s (timeout_seconds).`;
+          if (rawOutput && rawOutput.trim()) {
+            llmContent += ` Partial output:\n${rawOutput}`;
+          } else {
+            llmContent += ' There was no output before timeout.';
+          }
 
-        if (this.config.getDebugMode()) {
           returnDisplayMessage = llmContent;
-        } else if (filteredOutput && filteredOutput.trim()) {
-          returnDisplayMessage = filteredOutput;
         } else {
-          returnDisplayMessage = 'Command cancelled by user.';
+          llmContent =
+            'Command was cancelled by user before it could complete.';
+          if (rawOutput && rawOutput.trim()) {
+            llmContent += ` Below is the output before it was cancelled:\n${rawOutput}`;
+          } else {
+            llmContent += ' There was no output before it was cancelled.';
+          }
+
+          if (this.config.getDebugMode()) {
+            returnDisplayMessage = llmContent;
+          } else if (filteredOutput && filteredOutput.trim()) {
+            returnDisplayMessage = filteredOutput;
+          } else {
+            returnDisplayMessage = 'Command cancelled by user.';
+          }
         }
       } else {
         const finalError = result.error
@@ -417,9 +468,9 @@ class ShellToolInvocation extends BaseToolInvocation<
 
         llmContent = [
           `Command: ${this.params.command}`,
-          `Directory: ${this.params.directory || '(root)'}`,
+          `Directory: ${this.getDirPath() || '(root)'}`,
           `Stdout: ${filteredOutput || '(empty)'}`,
-          `Stderr: ${result.stderr || '(empty)'}`,
+          `Stderr: (empty)`,
           `Error: ${finalError}`,
           `Exit Code: ${result.exitCode ?? '(none)'}`,
           `Signal: ${result.signal ?? '(none)'}`,
@@ -457,7 +508,21 @@ class ShellToolInvocation extends BaseToolInvocation<
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
-        : {};
+        : result?.aborted && timeoutController.signal.aborted && !signal.aborted
+          ? {
+              error: {
+                message: llmContent,
+                type: ToolErrorType.TIMEOUT,
+              },
+            }
+          : result?.aborted
+            ? {
+                error: {
+                  message: llmContent,
+                  type: ToolErrorType.EXECUTION_FAILED,
+                },
+              }
+            : {};
 
       // Remove runtime marker lines from model-facing content to reduce summarization cost
       const llmContentStripped = stripShellMarkers(llmContent);
@@ -494,7 +559,36 @@ class ShellToolInvocation extends BaseToolInvocation<
         }
       }
 
-      // ALWAYS apply token-based limiting at the end to protect the outer model
+      // For ShellTool, apply a "middle clip" strategy so we preserve both the
+      // beginning (setup/context) and the end (results/errors).
+      // We still respect the current maxTokens and truncateMode settings.
+      const limits = getOutputLimits(this.config);
+      const maxTokens = limits.maxTokens;
+      const effectiveLimit = maxTokens
+        ? getEffectiveTokenLimit(maxTokens)
+        : undefined;
+
+      if (
+        effectiveLimit &&
+        effectiveLimit > 0 &&
+        limits.truncateMode === 'truncate'
+      ) {
+        // Approximate a char budget from the token budget. Keep it conservative
+        // to avoid overshooting after serialization/escaping.
+        const approxMaxChars = effectiveLimit * 3;
+        const clipped = clipMiddle(llmPayload, approxMaxChars, 0.3, 0.7);
+        if (clipped.wasTruncated) {
+          llmPayload = clipped.content;
+        }
+
+        return {
+          llmContent: llmPayload,
+          returnDisplay: returnDisplayMessage,
+          ...executionError,
+        };
+      }
+
+      // In warn/sample, keep the existing limiter behavior.
       const limitedResult = limitOutputTokens(
         llmPayload,
         this.config,
@@ -510,16 +604,55 @@ class ShellToolInvocation extends BaseToolInvocation<
         };
       }
 
+      this.logger.debug(
+        `Final returnDisplayMessage length=${returnDisplayMessage?.length ?? 0}, preview=${returnDisplayMessage?.slice(0, 100) ?? 'EMPTY'}`,
+      );
+
       return {
         llmContent: limitedResult.content,
         returnDisplay: returnDisplayMessage,
         ...executionError,
       };
     } finally {
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+      signal.removeEventListener('abort', onUserAbort);
       if (fs.existsSync(tempFilePath)) {
         fs.unlinkSync(tempFilePath);
       }
     }
+  }
+
+  private resolveTimeoutSeconds(
+    requestedTimeoutSeconds: number | undefined,
+    defaultTimeoutSeconds: number,
+    maxTimeoutSeconds: number,
+  ): number | undefined {
+    if (requestedTimeoutSeconds === -1 || defaultTimeoutSeconds === -1) {
+      return undefined;
+    }
+
+    const effectiveTimeout = requestedTimeoutSeconds ?? defaultTimeoutSeconds;
+    if (maxTimeoutSeconds === -1) {
+      return effectiveTimeout;
+    }
+
+    if (effectiveTimeout > maxTimeoutSeconds) {
+      return maxTimeoutSeconds;
+    }
+
+    return effectiveTimeout;
+  }
+
+  private isInvocationAllowlisted(command: string): boolean {
+    const allowedTools = this.config.getAllowedTools() || [];
+    if (allowedTools.length === 0) {
+      return false;
+    }
+
+    const invocation = { params: { command } } as unknown as AnyToolInvocation;
+    return isShellInvocationAllowlisted(invocation, allowedTools);
   }
 }
 
@@ -658,10 +791,20 @@ export class ShellTool extends BaseDeclarativeTool<
             description:
               'Brief description of the command for the user. Be specific and concise. Ideally a single sentence. Can be up to 3 sentences for clarity. No line breaks.',
           },
+          dir_path: {
+            type: 'string',
+            description:
+              '(OPTIONAL) Directory to run the command in. Provide a workspace directory name (e.g., "packages") or an absolute path within the workspace.',
+          },
           directory: {
             type: 'string',
             description:
-              '(OPTIONAL) Directory to run the command in, if not the project root directory. Must be relative to the project root directory and must already exist.',
+              'Alternative parameter name for dir_path (for backward compatibility).',
+          },
+          timeout_seconds: {
+            type: 'number',
+            description:
+              '(OPTIONAL) Timeout in seconds for command execution (-1 for unlimited).',
           },
         },
         required: ['command'],
@@ -691,21 +834,27 @@ export class ShellTool extends BaseDeclarativeTool<
     if (getCommandRoots(params.command).length === 0) {
       return 'Could not identify command root to obtain permission from user.';
     }
-    if (params.directory) {
-      if (path.isAbsolute(params.directory)) {
-        return 'Directory cannot be absolute. Please refer to workspace directories by their name.';
+    const dirPath = params.dir_path || params.directory;
+    if (dirPath) {
+      const workspaceContext = this.config.getWorkspaceContext();
+      if (path.isAbsolute(dirPath)) {
+        if (!workspaceContext.isPathWithinWorkspace(dirPath)) {
+          const directories = workspaceContext.getDirectories();
+          return `Directory must be within one of the workspace directories: ${directories.join(', ')}`;
+        }
+        return null;
       }
-      const workspaceDirs = this.config.getWorkspaceContext().getDirectories();
+      const workspaceDirs = workspaceContext.getDirectories();
       const matchingDirs = workspaceDirs.filter(
-        (dir) => path.basename(dir) === params.directory,
+        (dir) => path.basename(dir) === dirPath,
       );
 
       if (matchingDirs.length === 0) {
-        return `Directory '${params.directory}' is not a registered workspace directory.`;
+        return `Directory '${dirPath}' is not a registered workspace directory.`;
       }
 
       if (matchingDirs.length > 1) {
-        return `Directory name '${params.directory}' is ambiguous as it matches multiple workspace directories.`;
+        return `Directory name '${dirPath}' is ambiguous as it matches multiple workspace directories.`;
       }
     }
     return null;
@@ -715,9 +864,13 @@ export class ShellTool extends BaseDeclarativeTool<
     params: ShellToolParams,
     messageBus?: MessageBus,
   ): ToolInvocation<ShellToolParams, ToolResult> {
+    const normalizedParams = { ...params };
+    if (!normalizedParams.dir_path && normalizedParams.directory) {
+      normalizedParams.dir_path = normalizedParams.directory;
+    }
     return new ShellToolInvocation(
       this.config,
-      params,
+      normalizedParams,
       this.allowlist,
       messageBus,
     );

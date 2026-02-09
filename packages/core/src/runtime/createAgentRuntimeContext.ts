@@ -23,6 +23,7 @@ import { tokenLimit } from '../core/tokenLimits.js';
 const EPHEMERAL_DEFAULTS = {
   compressionThreshold: 0.8,
   preserveThreshold: 0.2,
+  topPreserveThreshold: 0.2,
   /** @plan PLAN-20251202-THINKING.P03b @requirement REQ-THINK-006 */
   reasoning: {
     enabled: true, // REQ-THINK-006.1
@@ -59,22 +60,54 @@ export function createAgentRuntimeContext(
 
   const history = options.history ?? new HistoryService();
 
+  const getLiveSetting = <T>(
+    key: string,
+    snapshotValue: T | undefined,
+  ): T | undefined => {
+    // First check the live settings service for runtime changes
+    const settingsService = options.providerRuntime?.settingsService;
+    if (settingsService) {
+      const liveValue = settingsService.get(key) as T | undefined;
+      if (liveValue !== undefined) {
+        return liveValue;
+      }
+    }
+    // Fall back to snapshot value if no live override
+    return snapshotValue;
+  };
+
   const ephemerals = {
-    compressionThreshold: (): number =>
-      options.settings.compressionThreshold ??
-      EPHEMERAL_DEFAULTS.compressionThreshold,
+    compressionThreshold: (): number => {
+      const liveThreshold = getLiveSetting<number>(
+        'compression-threshold',
+        options.settings.compressionThreshold,
+      );
+      const normalized =
+        typeof liveThreshold === 'number' && Number.isFinite(liveThreshold)
+          ? Math.min(Math.max(liveThreshold, 0), 1)
+          : undefined;
+      return normalized ?? EPHEMERAL_DEFAULTS.compressionThreshold;
+    },
     contextLimit: (): number => {
+      // Check live settings first, then snapshot
+      const liveLimit = getLiveSetting<number>(
+        'context-limit',
+        options.settings.contextLimit,
+      );
       const liveOverride =
-        typeof options.settings.contextLimit === 'number' &&
-        Number.isFinite(options.settings.contextLimit) &&
-        options.settings.contextLimit > 0
-          ? options.settings.contextLimit
+        typeof liveLimit === 'number' &&
+        Number.isFinite(liveLimit) &&
+        liveLimit > 0
+          ? liveLimit
           : undefined;
       return tokenLimit(options.state.model, liveOverride);
     },
     preserveThreshold: (): number =>
       options.settings.preserveThreshold ??
       EPHEMERAL_DEFAULTS.preserveThreshold,
+    topPreserveThreshold: (): number =>
+      options.settings.topPreserveThreshold ??
+      EPHEMERAL_DEFAULTS.topPreserveThreshold,
     toolFormatOverride: (): string | undefined =>
       options.settings.toolFormatOverride,
     /**
@@ -83,34 +116,53 @@ export function createAgentRuntimeContext(
      */
     reasoning: {
       enabled: (): boolean =>
-        options.settings['reasoning.enabled'] ??
-        EPHEMERAL_DEFAULTS.reasoning.enabled,
+        getLiveSetting(
+          'reasoning.enabled',
+          options.settings['reasoning.enabled'],
+        ) ?? EPHEMERAL_DEFAULTS.reasoning.enabled,
       includeInContext: (): boolean =>
-        options.settings['reasoning.includeInContext'] ??
-        EPHEMERAL_DEFAULTS.reasoning.includeInContext,
+        getLiveSetting(
+          'reasoning.includeInContext',
+          options.settings['reasoning.includeInContext'],
+        ) ?? EPHEMERAL_DEFAULTS.reasoning.includeInContext,
       includeInResponse: (): boolean =>
-        options.settings['reasoning.includeInResponse'] ??
-        EPHEMERAL_DEFAULTS.reasoning.includeInResponse,
+        getLiveSetting(
+          'reasoning.includeInResponse',
+          options.settings['reasoning.includeInResponse'],
+        ) ?? EPHEMERAL_DEFAULTS.reasoning.includeInResponse,
       format: (): 'native' | 'field' =>
-        (options.settings['reasoning.format'] as 'native' | 'field') ??
+        (getLiveSetting(
+          'reasoning.format',
+          options.settings['reasoning.format'],
+        ) as 'native' | 'field' | undefined) ??
         EPHEMERAL_DEFAULTS.reasoning.format,
       stripFromContext: (): 'all' | 'allButLast' | 'none' =>
-        (options.settings['reasoning.stripFromContext'] as
-          | 'all'
-          | 'allButLast'
-          | 'none') ?? EPHEMERAL_DEFAULTS.reasoning.stripFromContext,
+        (getLiveSetting(
+          'reasoning.stripFromContext',
+          options.settings['reasoning.stripFromContext'],
+        ) as 'all' | 'allButLast' | 'none' | undefined) ??
+        EPHEMERAL_DEFAULTS.reasoning.stripFromContext,
       effort: (): 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | undefined =>
-        options.settings['reasoning.effort'] as
-          | 'minimal'
-          | 'low'
-          | 'medium'
-          | 'high'
-          | 'xhigh'
-          | undefined,
-      maxTokens: (): number | undefined =>
-        typeof options.settings['reasoning.maxTokens'] === 'number'
-          ? options.settings['reasoning.maxTokens']
-          : undefined,
+        getLiveSetting(
+          'reasoning.effort',
+          options.settings['reasoning.effort'],
+        ) as 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | undefined,
+      maxTokens: (): number | undefined => {
+        const maxTokensValue = getLiveSetting(
+          'reasoning.maxTokens',
+          options.settings['reasoning.maxTokens'],
+        );
+        return typeof maxTokensValue === 'number' ? maxTokensValue : undefined;
+      },
+      adaptiveThinking: (): boolean | undefined => {
+        const adaptiveThinkingValue = getLiveSetting(
+          'reasoning.adaptiveThinking',
+          options.settings['reasoning.adaptiveThinking'],
+        );
+        return typeof adaptiveThinkingValue === 'boolean'
+          ? adaptiveThinkingValue
+          : undefined;
+      },
     },
   };
 

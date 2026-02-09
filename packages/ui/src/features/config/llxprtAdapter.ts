@@ -52,9 +52,18 @@ function getToolResultOutput(info: ToolCallResponseInfo): string {
   if (typeof info.resultDisplay === 'string') {
     return info.resultDisplay;
   }
-  // FileDiff object - format as diff
+  // AnsiOutput (array of lines) - extract plain text
+  if (Array.isArray(info.resultDisplay)) {
+    return info.resultDisplay
+      .map((line) => line.map((token) => token.text).join(''))
+      .join('\n');
+  }
+  // FileDiff or FileRead object - format as diff
   const diff = info.resultDisplay;
-  return `File: ${diff.fileName}\n${diff.fileDiff}`;
+  if ('fileDiff' in diff) {
+    return `File: ${diff.fileName}\n${diff.fileDiff}`;
+  }
+  return `File: ${diff.fileName}`;
 }
 
 /**

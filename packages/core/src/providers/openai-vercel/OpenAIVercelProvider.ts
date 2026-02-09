@@ -58,11 +58,11 @@ import { processToolParameters } from '../../tools/doubleEscapeUtils.js';
 import { type IModel } from '../IModel.js';
 import { type IProvider } from '../IProvider.js';
 import { getCoreSystemPromptAsync } from '../../core/prompts.js';
+import { shouldIncludeSubagentDelegation } from '../../prompt-config/subagent-delegation.js';
 import { resolveUserMemory } from '../utils/userMemory.js';
 import { convertToVercelMessages } from './messageConversion.js';
 import { getToolIdStrategy } from '../../tools/ToolIdStrategy.js';
 import { resolveRuntimeAuthToken } from '../utils/authToken.js';
-import { filterOpenAIRequestParams } from '../openai/openaiRequestParams.js';
 import { isLocalEndpoint } from '../utils/localEndpoint.js';
 import { AuthenticationError, wrapError } from './errors.js';
 import {
@@ -382,21 +382,24 @@ export class OpenAIVercelProvider extends BaseProvider implements IProvider {
   private extractModelParamsFromOptions(
     options: NormalizedGenerateChatOptions,
   ): Record<string, unknown> | undefined {
-    const providerSettings =
-      options.settings?.getProviderSettings(this.name) ?? {};
-    const configEphemerals = options.invocation?.ephemerals ?? {};
+    const modelParams = { ...(options.invocation?.modelParams ?? {}) };
 
-    const filteredProviderParams = filterOpenAIRequestParams(providerSettings);
-    const filteredEphemeralParams = filterOpenAIRequestParams(configEphemerals);
-
-    if (!filteredProviderParams && !filteredEphemeralParams) {
-      return undefined;
+    // Translate generic maxOutputTokens ephemeral to OpenAI's max_tokens
+    const rawMaxOutput = options.settings?.get('maxOutputTokens');
+    const genericMaxOutput =
+      typeof rawMaxOutput === 'number' &&
+      Number.isFinite(rawMaxOutput) &&
+      rawMaxOutput > 0
+        ? rawMaxOutput
+        : undefined;
+    if (
+      genericMaxOutput !== undefined &&
+      modelParams['max_tokens'] === undefined
+    ) {
+      modelParams['max_tokens'] = genericMaxOutput;
     }
 
-    return {
-      ...(filteredProviderParams ?? {}),
-      ...(filteredEphemeralParams ?? {}),
-    };
+    return Object.keys(modelParams).length > 0 ? modelParams : undefined;
   }
 
   private getAiJsonSchema(): ((schema: JSONSchema7) => unknown) | undefined {
@@ -434,53 +437,46 @@ export class OpenAIVercelProvider extends BaseProvider implements IProvider {
    * Kept for compatibility with existing history/tool logic.
    */
   private normalizeToOpenAIToolId(id: string): string {
-    const sanitize = (value: string) =>
-      value.replace(/[^a-zA-Z0-9_]/g, '') ||
-      'call_' + crypto.randomUUID().replace(/-/g, '');
-    // If already in OpenAI format, return as-is
+    if (!id) {
+      return 'call_';
+    }
+
     if (id.startsWith('call_')) {
-      return sanitize(id);
+      return id;
     }
 
-    // For history format, extract the UUID and add OpenAI prefix
     if (id.startsWith('hist_tool_')) {
-      const uuid = id.substring('hist_tool_'.length);
-      return sanitize('call_' + uuid);
+      return `call_${id.substring('hist_tool_'.length)}`;
     }
 
-    // For Anthropic format, extract the UUID and add OpenAI prefix
     if (id.startsWith('toolu_')) {
-      const uuid = id.substring('toolu_'.length);
-      return sanitize('call_' + uuid);
+      return `call_${id.substring('toolu_'.length)}`;
     }
 
-    // Unknown format - assume it's a raw UUID
-    return sanitize('call_' + id);
+    return `call_${id}`;
   }
 
   /**
    * Normalize tool IDs from OpenAI-style format to history format.
    */
   private normalizeToHistoryToolId(id: string): string {
-    // If already in history format, return as-is
+    if (!id) {
+      return 'hist_tool_';
+    }
+
     if (id.startsWith('hist_tool_')) {
       return id;
     }
 
-    // For OpenAI format, extract the UUID and add history prefix
     if (id.startsWith('call_')) {
-      const uuid = id.substring('call_'.length);
-      return 'hist_tool_' + uuid;
+      return `hist_tool_${id.substring('call_'.length)}`;
     }
 
-    // For Anthropic format, extract the UUID and add history prefix
     if (id.startsWith('toolu_')) {
-      const uuid = id.substring('toolu_'.length);
-      return 'hist_tool_' + uuid;
+      return `hist_tool_${id.substring('toolu_'.length)}`;
     }
 
-    // Unknown format - assume it's a raw UUID
-    return 'hist_tool_' + id;
+    return `hist_tool_${id}`;
   }
 
   /**
@@ -854,11 +850,16 @@ export class OpenAIVercelProvider extends BaseProvider implements IProvider {
       options.userMemory,
       () => options.invocation?.userMemory,
     );
-    const systemPrompt = await getCoreSystemPromptAsync(
-      userMemory,
-      modelId,
-      toolNamesArg,
+    const includeSubagentDelegation = await shouldIncludeSubagentDelegation(
+      toolNamesArg ?? [],
+      () => options.config?.getSubagentManager?.(),
     );
+    const systemPrompt = await getCoreSystemPromptAsync({
+      userMemory,
+      model: modelId,
+      tools: toolNamesArg,
+      includeSubagentDelegation,
+    });
 
     // Filter thinking from context based on settings
     const stripPolicy = rsEnabled ? rsStripFromContext : 'all'; // If disabled, strip all
@@ -1890,47 +1891,13 @@ export class OpenAIVercelProvider extends BaseProvider implements IProvider {
 
   /**
    * Gets model parameters from SettingsService per call (stateless).
-   * Mirrors OpenAIProvider.getModelParams for compatibility.
+   * @plan PLAN-20260126-SETTINGS-SEPARATION.P09
+   * Now uses invocation.modelParams instead of filtering SettingsService
    */
   override getModelParams(): Record<string, unknown> | undefined {
-    try {
-      const settingsService = this.resolveSettingsService();
-      const providerSettings = settingsService.getProviderSettings(this.name);
-
-      const reservedKeys = new Set([
-        'enabled',
-        'apiKey',
-        'api-key',
-        'apiKeyfile',
-        'api-keyfile',
-        'baseUrl',
-        'base-url',
-        'model',
-        'toolFormat',
-        'tool-format',
-        'toolFormatOverride',
-        'tool-format-override',
-        'defaultModel',
-      ]);
-
-      const params: Record<string, unknown> = {};
-      if (providerSettings) {
-        for (const [key, value] of Object.entries(providerSettings)) {
-          if (reservedKeys.has(key) || value === undefined || value === null) {
-            continue;
-          }
-          params[key] = value;
-        }
-      }
-
-      return Object.keys(params).length > 0 ? params : undefined;
-    } catch (error) {
-      this.getLogger().debug(
-        () =>
-          `Failed to get OpenAIVercel provider settings from SettingsService: ${error}`,
-      );
-      return undefined;
-    }
+    // Model params should come from invocation context, not SettingsService
+    // This maintains compatibility with the provider interface
+    return undefined;
   }
 
   /**
@@ -1988,7 +1955,7 @@ export class OpenAIVercelProvider extends BaseProvider implements IProvider {
     });
 
     const shouldRetry = Boolean(
-      status === 429 || status === 503 || status === 504,
+      status === 429 || (status !== undefined && status >= 500 && status < 600),
     );
 
     if (shouldRetry) {

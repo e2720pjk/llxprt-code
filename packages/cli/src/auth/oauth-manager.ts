@@ -429,7 +429,6 @@ export class OAuthManager {
           statuses.push({
             provider: providerName,
             authenticated: false,
-            authType: 'none',
             oauthEnabled,
           });
           continue;
@@ -445,7 +444,6 @@ export class OAuthManager {
           statuses.push({
             provider: providerName,
             authenticated: true,
-            authType: 'oauth',
             expiresIn,
             oauthEnabled,
           });
@@ -454,7 +452,6 @@ export class OAuthManager {
           statuses.push({
             provider: providerName,
             authenticated: false,
-            authType: 'none',
             oauthEnabled,
           });
         }
@@ -464,7 +461,6 @@ export class OAuthManager {
         statuses.push({
           provider: providerName,
           authenticated: false,
-          authType: 'none',
           oauthEnabled,
         });
       }
@@ -673,17 +669,100 @@ export class OAuthManager {
 
     // For other providers, trigger OAuth flow
     // Check if the current profile has multiple buckets - if so, use MultiBucketAuthenticator
+    // Issue 913: Also check if auth-bucket-prompt is enabled for single/default buckets
     logger.debug(
       () =>
         `[FLOW] No existing token for ${providerName}, triggering OAuth flow...`,
     );
+
+    // @fix issue1262 & issue1195: Before triggering OAuth, check disk with lock
+    // Another process or earlier run may have written a valid token that we missed
+    // Use the same locking pattern as PR #1258 to prevent race conditions
+    const bucketToCheck = typeof bucket === 'string' ? bucket : undefined;
+    const lockAcquired = await this.tokenStore.acquireRefreshLock(
+      providerName,
+      {
+        waitMs: 5000, // Wait up to 5 seconds for lock
+        staleMs: 30000,
+        bucket: bucketToCheck,
+      },
+    );
+
+    if (lockAcquired) {
+      try {
+        // Double-check disk for token written by another process
+        const diskToken = await this.tokenStore.getToken(
+          providerName,
+          bucketToCheck,
+        );
+        const nowInSeconds = Math.floor(Date.now() / 1000);
+        const thirtySecondsFromNow = nowInSeconds + 30;
+
+        if (diskToken && diskToken.expiry > thirtySecondsFromNow) {
+          // Valid token found on disk! Use it instead of triggering OAuth
+          logger.debug(
+            () =>
+              `[issue1262/1195] Found valid token on disk for ${providerName}, skipping OAuth`,
+          );
+          return diskToken.access_token;
+        }
+      } finally {
+        await this.tokenStore.releaseRefreshLock(providerName, bucketToCheck);
+      }
+    } else {
+      // Couldn't acquire lock - check disk anyway, another process may have just written a token
+      const diskToken = await this.tokenStore.getToken(
+        providerName,
+        bucketToCheck,
+      );
+      const nowInSeconds = Math.floor(Date.now() / 1000);
+      const thirtySecondsFromNow = nowInSeconds + 30;
+
+      if (diskToken && diskToken.expiry > thirtySecondsFromNow) {
+        logger.debug(
+          () =>
+            `[issue1262/1195] Found valid token on disk after lock timeout for ${providerName}`,
+        );
+        return diskToken.access_token;
+      }
+    }
+
+    // No valid token on disk, proceed with OAuth flow
     try {
       const buckets = await this.getProfileBuckets(providerName);
+
+      // Issue 913 FIX: When auth-bucket-prompt is enabled, route ALL profiles through
+      // MultiBucketAuthenticator to ensure the confirmation dialog is shown
+      // Import getEphemeralSetting dynamically to avoid circular dependencies
+      // Wrap in try-catch to handle cases where runtime context is not available (e.g., tests)
+      let showPrompt = false;
+      try {
+        const { getEphemeralSetting: getRuntimeEphemeralSetting } =
+          await import('../runtime/runtimeSettings.js');
+        showPrompt =
+          (getRuntimeEphemeralSetting('auth-bucket-prompt') as boolean) ??
+          false;
+      } catch (runtimeError) {
+        // Runtime context not available (e.g., in tests) - fall back to non-prompt mode
+        logger.debug(
+          'Could not get ephemeral setting (runtime not initialized), using default',
+          runtimeError,
+        );
+      }
+
       if (buckets.length > 1) {
         logger.debug(
           `Multi-bucket lazy auth triggered for ${providerName} with ${buckets.length} buckets`,
         );
         await this.authenticateMultipleBuckets(providerName, buckets);
+      } else if (showPrompt) {
+        // Issue 913: Single/default bucket with prompt mode - use MultiBucketAuthenticator
+        // to ensure the confirmation dialog is shown before opening browser
+        const effectiveBuckets = buckets.length === 1 ? buckets : ['default'];
+        logger.debug(
+          `Single-bucket auth with prompt mode for ${providerName}, bucket: ${effectiveBuckets[0]}`,
+        );
+        await this.authenticateMultipleBuckets(providerName, effectiveBuckets);
       } else {
         await this.authenticate(providerName);
       }
@@ -798,6 +877,12 @@ export class OAuthManager {
         profileBuckets = await this.getProfileBuckets(providerName);
 
         const config = this.getConfig?.();
+        // @fix issue1029 - Enhanced debug logging for failover handler setup
+        logger.debug(
+          () =>
+            `[issue1029] getOAuthToken: provider=${providerName}, buckets=${JSON.stringify(profileBuckets)}, hasConfig=${!!config}`,
+        );
+
         if (config && profileBuckets.length > 1) {
           failoverHandler = config.getBucketFailoverHandler?.();
 
@@ -808,6 +893,11 @@ export class OAuthManager {
               (value, index) => value === profileBuckets[index],
             );
 
+          logger.debug(
+            () =>
+              `[issue1029] Failover handler check: hasExisting=${!!failoverHandler}, sameBuckets=${sameBuckets}, existingBuckets=${JSON.stringify(existingBuckets)}`,
+          );
+
           if (!failoverHandler || !sameBuckets) {
             const handler = new BucketFailoverHandlerImpl(
               profileBuckets,
@@ -816,7 +906,17 @@ export class OAuthManager {
             );
             config.setBucketFailoverHandler(handler);
             failoverHandler = handler;
+            logger.debug(
+              () =>
+                `[issue1029] Created and set new BucketFailoverHandlerImpl on config for ${providerName} with buckets: ${JSON.stringify(profileBuckets)}`,
+            );
           }
+        } else if (profileBuckets.length > 1 && !config) {
+          // @fix issue1029 - This is the bug! We have multiple buckets but no config to set handler on
+          logger.warn(
+            `[issue1029] CRITICAL: Profile has ${profileBuckets.length} buckets but no Config available to set failover handler! ` +
+              `Bucket failover will NOT work. Ensure OAuthManager.setConfigGetter is called with the active Config instance.`,
+          );
         }
 
         if (!bucketToUse) {
@@ -863,16 +963,70 @@ export class OAuthManager {
       );
 
       if (token.expiry <= thirtySecondsFromNow) {
-        // 3. Token is expired or about to expire, try refresh
+        // 3. Token is expired or about to expire, try refresh with locking
         logger.debug(
           () =>
-            `[FLOW] Token expired or expiring soon for ${providerName}, attempting refresh...`,
+            `[FLOW] Token expired or expiring soon for ${providerName}, attempting refresh with lock...`,
         );
+
+        // Issue #1159: Acquire lock before refreshing to prevent concurrent refreshes
+        const lockAcquired = await this.tokenStore.acquireRefreshLock(
+          providerName,
+          { waitMs: 10000, staleMs: 30000, bucket: bucketToUse },
+        );
+
+        if (!lockAcquired) {
+          logger.debug(
+            () =>
+              `[FLOW] Failed to acquire refresh lock for ${providerName}, checking disk...`,
+          );
+          // Lock timeout - check disk again in case another process refreshed
+          const reloadedToken = await this.tokenStore.getToken(
+            providerName,
+            bucketToUse,
+          );
+          if (reloadedToken && reloadedToken.expiry > thirtySecondsFromNow) {
+            logger.debug(
+              () =>
+                `[FLOW] Token was refreshed by another process for ${providerName}`,
+            );
+            this.scheduleProactiveRenewal(
+              providerName,
+              bucketToUse,
+              reloadedToken,
+            );
+            return reloadedToken;
+          }
+          // Still expired after lock timeout - return null
+          return null;
+        }
+
         try {
-          const refreshedToken = await provider.refreshToken(token);
+          // Issue #1159: Double-check pattern - re-read token after acquiring lock
+          const recheckToken = await this.tokenStore.getToken(
+            providerName,
+            bucketToUse,
+          );
+          if (recheckToken && recheckToken.expiry > thirtySecondsFromNow) {
+            logger.debug(
+              () =>
+                `[FLOW] Token was refreshed by another process while waiting for lock for ${providerName}`,
+            );
+            this.scheduleProactiveRenewal(
+              providerName,
+              bucketToUse,
+              recheckToken,
+            );
+            return recheckToken;
+          }
+
+          // Token is still expired, proceed with refresh
+          const refreshedToken = await provider.refreshToken(
+            recheckToken || token,
+          );
           if (refreshedToken) {
             const mergedToken = mergeRefreshedToken(
-              token as OAuthTokenWithExtras,
+              (recheckToken || token) as OAuthTokenWithExtras,
               refreshedToken as OAuthTokenWithExtras,
             );
             // 4. Update stored token if refreshed
@@ -905,6 +1059,9 @@ export class OAuthManager {
               `[FLOW] Token refresh FAILED for ${providerName}: ${refreshError instanceof Error ? refreshError.message : refreshError}`,
           );
           return null;
+        } finally {
+          // Always release lock
+          await this.tokenStore.releaseRefreshLock(providerName, bucketToUse);
         }
       }
 
@@ -1081,28 +1238,78 @@ export class OAuthManager {
         return;
       }
 
-      const refreshedToken = await provider.refreshToken(currentToken);
-      if (!refreshedToken) {
+      // Issue #1159: Acquire lock before refreshing
+      const lockAcquired = await this.tokenStore.acquireRefreshLock(
+        providerName,
+        { waitMs: 10000, staleMs: 30000, bucket: normalizedBucket },
+      );
+
+      if (!lockAcquired) {
+        // Lock timeout - retry later
         this.scheduleProactiveRetry(providerName, normalizedBucket);
         return;
       }
 
-      const mergedToken = mergeRefreshedToken(
-        currentToken as OAuthTokenWithExtras,
-        refreshedToken as OAuthTokenWithExtras,
-      );
+      try {
+        // Issue #1159: Double-check pattern - re-read token after acquiring lock
+        const recheckToken = await this.tokenStore.getToken(
+          providerName,
+          normalizedBucket,
+        );
 
-      await this.tokenStore.saveToken(
-        providerName,
-        mergedToken,
-        normalizedBucket,
-      );
-      this.proactiveRenewalFailures.delete(key);
-      this.scheduleProactiveRenewal(
-        providerName,
-        normalizedBucket,
-        mergedToken,
-      );
+        if (!recheckToken || !recheckToken.refresh_token) {
+          this.clearProactiveRenewal(key);
+          return;
+        }
+
+        // Check if token is still expired/expiring
+        const nowInSeconds = Math.floor(Date.now() / 1000);
+        const thirtySecondsFromNow = nowInSeconds + 30;
+        if (recheckToken.expiry > thirtySecondsFromNow) {
+          // Token was already refreshed by another process
+          logger.debug(
+            () =>
+              `[OAUTH] Token was already refreshed for ${providerName}:${normalizedBucket}, rescheduling`,
+          );
+          this.proactiveRenewalFailures.delete(key);
+          this.scheduleProactiveRenewal(
+            providerName,
+            normalizedBucket,
+            recheckToken,
+          );
+          return;
+        }
+
+        // Proceed with refresh
+        const refreshedToken = await provider.refreshToken(recheckToken);
+        if (!refreshedToken) {
+          this.scheduleProactiveRetry(providerName, normalizedBucket);
+          return;
+        }
+
+        const mergedToken = mergeRefreshedToken(
+          recheckToken as OAuthTokenWithExtras,
+          refreshedToken as OAuthTokenWithExtras,
+        );
+
+        await this.tokenStore.saveToken(
+          providerName,
+          mergedToken,
+          normalizedBucket,
+        );
+        this.proactiveRenewalFailures.delete(key);
+        this.scheduleProactiveRenewal(
+          providerName,
+          normalizedBucket,
+          mergedToken,
+        );
+      } finally {
+        // Always release lock
+        await this.tokenStore.releaseRefreshLock(
+          providerName,
+          normalizedBucket,
+        );
+      }
     } finally {
       this.proactiveRenewalInFlight.delete(key);
     }
@@ -1330,8 +1537,9 @@ export class OAuthManager {
     try {
       // Import ProviderManager to access active providers
       // Use dynamic import to avoid circular dependencies
-      const { getCliProviderManager, getCliRuntimeContext } =
-        await import('../runtime/runtimeSettings.js');
+      const { getCliProviderManager, getCliRuntimeContext } = await import(
+        '../runtime/runtimeSettings.js'
+      );
       const providerManager = getCliProviderManager();
 
       // Get the provider instance to clear its auth cache
@@ -1383,16 +1591,34 @@ export class OAuthManager {
         provider.clearState();
       }
 
+      // Flush all known runtime scopes to ensure cached tokens are invalidated
+      // This fixes Issue #975 where logout didn't invalidate in-memory cached tokens
+      const knownRuntimeIds = [
+        'legacy-singleton',
+        'provider-manager-singleton',
+      ];
       try {
         const runtimeContext = getCliRuntimeContext();
         if (runtimeContext && typeof runtimeContext.runtimeId === 'string') {
-          flushRuntimeAuthScope(runtimeContext.runtimeId);
+          if (!knownRuntimeIds.includes(runtimeContext.runtimeId)) {
+            knownRuntimeIds.push(runtimeContext.runtimeId);
+          }
         }
       } catch (runtimeError) {
         logger.debug(
-          `Skipped runtime auth scope flush for ${providerName}:`,
+          `Could not get CLI runtime context for ${providerName}:`,
           runtimeError,
         );
+      }
+
+      // Flush all known runtime scopes
+      for (const runtimeId of knownRuntimeIds) {
+        try {
+          flushRuntimeAuthScope(runtimeId);
+          logger.debug(`Flushed runtime auth scope: ${runtimeId}`);
+        } catch (flushError) {
+          logger.debug(`Skipped flush for runtime ${runtimeId}:`, flushError);
+        }
       }
 
       logger.debug(`Cleared auth caches for provider: ${providerName}`);
@@ -1498,11 +1724,173 @@ export class OAuthManager {
    * If the current profile has auth.buckets configured, return those.
    * Otherwise, return empty array (single-bucket or non-OAuth profile)
    */
+
+  /**
+   * Get Anthropic usage information from OAuth endpoint for a specific bucket
+   * Returns full usage data for Claude Code/Max plans
+   * Only works with OAuth tokens (sk-ant-oat01-...), not API keys
+   * @param bucket - Optional bucket name, defaults to current session bucket or 'default'
+   */
+  async getAnthropicUsageInfo(
+    bucket?: string,
+  ): Promise<Record<string, unknown> | null> {
+    const provider = this.providers.get('anthropic');
+    if (!provider) {
+      return null;
+    }
+
+    // Get the token for the specified bucket
+    const bucketToUse =
+      bucket ?? this.sessionBuckets.get('anthropic') ?? 'default';
+    const token = await this.tokenStore.getToken('anthropic', bucketToUse);
+
+    if (!token) {
+      return null;
+    }
+
+    try {
+      const { fetchAnthropicUsage } = await import(
+        '@vybestack/llxprt-code-core'
+      );
+      return await fetchAnthropicUsage(token.access_token);
+    } catch (error) {
+      logger.debug(
+        `Error fetching Anthropic usage info for bucket ${bucketToUse}:`,
+        error,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Get Anthropic usage information for all authenticated buckets
+   * Returns a map of bucket name to usage info for all buckets that have valid OAuth tokens
+   */
+  async getAllAnthropicUsageInfo(): Promise<
+    Map<string, Record<string, unknown>>
+  > {
+    const result = new Map<string, Record<string, unknown>>();
+
+    // Get all buckets for anthropic
+    const buckets = await this.tokenStore.listBuckets('anthropic');
+
+    // If no buckets, try 'default'
+    const bucketsToCheck = buckets.length > 0 ? buckets : ['default'];
+
+    // Import once before the loop
+    const { fetchAnthropicUsage } = await import('@vybestack/llxprt-code-core');
+
+    for (const bucket of bucketsToCheck) {
+      // Check if this bucket has a valid OAuth token
+      const token = await this.tokenStore.getToken('anthropic', bucket);
+      if (!token) {
+        continue;
+      }
+
+      // Check if token is expired
+      const nowInSeconds = Math.floor(Date.now() / 1000);
+      if (token.expiry <= nowInSeconds) {
+        continue;
+      }
+
+      // Check if it's an OAuth token (sk-ant-oat01-...)
+      if (!token.access_token.startsWith('sk-ant-oat01-')) {
+        continue;
+      }
+
+      try {
+        const usageInfo = await fetchAnthropicUsage(token.access_token);
+        if (usageInfo) {
+          result.set(bucket, usageInfo);
+        }
+      } catch (error) {
+        logger.debug(
+          `Error fetching Anthropic usage info for bucket ${bucket}:`,
+          error,
+        );
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Get Codex usage information for all authenticated buckets
+   * Returns a map of bucket name to usage info for all buckets that have valid OAuth tokens with account_id
+   */
+  async getAllCodexUsageInfo(): Promise<Map<string, Record<string, unknown>>> {
+    const result = new Map<string, Record<string, unknown>>();
+
+    // Get all buckets for codex
+    const buckets = await this.tokenStore.listBuckets('codex');
+
+    // If no buckets, try 'default'
+    const bucketsToCheck = buckets.length > 0 ? buckets : ['default'];
+
+    // Import once before the loop
+    const { fetchCodexUsage } = await import('@vybestack/llxprt-code-core');
+
+    for (const bucket of bucketsToCheck) {
+      // Check if this bucket has a valid OAuth token
+      const token = await this.tokenStore.getToken('codex', bucket);
+      if (!token) {
+        continue;
+      }
+
+      // Check if token is expired
+      const nowInSeconds = Math.floor(Date.now() / 1000);
+      if (token.expiry <= nowInSeconds) {
+        continue;
+      }
+
+      // Extract account_id from token (Codex tokens have this field)
+      // Use runtime property access without narrowing type assertion
+      const tokenObj = token as Record<string, unknown>;
+      const accountId =
+        typeof tokenObj['account_id'] === 'string'
+          ? tokenObj['account_id']
+          : undefined;
+      if (!accountId) {
+        logger.debug(
+          `Codex token for bucket ${bucket} does not have account_id, skipping`,
+        );
+        continue;
+      }
+
+      // Fetch usage info for this bucket
+      try {
+        const config = this.getConfig?.();
+        const runtimeBaseUrl = config?.getEphemeralSetting('base-url');
+        const codexBaseUrl =
+          typeof runtimeBaseUrl === 'string' && runtimeBaseUrl.trim() !== ''
+            ? runtimeBaseUrl
+            : undefined;
+
+        const usageInfo = await fetchCodexUsage(
+          token.access_token,
+          accountId,
+          codexBaseUrl,
+        );
+        if (usageInfo) {
+          result.set(bucket, usageInfo);
+        }
+      } catch (error) {
+        logger.debug(
+          `Error fetching Codex usage info for bucket ${bucket}:`,
+          error,
+        );
+      }
+    }
+
+    return result;
+  }
+
   private async getProfileBuckets(providerName: string): Promise<string[]> {
     try {
       // Try to get profile from runtime settings
-      const { getCliRuntimeServices } =
-        await import('../runtime/runtimeSettings.js');
+      const { getCliRuntimeServices } = await import(
+        '../runtime/runtimeSettings.js'
+      );
       const { settingsService } = getCliRuntimeServices();
 
       // Get current profile name
@@ -1545,17 +1933,22 @@ export class OAuthManager {
   /**
    * Authenticate multiple OAuth buckets sequentially using MultiBucketAuthenticator
    * with timing controls (delay/prompt) and browser auto-open settings
+   *
+   * Issue 913: This method now supports eager authentication of all buckets upfront,
+   * filtering out already-authenticated buckets to avoid unnecessary prompts.
    */
   private async authenticateMultipleBuckets(
     providerName: string,
     buckets: string[],
   ): Promise<void> {
-    const { MultiBucketAuthenticator } =
-      await import('./MultiBucketAuthenticator.js');
+    const { MultiBucketAuthenticator } = await import(
+      './MultiBucketAuthenticator.js'
+    );
 
     // Get ephemeral settings for timing controls
-    const { getEphemeralSetting: getRuntimeEphemeralSetting } =
-      await import('../runtime/runtimeSettings.js');
+    const { getEphemeralSetting: getRuntimeEphemeralSetting } = await import(
+      '../runtime/runtimeSettings.js'
+    );
     const getEphemeralSetting = <T>(key: string): T | undefined =>
       getRuntimeEphemeralSetting(key) as T | undefined;
 
@@ -1564,6 +1957,44 @@ export class OAuthManager {
     logger.debug('Checking auth-bucket-prompt setting', {
       rawValue: rawBucketPrompt,
       typeof: typeof rawBucketPrompt,
+    });
+
+    // Issue 913 FIX: Filter out already-authenticated buckets for eager auth
+    // Only prompt/authenticate buckets that don't have valid tokens
+    const unauthenticatedBuckets: string[] = [];
+    const nowInSeconds = Math.floor(Date.now() / 1000);
+
+    for (const bucket of buckets) {
+      const existingToken = await this.tokenStore.getToken(
+        providerName,
+        bucket,
+      );
+      // Check if token exists and is not expired (with 30-second buffer)
+      if (existingToken && existingToken.expiry > nowInSeconds + 30) {
+        logger.debug(`Bucket ${bucket} already authenticated, skipping`, {
+          provider: providerName,
+          bucket,
+          expiry: existingToken.expiry,
+        });
+      } else {
+        unauthenticatedBuckets.push(bucket);
+      }
+    }
+
+    // If all buckets are already authenticated, nothing to do
+    if (unauthenticatedBuckets.length === 0) {
+      logger.debug('All buckets already authenticated', {
+        provider: providerName,
+        bucketCount: buckets.length,
+      });
+      return;
+    }
+
+    logger.debug('Buckets requiring authentication', {
+      provider: providerName,
+      total: buckets.length,
+      needsAuth: unauthenticatedBuckets.length,
+      buckets: unauthenticatedBuckets,
     });
 
     // Callback to authenticate a single bucket
@@ -1585,6 +2016,10 @@ export class OAuthManager {
       provider: string,
       bucket: string,
     ): Promise<boolean> => {
+      // Check if prompt mode is enabled FIRST - this determines timeout behavior
+      // Issue 913: When prompt mode is enabled, wait indefinitely for user approval
+      const showPrompt = getEphemeralSetting<boolean>('auth-bucket-prompt');
+
       // Try interactive TUI prompt if message bus getter is available
       // Use lazy resolution to get message bus after TUI is initialized
       const messageBus = this.getMessageBus?.();
@@ -1593,10 +2028,10 @@ export class OAuthManager {
           logger.debug('Requesting bucket auth confirmation via message bus', {
             provider,
             bucket,
+            promptMode: showPrompt,
           });
 
-          // Request confirmation via message bus with a timeout
-          // If TUI is ready, it will respond; otherwise we fall back to delay
+          // Request confirmation via message bus
           const confirmPromise = messageBus.requestBucketAuthConfirmation(
             provider,
             bucket,
@@ -1604,7 +2039,21 @@ export class OAuthManager {
             buckets.length,
           );
 
-          // Race with a 3-second timeout to give TUI time to respond
+          // Issue 913 FIX: When prompt mode is enabled, wait indefinitely for user approval
+          // The MessageBus has its own 5-minute timeout as an emergency safeguard
+          if (showPrompt) {
+            logger.debug(
+              'Prompt mode enabled - waiting indefinitely for user approval',
+            );
+            const result = await confirmPromise;
+            logger.debug('User responded to bucket auth confirmation', {
+              result,
+            });
+            return result;
+          }
+
+          // Prompt mode disabled: Race with a 3-second timeout for backward compatibility
+          // If TUI is ready, it will respond; otherwise we fall back to delay
           const timeoutPromise = new Promise<'timeout'>((resolve) =>
             setTimeout(() => resolve('timeout'), 3000),
           );
@@ -1630,7 +2079,6 @@ export class OAuthManager {
       }
 
       // TUI not available or timed out - try stdin if TTY and prompt enabled
-      const showPrompt = getEphemeralSetting<boolean>('auth-bucket-prompt');
       logger.debug('Checking TTY prompt fallback', {
         showPrompt,
         isTTY: process.stdin.isTTY,
@@ -1646,7 +2094,11 @@ export class OAuthManager {
               process.stdin.removeListener('data', onData);
               process.stdin.removeListener('error', onError);
               if (rawModeSet && process.stdin.isTTY) {
-                process.stdin.setRawMode(false);
+                try {
+                  process.stdin.setRawMode(false);
+                } catch {
+                  // Issue #1020: Ignore EIO errors during cleanup
+                }
               }
               process.stdin.pause();
             };
@@ -1654,25 +2106,50 @@ export class OAuthManager {
               cleanup();
               resolve();
             };
+            // Issue #1020: Make error handler defensive against EIO errors
             const onError = (err: Error): void => {
               cleanup();
-              reject(err);
+              // Check if this is a transient I/O error we should ignore
+              const nodeError = err as NodeJS.ErrnoException;
+              const isEioError =
+                nodeError.code === 'EIO' ||
+                nodeError.errno === -5 ||
+                (typeof nodeError.message === 'string' &&
+                  nodeError.message.includes('EIO'));
+              if (isEioError) {
+                // EIO errors are transient - treat as user cancel instead of crashing
+                logger.debug(
+                  'Ignoring transient stdin EIO error during prompt',
+                );
+                reject(new Error('Prompt cancelled due to I/O error'));
+              } else {
+                reject(err);
+              }
             };
             if (process.stdin.isTTY) {
-              process.stdin.setRawMode(true);
-              rawModeSet = true;
+              try {
+                // Issue #1020: Wrap setRawMode in try-catch
+                process.stdin.setRawMode(true);
+                rawModeSet = true;
+              } catch (err) {
+                // If setRawMode fails, EIO-style errors should not crash
+                logger.debug('Failed to set raw mode for prompt:', err);
+                cleanup();
+                reject(new Error('Failed to set raw mode for prompt'));
+                return; // Don't continue setting up listeners
+              }
             }
             process.stdin.resume();
             process.stdin.once('data', onData);
             process.stdin.once('error', onError);
           });
         } catch (error) {
-          // Ensure raw mode is reset even on unexpected errors
+          // Issue #1020: Ensure raw mode is reset even on unexpected errors
           if (rawModeSet && process.stdin.isTTY) {
             try {
               process.stdin.setRawMode(false);
             } catch {
-              // Ignore cleanup errors
+              // Ignore cleanup errors (likely EIO)
             }
           }
           throw error;
@@ -1706,14 +2183,15 @@ export class OAuthManager {
       getEphemeralSetting,
     });
 
+    // Issue 913: Use unauthenticatedBuckets for the actual auth flow
     const result = await authenticator.authenticateMultipleBuckets({
       provider: providerName,
-      buckets,
+      buckets: unauthenticatedBuckets,
     });
 
     if (result.cancelled) {
       throw new Error(
-        `Multi-bucket authentication cancelled after ${result.authenticatedBuckets.length} of ${buckets.length} buckets`,
+        `Multi-bucket authentication cancelled after ${result.authenticatedBuckets.length} of ${unauthenticatedBuckets.length} buckets`,
       );
     }
 

@@ -4,17 +4,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { type FunctionDeclaration, type PartListUnion } from '@google/genai';
+import {
+  type FunctionCall,
+  type FunctionDeclaration,
+  type PartListUnion,
+} from '@google/genai';
 import { type ToolContext, type ContextAwareTool } from './tool-context.js';
 import { ToolErrorType } from './tool-error.js';
 import { type DiffUpdateResult } from '../ide/ideContext.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
-import { PolicyDecision } from '../policy/types.js';
+import {
+  MessageBusType,
+  type ToolConfirmationResponse,
+} from '../confirmation-bus/types.js';
 import {
   ToolConfirmationOutcome,
   type ToolConfirmationPayload,
 } from './tool-confirmation-types.js';
+import { randomUUID } from 'node:crypto';
+import type { AnsiOutput } from '../utils/terminalSerializer.js';
 
 export { ToolConfirmationOutcome } from './tool-confirmation-types.js';
 export type { ToolConfirmationPayload } from './tool-confirmation-types.js';
@@ -57,11 +66,17 @@ export interface ToolInvocation<
    * Executes the tool with the validated parameters.
    * @param signal AbortSignal for tool cancellation.
    * @param updateOutput Optional callback to stream output.
+   * @param terminalColumns Optional terminal width for PTY mode.
+   * @param terminalRows Optional terminal height for PTY mode.
+   * @param setPidCallback Optional callback to propagate PTY PID.
    * @returns Result of the tool execution.
    */
   execute(
     signal: AbortSignal,
-    updateOutput?: (output: string) => void,
+    updateOutput?: (output: string | AnsiOutput) => void,
+    terminalColumns?: number,
+    terminalRows?: number,
+    setPidCallback?: (pid: number) => void,
   ): Promise<TResult>;
 }
 
@@ -71,10 +86,14 @@ export interface ToolInvocation<
 export abstract class BaseToolInvocation<
   TParams extends object,
   TResult extends ToolResult,
-> implements ToolInvocation<TParams, TResult> {
+> implements ToolInvocation<TParams, TResult>
+{
   constructor(
     readonly params: TParams,
     protected readonly messageBus?: MessageBus,
+    readonly _toolName?: string,
+    readonly _toolDisplayName?: string,
+    readonly _serverName?: string,
   ) {}
 
   abstract getDescription(): string;
@@ -93,24 +112,98 @@ export abstract class BaseToolInvocation<
   }
 
   /**
-   * Requests confirmation through the message bus and policy engine.
-   * This integrates with the new policy-based confirmation flow.
-   * @param abortSignal Signal to abort the confirmation request
-   * @returns Decision from policy engine with requiresUserConfirmation flag
+   * Attempts to obtain a policy decision via message bus.
+   *
+   * Semantics:
+   * - `'ALLOW'`: auto-proceed
+   * - `'DENY'`: tool must not execute
+   * - `'ASK_USER'`: fall back to legacy tool confirmation UI
    */
-  protected async getMessageBusDecision(abortSignal: AbortSignal): Promise<{
-    decision: PolicyDecision;
-    requiresUserConfirmation?: boolean;
-  }> {
-    // Default implementation defers to legacy confirmation flow.
-    // Concrete tools can override for custom behavior.
-    if (abortSignal.aborted) {
-      throw new Error('Operation aborted');
+  protected getMessageBusDecision(
+    abortSignal: AbortSignal,
+  ): Promise<'ALLOW' | 'DENY' | 'ASK_USER'> {
+    if (!this.messageBus) {
+      // No bus wired: allow and let per-tool legacy confirmation logic decide.
+      return Promise.resolve('ALLOW');
     }
-    return {
-      decision: PolicyDecision.ASK_USER,
-      requiresUserConfirmation: true,
+
+    if (abortSignal.aborted) {
+      return Promise.resolve('DENY');
+    }
+
+    const correlationId = randomUUID();
+    const toolCall: FunctionCall = {
+      name: this.getToolName(),
+      args: this.params as Record<string, unknown>,
     };
+
+    return new Promise<'ALLOW' | 'DENY' | 'ASK_USER'>((resolve) => {
+      let timeoutId: NodeJS.Timeout | undefined;
+
+      const cleanup = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = undefined;
+        }
+        abortSignal.removeEventListener('abort', abortHandler);
+        this.messageBus?.unsubscribe(
+          MessageBusType.TOOL_CONFIRMATION_RESPONSE,
+          responseHandler,
+        );
+      };
+
+      const abortHandler = () => {
+        cleanup();
+        resolve('DENY');
+      };
+
+      const responseHandler = (response: ToolConfirmationResponse) => {
+        if (response.correlationId !== correlationId) {
+          return;
+        }
+
+        cleanup();
+
+        if (response.requiresUserConfirmation) {
+          resolve('ASK_USER');
+          return;
+        }
+
+        const confirmed =
+          response.confirmed ??
+          (response.outcome !== undefined
+            ? response.outcome !== ToolConfirmationOutcome.Cancel &&
+              response.outcome !== ToolConfirmationOutcome.ModifyWithEditor
+            : false);
+
+        resolve(confirmed ? 'ALLOW' : 'DENY');
+      };
+
+      abortSignal.addEventListener('abort', abortHandler);
+
+      // Default to ASK_USER if the bus doesn't answer promptly.
+      timeoutId = setTimeout(() => {
+        cleanup();
+        resolve('ASK_USER');
+      }, 30000);
+
+      this.messageBus?.subscribe(
+        MessageBusType.TOOL_CONFIRMATION_RESPONSE,
+        responseHandler,
+      );
+
+      try {
+        this.messageBus?.publish({
+          type: MessageBusType.TOOL_CONFIRMATION_REQUEST,
+          toolCall,
+          correlationId,
+          serverName: this.getServerName(),
+        });
+      } catch {
+        cleanup();
+        resolve('ALLOW');
+      }
+    });
   }
 
   /**
@@ -118,7 +211,7 @@ export abstract class BaseToolInvocation<
    * Subclasses can override to provide a specific tool name.
    */
   protected getToolName(): string {
-    return 'unknown';
+    return this._toolName ?? 'unknown';
   }
 
   /**
@@ -126,7 +219,7 @@ export abstract class BaseToolInvocation<
    * Regular tools should return undefined.
    */
   protected getServerName(): string | undefined {
-    return undefined;
+    return this._serverName;
   }
 
   /**
@@ -152,7 +245,10 @@ export abstract class BaseToolInvocation<
 
   abstract execute(
     signal: AbortSignal,
-    updateOutput?: (output: string) => void,
+    updateOutput?: (output: string | AnsiOutput) => void,
+    terminalColumns?: number,
+    terminalRows?: number,
+    setPidCallback?: (pid: number) => void,
   ): Promise<TResult>;
 }
 
@@ -218,7 +314,8 @@ export interface ToolBuilder<
 export abstract class DeclarativeTool<
   TParams extends object,
   TResult extends ToolResult,
-> implements ToolBuilder<TParams, TResult> {
+> implements ToolBuilder<TParams, TResult>
+{
   protected messageBus?: MessageBus;
 
   constructor(
@@ -295,7 +392,7 @@ export abstract class DeclarativeTool<
   async buildAndExecute(
     params: TParams,
     signal: AbortSignal,
-    updateOutput?: (output: string) => void,
+    updateOutput?: (output: string | AnsiOutput) => void,
   ): Promise<TResult> {
     const invocation = this.build(params);
     return invocation.execute(signal, updateOutput);
@@ -535,7 +632,14 @@ export function hasCycleInSchema(schema: object): boolean {
   return traverse(schema, new Set<string>(), new Set<string>());
 }
 
-export type ToolResultDisplay = string | FileDiff;
+export interface FileRead {
+  content: string;
+  fileName: string;
+  filePath: string;
+  metadata?: Record<string, unknown>;
+}
+
+export type ToolResultDisplay = string | FileDiff | FileRead | AnsiOutput;
 
 export interface FileDiff {
   fileDiff: string;
@@ -543,6 +647,8 @@ export interface FileDiff {
   originalContent: string | null;
   newContent: string;
   diffStat?: DiffStat;
+  metadata?: Record<string, unknown>;
+  applied?: boolean;
 }
 
 export interface DiffStat {
@@ -567,6 +673,7 @@ export interface ToolEditConfirmationDetails {
   isModifying?: boolean;
   ideConfirmation?: Promise<DiffUpdateResult>;
   correlationId?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ToolExecuteConfirmationDetails {
@@ -628,9 +735,9 @@ export interface ToolLocation {
  * @deprecated Use BaseDeclarativeTool for new tools
  */
 export abstract class BaseTool<
-  TParams extends object,
-  TResult extends ToolResult,
->
+    TParams extends object,
+    TResult extends ToolResult,
+  >
   extends DeclarativeTool<TParams, TResult>
   implements ContextAwareTool
 {
@@ -735,6 +842,9 @@ class BaseToolLegacyInvocation<
   async execute(
     signal: AbortSignal,
     updateOutput?: (output: string) => void,
+    _terminalColumns?: number,
+    _terminalRows?: number,
+    _setPidCallback?: (pid: number) => void,
   ): Promise<TResult> {
     return this.tool.execute(this.params, signal, updateOutput);
   }

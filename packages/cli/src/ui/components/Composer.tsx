@@ -41,6 +41,9 @@ export const Composer = ({
     showAutoAcceptIndicator,
     placeholder,
     inputHistory,
+    streamingState,
+    queueErrorMessage,
+    embeddedShellFocused,
   } = uiState;
 
   return (
@@ -63,6 +66,10 @@ export const Composer = ({
       placeholder={placeholder}
       approvalMode={showAutoAcceptIndicator}
       vimModeEnabled={vimModeEnabled}
+      setQueueErrorMessage={uiActions.setQueueErrorMessage}
+      streamingState={streamingState}
+      queueErrorMessage={queueErrorMessage}
+      isEmbeddedShellFocused={embeddedShellFocused}
     />
   );
 };

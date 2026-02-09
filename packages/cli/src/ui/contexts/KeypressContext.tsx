@@ -1,14 +1,11 @@
 /**
  * @license
- * Copyright 2025 Vybestack LLC
+ * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { DebugLogger, type Config } from '@vybestack/llxprt-code-core';
-import {
-  KittySequenceOverflowEvent,
-  logKittySequenceOverflow,
-} from '@vybestack/llxprt-code-core';
+import type { Config } from '@vybestack/llxprt-code-core';
+import { DebugLogger } from '@vybestack/llxprt-code-core';
 import { useStdin } from 'ink';
 import type React from 'react';
 import {
@@ -18,158 +15,572 @@ import {
   useEffect,
   useMemo,
   useRef,
-  useState,
 } from 'react';
-import readline from 'node:readline';
-import { PassThrough } from 'node:stream';
-import {
-  BACKSLASH_ENTER_DETECTION_WINDOW_MS,
-  CHAR_CODE_ESC,
-  KITTY_CTRL_C,
-  KITTY_KEYCODE_BACKSPACE,
-  KITTY_KEYCODE_ENTER,
-  KITTY_KEYCODE_NUMPAD_ENTER,
-  KITTY_KEYCODE_TAB,
-  MAX_KITTY_SEQUENCE_LENGTH,
-  KITTY_MODIFIER_BASE,
-  KITTY_MODIFIER_EVENT_TYPES_OFFSET,
-  MODIFIER_SHIFT_BIT,
-  MODIFIER_ALT_BIT,
-  MODIFIER_CTRL_BIT,
-} from '../utils/platformConstants.js';
 
+import { ESC } from '../utils/input.js';
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
-import {
-  ENABLE_BRACKETED_PASTE,
-  DISABLE_BRACKETED_PASTE,
-  ENABLE_FOCUS_TRACKING,
-  DISABLE_FOCUS_TRACKING,
-  SHOW_CURSOR,
-} from '../utils/terminalSequences.js';
-import { enableSupportedProtocol } from '../utils/kittyProtocolDetector.js';
-import { isIncompleteMouseSequence, parseMouseEvent } from '../utils/mouse.js';
+import { parseMouseEvent } from '../utils/mouse.js';
 
-const ESC = '\u001B';
-const keypressLogger = new DebugLogger('llxprt:ui:keypress');
-export const PASTE_MODE_PREFIX = `${ESC}[200~`;
-export const PASTE_MODE_SUFFIX = `${ESC}[201~`;
-export const DRAG_COMPLETION_TIMEOUT_MS = 100; // Broadcast full path after 100ms if no more input
-export const KITTY_SEQUENCE_TIMEOUT_MS = 50; // Flush incomplete kitty sequences after 50ms
+export const BACKSLASH_ENTER_TIMEOUT = 5;
+export const ESC_TIMEOUT = 100;
+export const PASTE_TIMEOUT = 50;
+export const DRAG_COMPLETION_TIMEOUT_MS = 100;
 export const SINGLE_QUOTE = "'";
 export const DOUBLE_QUOTE = '"';
-const MAX_MOUSE_BUFFER_SIZE = 4096;
+const debugLogger = new DebugLogger('llxprt:ui:keypress');
 
-const ALT_KEY_CHARACTER_MAP: Record<string, string> = {
-  '\u00E5': 'a',
-  '\u222B': 'b',
-  '\u00E7': 'c',
-  '\u2202': 'd',
-  '\u00B4': 'e',
-  '\u0192': 'f',
-  '\u00A9': 'g',
-  '\u02D9': 'h',
-  '\u02C6': 'i',
-  '\u2206': 'j',
-  '\u02DA': 'k',
-  '\u00AC': 'l',
-  '\u00B5': 'm',
-  '\u02DC': 'n',
-  '\u00F8': 'o',
-  '\u03C0': 'p',
-  '\u0153': 'q',
-  '\u00AE': 'r',
-  '\u00DF': 's',
-  '\u2020': 't',
-  '\u00A8': 'u',
-  '\u25CA': 'v',
-  '\u201E': 'w',
-  '\u02DB': 'x',
-  '\u00C1': 'y',
-  '\u03A9': 'z',
+// On Mac, hitting alt+char will yield funny characters.
+// Remap these three since we listen for them.
+const MAC_ALT_KEY_CHARACTER_MAP: Record<string, string> = {
+  '\u222B': 'b', // "∫" back one word
+  '\u0192': 'f', // "ƒ" forward one word
+  '\u00B5': 'm', // "µ" toggle markup view
 };
 
-// IME interference handling constants - moved to module level for performance
-const IME_CTRL_C_MAPPINGS = new Map<number, 'c'>([
-  [12559, 'c'], // Chinese Bopomofo: ㄏ
-  [12363, 'c'], // Japanese Hiragana: か
-  [12459, 'c'], // Japanese Katakana: カ
-  [12622, 'c'], // Korean Hangul: ᄎ
-  [231, 'c'], // French/Portuguese: ç
-]);
+// Parse the key itself - table-driven dispatch from upstream
+const KEY_INFO_MAP: Record<
+  string,
+  { name: string; shift?: boolean; ctrl?: boolean }
+> = {
+  '[200~': { name: 'paste-start' },
+  '[201~': { name: 'paste-end' },
+  '[[A': { name: 'f1' },
+  '[[B': { name: 'f2' },
+  '[[C': { name: 'f3' },
+  '[[D': { name: 'f4' },
+  '[[E': { name: 'f5' },
+  '[1~': { name: 'home' },
+  '[2~': { name: 'insert' },
+  '[3~': { name: 'delete' },
+  '[4~': { name: 'end' },
+  '[5~': { name: 'pageup' },
+  '[6~': { name: 'pagedown' },
+  '[7~': { name: 'home' },
+  '[8~': { name: 'end' },
+  '[11~': { name: 'f1' },
+  '[12~': { name: 'f2' },
+  '[13~': { name: 'f3' },
+  '[14~': { name: 'f4' },
+  '[15~': { name: 'f5' },
+  '[17~': { name: 'f6' },
+  '[18~': { name: 'f7' },
+  '[19~': { name: 'f8' },
+  '[20~': { name: 'f9' },
+  '[21~': { name: 'f10' },
+  '[23~': { name: 'f11' },
+  '[24~': { name: 'f12' },
+  '[A': { name: 'up' },
+  '[B': { name: 'down' },
+  '[C': { name: 'right' },
+  '[D': { name: 'left' },
+  '[E': { name: 'clear' },
+  '[F': { name: 'end' },
+  '[H': { name: 'home' },
+  '[P': { name: 'f1' },
+  '[Q': { name: 'f2' },
+  '[R': { name: 'f3' },
+  '[S': { name: 'f4' },
+  OA: { name: 'up' },
+  OB: { name: 'down' },
+  OC: { name: 'right' },
+  OD: { name: 'left' },
+  OE: { name: 'clear' },
+  OF: { name: 'end' },
+  OH: { name: 'home' },
+  OP: { name: 'f1' },
+  OQ: { name: 'f2' },
+  OR: { name: 'f3' },
+  OS: { name: 'f4' },
+  '[[5~': { name: 'pageup' },
+  '[[6~': { name: 'pagedown' },
+  '[9u': { name: 'tab' },
+  '[13u': { name: 'return' },
+  '[27u': { name: 'escape' },
+  '[32u': { name: 'space' },
+  '[127u': { name: 'backspace' },
+  '[57414u': { name: 'return' }, // Numpad Enter
+  '[a': { name: 'up', shift: true },
+  '[b': { name: 'down', shift: true },
+  '[c': { name: 'right', shift: true },
+  '[d': { name: 'left', shift: true },
+  '[e': { name: 'clear', shift: true },
+  '[2$': { name: 'insert', shift: true },
+  '[3$': { name: 'delete', shift: true },
+  '[5$': { name: 'pageup', shift: true },
+  '[6$': { name: 'pagedown', shift: true },
+  '[7$': { name: 'home', shift: true },
+  '[8$': { name: 'end', shift: true },
+  '[Z': { name: 'tab', shift: true },
+  Oa: { name: 'up', ctrl: true },
+  Ob: { name: 'down', ctrl: true },
+  Oc: { name: 'right', ctrl: true },
+  Od: { name: 'left', ctrl: true },
+  Oe: { name: 'clear', ctrl: true },
+  '[2^': { name: 'insert', ctrl: true },
+  '[3^': { name: 'delete', ctrl: true },
+  '[5^': { name: 'pageup', ctrl: true },
+  '[6^': { name: 'pagedown', ctrl: true },
+  '[7^': { name: 'home', ctrl: true },
+  '[8^': { name: 'end', ctrl: true },
+};
 
-const IME_ESSENTIAL_MAPPINGS = new Map<number, string>([
-  // Basic editing shortcuts - highest frequency usage
-  [12558, 'v'], // Chinese Bopomofo: ㄎ - Ctrl+V (paste)
-  [12557, 'x'], // Chinese Bopomofo: ㄍ - Ctrl+X (cut)
-  [12556, 'z'], // Chinese Bopomofo: ㄐ - Ctrl+Z (undo)
-  [12554, 'a'], // Chinese Bopomofo: ㄒ - Ctrl+A (select all)
-  [12553, 's'], // Chinese Bopomofo: ㄓ - Ctrl+S (save)
-
-  // Japanese IME - most common interference
-  [12364, 'v'], // Hiragana: き - Ctrl+V
-  [12366, 'x'], // Hiragana: く - Ctrl+X
-  [12378, 'z'], // Hiragana: ず - Ctrl+Z
-  [12354, 'a'], // Hiragana: あ - Ctrl+A
-  [12377, 's'], // Hiragana: す - Ctrl+S
-
-  // Korean Hangul - essential patterns
-  [48708, 'v'], // 비 - Ctrl+V
-  [49828, 'x'], // 시 - Ctrl+X
-  [51652, 'z'], // 지 - Ctrl+Z
-  [50500, 'a'], // 아 - Ctrl+A
-  [49836, 's'], // 사 - Ctrl+S
-
-  // Common European diacritics that interfere with Ctrl shortcuts
-  [226, 'v'], // Vietnamese: â - Ctrl+V
-  [225, 'a'], // Vietnamese: á - Ctrl+A
-  [234, 'e'], // Vietnamese: ê - Ctrl+E
-  [233, 'e'], // French: é - Ctrl+E
-  [228, 'a'], // German: ä - Ctrl+A
-  [246, 'o'], // German: ö - Ctrl+O
-  [252, 'u'], // German: ü - Ctrl+U
-]);
+const kUTF16SurrogateThreshold = 0x10000; // 2 ** 16
+function charLengthAt(str: string, i: number): number {
+  if (str.length <= i) {
+    // Pretend to move to the right. This is necessary to autocomplete while
+    // moving to the right.
+    return 1;
+  }
+  const code = str.codePointAt(i);
+  return code !== undefined && code >= kUTF16SurrogateThreshold ? 2 : 1;
+}
 
 /**
- * Maps symbols from parameterized functional keys `\x1b[1;1<letter>`
- * to their corresponding key names (e.g., 'up', 'f1').
+ * Filter out mouse and focus events from keypress stream.
  */
-const LEGACY_FUNC_TO_NAME: { [k: string]: string } = {
-  A: 'up',
-  B: 'down',
-  C: 'right',
-  D: 'left',
-  H: 'home',
-  F: 'end',
-  P: 'f1',
-  Q: 'f2',
-  R: 'f3',
-  S: 'f4',
-};
+function nonKeyboardEventFilter(
+  keypressHandler: KeypressHandler,
+): KeypressHandler {
+  return (key: Key) => {
+    if (
+      !parseMouseEvent(key.sequence) &&
+      key.sequence !== FOCUS_IN &&
+      key.sequence !== FOCUS_OUT
+    ) {
+      keypressHandler(key);
+    }
+  };
+}
 
 /**
- * Maps key codes from tilde-coded functional keys `\x1b[<code>~`
- * to their corresponding key names.
+ * Buffers "/" keys to see if they are followed return.
+ * Will flush the buffer if no data is received for BACKSLASH_ENTER_TIMEOUT ms
+ * or when a null key is received.
  */
-const TILDE_KEYCODE_TO_NAME: Record<number, string> = {
-  1: 'home',
-  2: 'insert',
-  3: 'delete',
-  4: 'end',
-  5: 'pageup',
-  6: 'pagedown',
-  11: 'f1',
-  12: 'f2',
-  13: 'f3',
-  14: 'f4',
-  15: 'f5',
-  17: 'f6', // skipping 16 is intentional
-  18: 'f7',
-  19: 'f8',
-  20: 'f9',
-  21: 'f10',
-  23: 'f11', // skipping 22 is intentional
-  24: 'f12',
-};
+function bufferBackslashEnter(
+  keypressHandler: KeypressHandler,
+): KeypressHandler {
+  const bufferer = (function* (): Generator<void, void, Key | null> {
+    while (true) {
+      const key = yield;
+
+      if (key == null) {
+        continue;
+      } else if (key.sequence !== '\\') {
+        keypressHandler(key);
+        continue;
+      }
+
+      const timeoutId = setTimeout(
+        () => bufferer.next(null),
+        BACKSLASH_ENTER_TIMEOUT,
+      );
+      const nextKey = yield;
+      clearTimeout(timeoutId);
+
+      if (nextKey === null) {
+        keypressHandler(key);
+      } else if (nextKey.name === 'return') {
+        keypressHandler({
+          ...nextKey,
+          shift: true,
+          sequence: '\r',
+        });
+      } else {
+        keypressHandler(key);
+        keypressHandler(nextKey);
+      }
+    }
+  })();
+
+  bufferer.next(); // prime the generator so it starts listening.
+
+  return (key: Key) => {
+    bufferer.next(key);
+  };
+}
+
+/**
+ * Buffers paste events between paste-start and paste-end sequences.
+ * Will flush the buffer if no data is received for PASTE_TIMEOUT ms or
+ * when a null key is received.
+ */
+function bufferPaste(keypressHandler: KeypressHandler): KeypressHandler {
+  const bufferer = (function* (): Generator<void, void, Key | null> {
+    while (true) {
+      let key = yield;
+
+      if (key === null) {
+        continue;
+      } else if (key.name !== 'paste-start') {
+        keypressHandler(key);
+        continue;
+      }
+
+      let buffer = '';
+      while (true) {
+        const timeoutId = setTimeout(() => bufferer.next(null), PASTE_TIMEOUT);
+        key = yield;
+        clearTimeout(timeoutId);
+
+        if (key === null) {
+          break;
+        }
+
+        if (key.name === 'paste-end') {
+          break;
+        }
+        buffer += key.sequence;
+      }
+
+      if (buffer.length > 0) {
+        keypressHandler({
+          name: '',
+          shift: false,
+          meta: false,
+          ctrl: false,
+          paste: true,
+          sequence: buffer,
+        });
+      }
+    }
+  })();
+  bufferer.next(); // prime the generator so it starts listening.
+
+  return (key: Key) => {
+    bufferer.next(key);
+  };
+}
+
+/**
+ * Turns raw data strings into keypress events sent to the provided handler.
+ * Buffers escape sequences until a full sequence is received or
+ * until a timeout occurs.
+ */
+function createDataListener(keypressHandler: KeypressHandler) {
+  const parser = emitKeys(keypressHandler);
+  parser.next(); // prime the generator so it starts listening.
+
+  let timeoutId: NodeJS.Timeout;
+  return (data: string) => {
+    clearTimeout(timeoutId);
+    for (const char of data) {
+      parser.next(char);
+    }
+    if (data.length !== 0) {
+      timeoutId = setTimeout(() => parser.next(''), ESC_TIMEOUT);
+    }
+  };
+}
+
+/**
+ * Translates raw keypress characters into key events.
+ * Buffers escape sequences until a full sequence is received or
+ * until an empty string is sent to indicate a timeout.
+ */
+function* emitKeys(
+  keypressHandler: KeypressHandler,
+): Generator<void, void, string> {
+  while (true) {
+    let ch = yield;
+    let sequence = ch;
+    let escaped = false;
+
+    let name = undefined;
+    let shift = false;
+    let meta = false;
+    let ctrl = false;
+    let code = undefined;
+
+    if (ch === ESC) {
+      escaped = true;
+      ch = yield;
+      sequence += ch;
+
+      if (ch === ESC) {
+        ch = yield;
+        sequence += ch;
+      }
+    }
+
+    if (escaped && (ch === 'O' || ch === '[' || ch === ']')) {
+      // ANSI escape sequence
+      code = ch;
+      let modifier = 0;
+
+      if (ch === ']') {
+        // OSC sequence
+        // ESC ] <params> ; <data> BEL
+        // ESC ] <params> ; <data> ESC \
+        let buffer = '';
+
+        // Read until BEL, `ESC \`, or timeout (empty string)
+        while (true) {
+          const next = yield;
+          if (next === '' || next === '\u0007') {
+            break;
+          } else if (next === ESC) {
+            const afterEsc = yield;
+            if (afterEsc === '' || afterEsc === '\\') {
+              break;
+            }
+            buffer += next + afterEsc;
+            continue;
+          }
+          buffer += next;
+        }
+
+        // Check for OSC 52 (Clipboard) response
+        // Format: 52;c;<base64> or 52;p;<base64>
+        const match = /^52;[cp];(.*)$/.exec(buffer);
+        if (match) {
+          try {
+            const base64Data = match[1];
+            const decoded = Buffer.from(base64Data, 'base64').toString('utf-8');
+            keypressHandler({
+              name: 'paste',
+              shift: false,
+              meta: false,
+              ctrl: false,
+              paste: true,
+              sequence: decoded,
+            });
+          } catch (_e) {
+            debugLogger.log('Failed to decode OSC 52 clipboard data');
+          }
+        }
+
+        continue; // resume main loop
+      } else if (ch === 'O') {
+        // ESC O letter
+        // ESC O modifier letter
+        ch = yield;
+        sequence += ch;
+
+        if (ch >= '0' && ch <= '9') {
+          modifier = parseInt(ch, 10) - 1;
+          ch = yield;
+          sequence += ch;
+        }
+
+        code += ch;
+      } else if (ch === '[') {
+        // ESC [ letter
+        // ESC [ modifier letter
+        // ESC [ [ modifier letter
+        // ESC [ [ num char
+        ch = yield;
+        sequence += ch;
+
+        if (ch === '[') {
+          // \x1b[[A
+          //      ^--- escape codes might have a second bracket
+          code += ch;
+          ch = yield;
+          sequence += ch;
+        }
+
+        /*
+         * Here and later we try to buffer just enough data to get
+         * a complete ascii sequence.
+         *
+         * We have basically two classes of ascii characters to process:
+         *
+         *
+         * 1. `\x1b[24;5~` should be parsed as { code: '[24~', modifier: 5 }
+         *
+         * This particular example is featuring Ctrl+F12 in xterm.
+         *
+         *  - `;5` part is optional, e.g. it could be `\x1b[24~`
+         *  - first part can contain one or two digits
+         *  - there is also special case when there can be 3 digits
+         *    but without modifier. They are the case of paste bracket mode
+         *
+         * So the generic regexp is like /^(?:\d\d?(;\d)?[~^$]|\d{3}~)$/
+         *
+         *
+         * 2. `\x1b[1;5H` should be parsed as { code: '[H', modifier: 5 }
+         *
+         * This particular example is featuring Ctrl+Home in xterm.
+         *
+         *  - `1;5` part is optional, e.g. it could be `\x1b[H`
+         *  - `1;` part is optional, e.g. it could be `\x1b[5H`
+         *
+         * So the generic regexp is like /^((\d;)?\d)?[A-Za-z]$/
+         *
+         */
+        const cmdStart = sequence.length - 1;
+
+        // collect as many digits as possible
+        while (ch >= '0' && ch <= '9') {
+          ch = yield;
+          sequence += ch;
+        }
+
+        // skip modifier
+        if (ch === ';') {
+          while (ch === ';') {
+            ch = yield;
+            sequence += ch;
+
+            // collect as many digits as possible
+            while (ch >= '0' && ch <= '9') {
+              ch = yield;
+              sequence += ch;
+            }
+          }
+        } else if (ch === '<') {
+          // SGR mouse mode
+          ch = yield;
+          sequence += ch;
+          // Don't skip on empty string here to avoid timeouts on slow events.
+          while (ch === '' || ch === ';' || (ch >= '0' && ch <= '9')) {
+            ch = yield;
+            sequence += ch;
+          }
+        } else if (ch === 'M') {
+          // X11 mouse mode
+          // three characters after 'M'
+          ch = yield;
+          sequence += ch;
+          ch = yield;
+          sequence += ch;
+          ch = yield;
+          sequence += ch;
+        }
+
+        /*
+         * We buffered enough data, now trying to extract code
+         * and modifier from it
+         */
+        const cmd = sequence.slice(cmdStart);
+        let match;
+
+        if ((match = /^(\d+)(?:;(\d+))?(?:;(\d+))?([~^$u])$/.exec(cmd))) {
+          if (match[1] === '27' && match[3] && match[4] === '~') {
+            // modifyOtherKeys format: CSI 27 ; modifier ; key ~
+            // Treat as CSI u: key + 'u'
+            code += match[3] + 'u';
+            modifier = parseInt(match[2] ?? '1', 10) - 1;
+          } else {
+            code += match[1] + match[4];
+            // Defaults to '1' if no modifier exists, resulting in a 0 modifier value
+            modifier = parseInt(match[2] ?? '1', 10) - 1;
+          }
+        } else if ((match = /^(\d+)?(?:;(\d+))?([A-Za-z])$/.exec(cmd))) {
+          code += match[3];
+          modifier = parseInt(match[2] ?? match[1] ?? '1', 10) - 1;
+        } else {
+          code += cmd;
+        }
+      }
+
+      // Parse the key modifier
+      shift = !!(modifier & 1);
+      meta = !!(modifier & 2);
+      ctrl = !!(modifier & 4);
+
+      const keyInfo = KEY_INFO_MAP[code];
+      if (keyInfo) {
+        name = keyInfo.name;
+        if (keyInfo.shift) {
+          shift = true;
+        }
+        if (keyInfo.ctrl) {
+          ctrl = true;
+        }
+        if (name === 'space' && !ctrl && !meta) {
+          sequence = ' ';
+        }
+      } else {
+        name = 'undefined';
+        if (ctrl || meta) {
+          // CSI-u or tilde-coded functional keys: ESC [ <code> ; <mods> (u|~)
+          if (code.endsWith('u') || code.endsWith('~')) {
+            const codeNumber = parseInt(code.slice(1, -1), 10);
+            if (
+              codeNumber >= 'a'.charCodeAt(0) &&
+              codeNumber <= 'z'.charCodeAt(0)
+            ) {
+              name = String.fromCharCode(codeNumber);
+            }
+          }
+        }
+      }
+    } else if (ch === '\r') {
+      // carriage return
+      name = 'return';
+      meta = escaped;
+    } else if (escaped && ch === '\n') {
+      // Alt+Enter (linefeed), should be consistent with carriage return
+      name = 'return';
+      meta = escaped;
+    } else if (ch === '\t') {
+      // tab
+      name = 'tab';
+      meta = escaped;
+    } else if (ch === '\b' || ch === '\x7f') {
+      // backspace or ctrl+h
+      name = 'backspace';
+      meta = escaped;
+    } else if (ch === ESC) {
+      // escape key
+      name = 'escape';
+      meta = escaped;
+    } else if (ch === ' ') {
+      name = 'space';
+      meta = escaped;
+    } else if (!escaped && ch <= '\x1a') {
+      // ctrl+letter
+      name = String.fromCharCode(ch.charCodeAt(0) + 'a'.charCodeAt(0) - 1);
+      ctrl = true;
+    } else if (/^[0-9A-Za-z]$/.exec(ch) !== null) {
+      // Letter, number, shift+letter
+      name = ch.toLowerCase();
+      shift = /^[A-Z]$/.exec(ch) !== null;
+      meta = escaped;
+    } else if (MAC_ALT_KEY_CHARACTER_MAP[ch]) {
+      // Note: we do this even if we are not on Mac, because mac users may
+      // remotely connect to non-Mac systems.
+      name = MAC_ALT_KEY_CHARACTER_MAP[ch];
+      meta = true;
+    } else if (sequence === `${ESC}${ESC}`) {
+      // Double escape
+      name = 'escape';
+      meta = true;
+
+      // Emit first escape key here, then continue processing
+      keypressHandler({
+        name: 'escape',
+        shift,
+        meta,
+        ctrl,
+        paste: false,
+        sequence: ESC,
+      });
+    } else if (escaped) {
+      // Escape sequence timeout
+      name = ch.length ? undefined : 'escape';
+      meta = true;
+    }
+
+    if (
+      (sequence.length !== 0 && (name !== undefined || escaped)) ||
+      charLengthAt(sequence, 0) === sequence.length
+    ) {
+      keypressHandler({
+        name: name || '',
+        shift,
+        meta,
+        ctrl,
+        paste: false,
+        sequence,
+      });
+    }
+    // Unrecognized or broken escape sequence, don't emit anything
+  }
+}
+
 export interface Key {
   name: string;
   ctrl: boolean;
@@ -177,8 +588,6 @@ export interface Key {
   shift: boolean;
   paste: boolean;
   sequence: string;
-  kittyProtocol?: boolean;
-  insertable?: boolean;
 }
 
 export type KeypressHandler = (key: Key) => void;
@@ -186,7 +595,6 @@ export type KeypressHandler = (key: Key) => void;
 interface KeypressContextValue {
   subscribe: (handler: KeypressHandler) => void;
   unsubscribe: (handler: KeypressHandler) => void;
-  refresh: () => void;
 }
 
 const KeypressContext = createContext<KeypressContextValue | undefined>(
@@ -203,1033 +611,115 @@ export function useKeypressContext() {
   return context;
 }
 
-/**
- * Provides a React context that captures terminal keypresses and broadcasts parsed key events to subscribers.
- *
- * This component manages stdin raw mode and emits normalized Key objects (including support for Kitty protocol parsing,
- * paste start/end payloads, drag-like quote buffering, modifier mapping, and the `insertable` flag) to handlers
- * registered via the KeypressContext. It also flushes buffered input on focus/paste interruptions and on unmount.
- *
- * @param children - React children to be wrapped by the provider
- * @param kittyProtocolEnabled - Enable parsing and buffering of Kitty/CSI parameterized sequences
- * @param config - Optional runtime configuration used for logging and overflow events
- * @param debugKeystrokeLogging - When true, enable verbose debug logging of internal key parsing and buffering
- * @returns The provider React element that supplies the KeypressContext to descendants
- */
 export function KeypressProvider({
   children,
-  kittyProtocolEnabled,
   config,
   debugKeystrokeLogging,
-  mouseEventsEnabled,
 }: {
   children: React.ReactNode;
-  kittyProtocolEnabled: boolean;
   config?: Config;
   debugKeystrokeLogging?: boolean;
-  mouseEventsEnabled?: boolean;
 }) {
   const { stdin, setRawMode } = useStdin();
+
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
-  const isDraggingRef = useRef(false);
-  const dragBufferRef = useRef('');
-  const draggingTimerRef = useRef<NodeJS.Timeout | null>(null);
-
   const subscribe = useCallback(
-    (handler: KeypressHandler) => {
-      subscribers.add(handler);
-    },
+    (handler: KeypressHandler) => subscribers.add(handler),
     [subscribers],
   );
-
   const unsubscribe = useCallback(
-    (handler: KeypressHandler) => {
-      subscribers.delete(handler);
-    },
+    (handler: KeypressHandler) => subscribers.delete(handler),
     [subscribers],
   );
-
-  const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const broadcast = useCallback(
+    (key: Key) => subscribers.forEach((handler) => handler(key)),
+    [subscribers],
+  );
 
   useEffect(() => {
-    if (keypressLogger.enabled) {
-      keypressLogger.debug(
-        () =>
-          `Initializing keypress listeners (generation ${refreshGeneration})`,
-      );
-    }
-    const clearDraggingTimer = () => {
-      if (draggingTimerRef.current) {
-        clearTimeout(draggingTimerRef.current);
-        draggingTimerRef.current = null;
-      }
-    };
-
     const wasRaw = stdin.isRaw;
-    const rawManaged = wasRaw === false;
-    if (rawManaged) {
+    if (wasRaw === false) {
       setRawMode(true);
     }
 
-    const keypressStream = new PassThrough();
-    let usePassthrough = false;
-    const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
-    if (
-      mouseEventsEnabled ||
-      nodeMajorVersion < 20 ||
-      process.env['PASTE_WORKAROUND'] === '1' ||
-      process.env['PASTE_WORKAROUND'] === 'true'
-    ) {
-      usePassthrough = true;
-    }
+    // Used to detect filename drag-and-drops.
+    let dragBuffer = '';
+    let draggingTimer: NodeJS.Timeout | null = null;
 
-    let isPaste = false;
-    let pasteBuffer = Buffer.alloc(0);
-    let kittySequenceBuffer = '';
-    let kittySequenceTimeout: NodeJS.Timeout | null = null;
-    let backslashTimeout: NodeJS.Timeout | null = null;
-    let waitingForEnterAfterBackslash = false;
-    let mouseSequenceBuffer = '';
-
-    // Check if a buffer could potentially be a valid kitty sequence or its prefix
-    const couldBeKittySequence = (buffer: string): boolean => {
-      // Kitty sequences always start with ESC[.
-      if (buffer.length === 0) return true;
-      if (buffer === ESC || buffer === `${ESC}[`) return true;
-
-      if (!buffer.startsWith(`${ESC}[`)) return false;
-
-      // Check for known kitty sequence patterns:
-      // 1. ESC[<digit> - could be CSI-u or tilde-coded
-      // 2. ESC[1;<digit> - parameterized functional
-      // 3. ESC[<letter> - legacy functional keys
-      // 4. ESC[Z - reverse tab
-      const afterCSI = buffer.slice(2);
-
-      // Check if it starts with a digit (could be CSI-u or parameterized)
-      if (/^\d/.test(afterCSI)) return true;
-
-      // Check for known single-letter sequences
-      if (/^[ABCDHFPQRSZ]/.test(afterCSI)) return true;
-
-      // Check for 1; pattern (parameterized sequences)
-      if (/^1;\d/.test(afterCSI)) return true;
-
-      // Anything else starting with ESC[ that doesn't match our patterns
-      // is likely not a kitty sequence we handle
-      return false;
-    };
-
-    // Temporary workaround for IME interference with Ctrl combinations
-    // TODO: Replace with a more robust IME-aware input handling system
-    // This is a short-term solution to handle the most common IME conflicts
-    // while we develop a proper internationalization strategy.
-    const handleIMECtrlChar = (code: number): string | null => {
-      // Check for Ctrl+C first (highest priority for system stability)
-      // This ensures interrupt/cancel functionality works across IME configurations
-      if (IME_CTRL_C_MAPPINGS.has(code)) {
-        return 'c';
-      }
-
-      return IME_ESSENTIAL_MAPPINGS.get(code) || null;
-    };
-
-    // Parse a single complete kitty sequence from the start (prefix) of the
-    // buffer and return both the Key and the number of characters consumed.
-    // This lets us "peel off" one complete event when multiple sequences arrive
-    // in a single chunk, preventing buffer overflow and fragmentation.
-    // Parse a single complete kitty/parameterized/legacy sequence from the start
-    // of the buffer and return both the parsed Key and the number of characters
-    // consumed. This enables peel-and-continue parsing for batched input.
-    const parseKittyPrefix = (
-      buffer: string,
-    ): { key: Key; length: number } | null => {
-      // In older terminals ESC [ Z was used as Cursor Backward Tabulation (CBT)
-      // In newer terminals the same functionality of key combination for moving
-      // backward through focusable elements is Shift+Tab, hence we will
-      // map ESC [ Z to Shift+Tab
-      // 0) Reverse Tab (legacy): ESC [ Z
-      //    Treat as Shift+Tab for UI purposes.
-      //    Regex parts:
-      //    ^     - start of buffer
-      //    ESC [ - CSI introducer
-      //    Z     - legacy reverse tab
-      const revTabLegacy = new RegExp(`^${ESC}\\[Z`);
-      let m = buffer.match(revTabLegacy);
-      if (m) {
-        return {
-          key: {
-            name: 'tab',
-            ctrl: false,
-            meta: false,
-            shift: true,
-            paste: false,
-            sequence: buffer.slice(0, m[0].length),
-            kittyProtocol: true,
-          },
-          length: m[0].length,
-        };
-      }
-
-      // 1) Reverse Tab (parameterized): ESC [ 1 ; <mods> Z
-      //    Parameterized reverse Tab: ESC [ 1 ; <mods> Z
-      const revTabParam = new RegExp(`^${ESC}\\[1;(\\d+)Z`);
-      m = buffer.match(revTabParam);
-      if (m) {
-        let mods = parseInt(m[1], 10);
-        if (mods >= KITTY_MODIFIER_EVENT_TYPES_OFFSET) {
-          mods -= KITTY_MODIFIER_EVENT_TYPES_OFFSET;
-        }
-        const bits = mods - KITTY_MODIFIER_BASE;
-        const alt = (bits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT;
-        const ctrl = (bits & MODIFIER_CTRL_BIT) === MODIFIER_CTRL_BIT;
-        return {
-          key: {
-            name: 'tab',
-            ctrl,
-            meta: alt,
-            // Reverse tab implies Shift behavior; force shift regardless of mods
-            shift: true,
-            paste: false,
-            sequence: buffer.slice(0, m[0].length),
-            kittyProtocol: true,
-          },
-          length: m[0].length,
-        };
-      }
-
-      // 2) Parameterized functional: ESC [ 1 ; <mods> (A|B|C|D|H|F|P|Q|R|S)
-      // 2) Parameterized functional: ESC [ 1 ; <mods> (A|B|C|D|H|F|P|Q|R|S)
-      //    Arrows, Home/End, F1–F4 with modifiers encoded in <mods>.
-      const arrowPrefix = new RegExp(`^${ESC}\\[1;(\\d+)([ABCDHFPQSR])`);
-      m = buffer.match(arrowPrefix);
-      if (m) {
-        let mods = parseInt(m[1], 10);
-        if (mods >= KITTY_MODIFIER_EVENT_TYPES_OFFSET) {
-          mods -= KITTY_MODIFIER_EVENT_TYPES_OFFSET;
-        }
-        const bits = mods - KITTY_MODIFIER_BASE;
-        const shift = (bits & MODIFIER_SHIFT_BIT) === MODIFIER_SHIFT_BIT;
-        const alt = (bits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT;
-        const ctrl = (bits & MODIFIER_CTRL_BIT) === MODIFIER_CTRL_BIT;
-        const sym = m[2];
-        const name = LEGACY_FUNC_TO_NAME[sym] || '';
-        if (!name) return null;
-        return {
-          key: {
-            name,
-            ctrl,
-            meta: alt,
-            shift,
-            paste: false,
-            sequence: buffer.slice(0, m[0].length),
-            kittyProtocol: true,
-          },
-          length: m[0].length,
-        };
-      }
-
-      // 3) CSI-u form: ESC [ <code> ; <mods> (u|~)
-      // 3) CSI-u and tilde-coded functional keys: ESC [ <code> ; <mods> (u|~)
-      //    'u' terminator: Kitty CSI-u; '~' terminator: tilde-coded function keys.
-      const csiUPrefix = new RegExp(`^${ESC}\\[(\\d+)(;(\\d+))?([u~])`);
-      m = buffer.match(csiUPrefix);
-      if (m) {
-        const keyCode = parseInt(m[1], 10);
-        let modifiers = m[3] ? parseInt(m[3], 10) : KITTY_MODIFIER_BASE;
-        if (modifiers >= KITTY_MODIFIER_EVENT_TYPES_OFFSET) {
-          modifiers -= KITTY_MODIFIER_EVENT_TYPES_OFFSET;
-        }
-        const modifierBits = modifiers - KITTY_MODIFIER_BASE;
-        const shift =
-          (modifierBits & MODIFIER_SHIFT_BIT) === MODIFIER_SHIFT_BIT;
-        const alt = (modifierBits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT;
-        const ctrl = (modifierBits & MODIFIER_CTRL_BIT) === MODIFIER_CTRL_BIT;
-        const terminator = m[4];
-
-        // Tilde-coded functional keys (Delete, Insert, PageUp/Down, Home/End)
-        if (terminator === '~') {
-          const name = TILDE_KEYCODE_TO_NAME[keyCode];
-          if (name) {
-            return {
-              key: {
-                name,
-                ctrl,
-                meta: alt,
-                shift,
-                paste: false,
-                sequence: buffer.slice(0, m[0].length),
-                kittyProtocol: true,
-              },
-              length: m[0].length,
-            };
-          }
-        }
-
-        const kittyKeyCodeToName: { [key: number]: string } = {
-          [CHAR_CODE_ESC]: 'escape',
-          [KITTY_KEYCODE_TAB]: 'tab',
-          [KITTY_KEYCODE_BACKSPACE]: 'backspace',
-          [KITTY_KEYCODE_ENTER]: 'return',
-          [KITTY_KEYCODE_NUMPAD_ENTER]: 'return',
-        };
-
-        const name = kittyKeyCodeToName[keyCode];
-        if (name) {
-          return {
-            key: {
-              name,
-              ctrl,
-              meta: alt,
-              shift,
-              paste: false,
-              sequence: buffer.slice(0, m[0].length),
-              kittyProtocol: true,
-            },
-            length: m[0].length,
-          };
-        }
-
-        // Ctrl+Backslash is a common "quit" control char (FS / \x1c) in many terminals.
-        // When Kitty keyboard protocol is enabled it may arrive as CSI-u with keyCode=92,
-        // so normalize it to a backslash key with ctrl=true for downstream bindings.
-        if (ctrl && keyCode === '\\'.charCodeAt(0)) {
-          return {
-            key: {
-              name: '\\',
-              ctrl: true,
-              meta: alt,
-              shift,
-              paste: false,
-              sequence: buffer.slice(0, m[0].length),
-              kittyProtocol: true,
-            },
-            length: m[0].length,
-          };
-        }
-
-        // Ctrl+letters and Alt+letters
-        if (ctrl || alt) {
-          let letter: string | undefined;
-
-          // Standard ASCII letters
-          if (
-            (keyCode >= 'a'.charCodeAt(0) && keyCode <= 'z'.charCodeAt(0)) ||
-            (keyCode >= 'A'.charCodeAt(0) && keyCode <= 'Z'.charCodeAt(0))
-          ) {
-            letter = String.fromCharCode(keyCode).toLowerCase();
-          }
-          // Handle IME interference: if Ctrl is pressed and we get a non-ASCII character,
-          // try to map it back to the intended Ctrl+letter
-          else if (ctrl && keyCode > 127) {
-            const mappedLetter = handleIMECtrlChar(keyCode);
-            if (mappedLetter) {
-              letter = mappedLetter;
-            }
-          }
-
-          if (letter) {
-            return {
-              key: {
-                name: letter,
-                ctrl,
-                meta: alt,
-                shift,
-                paste: false,
-                sequence: buffer.slice(0, m[0].length),
-                kittyProtocol: true,
-              },
-              length: m[0].length,
-            };
-          }
-        }
-      }
-
-      // 4) Legacy function keys (no parameters): ESC [ (A|B|C|D|H|F)
-      //    Arrows + Home/End without modifiers.
-      const legacyFuncKey = new RegExp(`^${ESC}\\[([ABCDHF])`);
-      m = buffer.match(legacyFuncKey);
-      if (m) {
-        const sym = m[1];
-        const name = LEGACY_FUNC_TO_NAME[sym] || sym.toLowerCase();
-        return {
-          key: {
-            name,
-            ctrl: false,
-            meta: false,
-            shift: false,
-            paste: false,
-            sequence: buffer.slice(0, m[0].length),
-            kittyProtocol: true,
-          },
-          length: m[0].length,
-        };
-      }
-
-      return null;
-    };
-
-    const broadcast = (key: Key) => {
-      for (const handler of subscribers) {
-        handler(key);
+    const clearDraggingTimer = () => {
+      if (draggingTimer) {
+        clearTimeout(draggingTimer);
+        draggingTimer = null;
       }
     };
 
-    const flushKittyBufferOnInterrupt = (reason: string) => {
-      if (kittySequenceBuffer) {
-        if (debugKeystrokeLogging) {
-          console.log(
-            `[DEBUG] Kitty sequence flushed due to ${reason}:`,
-            JSON.stringify(kittySequenceBuffer),
-          );
-        }
-        broadcast({
-          name: '',
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: false,
-          sequence: kittySequenceBuffer,
-        });
-        kittySequenceBuffer = '';
-      }
-      if (kittySequenceTimeout) {
-        clearTimeout(kittySequenceTimeout);
-        kittySequenceTimeout = null;
-      }
-    };
-
-    const handleFocusEvent = (key: Key): boolean => {
-      if (key.sequence === FOCUS_IN || key.sequence === FOCUS_OUT) {
-        flushKittyBufferOnInterrupt('focus event');
-        return true;
-      }
-      return false;
-    };
-
-    const handlePasteEvent = (key: Key): boolean => {
-      if (key.name === 'paste-start') {
-        flushKittyBufferOnInterrupt('paste start');
-        isPaste = true;
-        return true;
-      }
-      if (key.name === 'paste-end') {
-        isPaste = false;
-        broadcast({
-          name: '',
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: true,
-          sequence: pasteBuffer.toString(),
-        });
-        pasteBuffer = Buffer.alloc(0);
-        return true;
-      }
-      return false;
-    };
-
-    const handleDragSequence = (key: Key): boolean => {
+    const handleDragDropAndBroadcast = (key: Key) => {
+      // Handle drag-and-drop detection
       if (
         key.sequence === SINGLE_QUOTE ||
         key.sequence === DOUBLE_QUOTE ||
-        isDraggingRef.current
+        draggingTimer !== null
       ) {
-        isDraggingRef.current = true;
-        dragBufferRef.current += key.sequence;
+        dragBuffer += key.sequence;
 
         clearDraggingTimer();
-        draggingTimerRef.current = setTimeout(() => {
-          isDraggingRef.current = false;
-          const seq = dragBufferRef.current;
-          dragBufferRef.current = '';
+        draggingTimer = setTimeout(() => {
+          draggingTimer = null;
+          const seq = dragBuffer;
+          dragBuffer = '';
           if (seq) {
-            broadcast({
-              ...key,
-              name: '',
-              paste: true,
-              sequence: seq,
-              ctrl: false,
-              meta: false,
-              shift: false,
-              insertable: true,
-            });
+            broadcast({ ...key, name: '', paste: true, sequence: seq });
           }
         }, DRAG_COMPLETION_TIMEOUT_MS);
 
-        return true;
-      }
-      return false;
-    };
-
-    const handleArrowKeys = (key: Key): boolean => {
-      if (['up', 'down', 'left', 'right'].includes(key.name)) {
-        broadcast({ ...key, insertable: false });
-        return true;
-      }
-      return false;
-    };
-
-    const handleCtrlC = (key: Key): boolean => {
-      if (
-        (key.ctrl && key.name === 'c') ||
-        key.sequence === `${ESC}${KITTY_CTRL_C}`
-      ) {
-        if (kittySequenceBuffer && debugKeystrokeLogging) {
-          console.log(
-            '[DEBUG] Kitty buffer cleared on Ctrl+C:',
-            kittySequenceBuffer,
-          );
-        }
-        kittySequenceBuffer = '';
-        if (kittySequenceTimeout) {
-          clearTimeout(kittySequenceTimeout);
-          kittySequenceTimeout = null;
-        }
-        if (key.sequence === `${ESC}${KITTY_CTRL_C}`) {
-          broadcast({
-            name: 'c',
-            ctrl: true,
-            meta: false,
-            shift: false,
-            paste: false,
-            sequence: key.sequence,
-            kittyProtocol: true,
-          });
-        } else {
-          broadcast(key);
-        }
-        return true;
-      }
-      return false;
-    };
-
-    const handleAltKeyMapping = (key: Key): boolean => {
-      const mappedLetter = ALT_KEY_CHARACTER_MAP[key.sequence];
-      if (mappedLetter && !key.meta) {
-        broadcast({
-          name: mappedLetter,
-          ctrl: false,
-          meta: true,
-          shift: false,
-          paste: isPaste,
-          sequence: key.sequence,
-        });
-        return true;
-      }
-      return false;
-    };
-
-    const handleBackslashEnter = (key: Key): boolean => {
-      if (key.name === 'return' && waitingForEnterAfterBackslash) {
-        if (backslashTimeout) {
-          clearTimeout(backslashTimeout);
-          backslashTimeout = null;
-        }
-        waitingForEnterAfterBackslash = false;
-        broadcast({
-          ...key,
-          shift: true,
-          sequence: '\r', // Corrected escaping for newline
-          insertable: false,
-        });
-        return true;
-      }
-
-      if (key.sequence === '\\' && !key.name) {
-        // Corrected escaping for backslash
-        waitingForEnterAfterBackslash = true;
-        backslashTimeout = setTimeout(() => {
-          waitingForEnterAfterBackslash = false;
-          backslashTimeout = null;
-          broadcast(key);
-        }, BACKSLASH_ENTER_DETECTION_WINDOW_MS);
-        return true;
-      }
-
-      if (waitingForEnterAfterBackslash && key.name !== 'return') {
-        if (backslashTimeout) {
-          clearTimeout(backslashTimeout);
-          backslashTimeout = null;
-        }
-        waitingForEnterAfterBackslash = false;
-        broadcast({
-          name: '',
-          sequence: '\\',
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: false,
-        });
-        return true;
-      }
-      return false;
-    };
-
-    const flushKittyBuffer = (buffer: string): void => {
-      broadcast({
-        name: '',
-        ctrl: false,
-        meta: false,
-        shift: false,
-        paste: false,
-        sequence: buffer,
-      });
-    };
-
-    const handleKittyOverflow = (buffer: string): void => {
-      if (debugKeystrokeLogging) {
-        console.log(
-          '[DEBUG] Kitty buffer overflow, clearing:',
-          JSON.stringify(buffer),
-        );
-      }
-      if (config) {
-        const event = new KittySequenceOverflowEvent(buffer.length, buffer);
-        logKittySequenceOverflow(config, event);
-      }
-      flushKittyBuffer(buffer);
-    };
-
-    const processKittyBuffer = (
-      buffer: string,
-    ): { parsed: boolean; remaining: string } => {
-      let remainingBuffer = buffer;
-      let parsedAny = false;
-
-      while (remainingBuffer) {
-        const parsed = parseKittyPrefix(remainingBuffer);
-
-        if (parsed) {
-          if (debugKeystrokeLogging) {
-            const parsedSequence = remainingBuffer.slice(0, parsed.length);
-            console.log(
-              '[DEBUG] Kitty sequence parsed successfully:',
-              JSON.stringify(parsedSequence),
-            );
-          }
-          broadcast(parsed.key);
-          remainingBuffer = remainingBuffer.slice(parsed.length);
-          parsedAny = true;
-        } else {
-          // If we can't parse a sequence at the start, check if there's
-          // another ESC later in the buffer. If so, the data before it
-          // is garbage/incomplete and should be dropped so we can
-          // process the next sequence.
-          const nextEscIndex = remainingBuffer.indexOf(ESC, 1);
-          if (nextEscIndex !== -1) {
-            const garbage = remainingBuffer.slice(0, nextEscIndex);
-            if (debugKeystrokeLogging) {
-              console.log(
-                '[DEBUG] Dropping incomplete sequence before next ESC:',
-                JSON.stringify(garbage),
-              );
-            }
-            // Drop garbage and continue parsing from next ESC
-            remainingBuffer = remainingBuffer.slice(nextEscIndex);
-            // We made progress, so we can continue the loop to parse the next sequence
-            continue;
-          }
-
-          // Check if buffer could become a valid kitty sequence
-          const couldBeValid = couldBeKittySequence(remainingBuffer);
-
-          if (!couldBeValid) {
-            // Not a kitty sequence - flush as regular input immediately
-            if (debugKeystrokeLogging) {
-              console.log(
-                '[DEBUG] Not a kitty sequence, flushing:',
-                JSON.stringify(remainingBuffer),
-              );
-            }
-            flushKittyBuffer(remainingBuffer);
-            remainingBuffer = '';
-            parsedAny = true;
-          } else if (remainingBuffer.length > MAX_KITTY_SEQUENCE_LENGTH) {
-            handleKittyOverflow(remainingBuffer);
-            remainingBuffer = '';
-            parsedAny = true;
-          } else {
-            if (config?.getDebugMode() || debugKeystrokeLogging) {
-              console.warn(
-                'Kitty sequence buffer has content:',
-                JSON.stringify(kittySequenceBuffer),
-              );
-            }
-            // Could be valid but incomplete - set timeout
-            kittySequenceTimeout = setTimeout(() => {
-              if (kittySequenceBuffer) {
-                if (debugKeystrokeLogging) {
-                  console.log(
-                    '[DEBUG] Kitty sequence timeout, flushing:',
-                    JSON.stringify(kittySequenceBuffer),
-                  );
-                }
-                flushKittyBuffer(kittySequenceBuffer);
-                kittySequenceBuffer = '';
-              }
-              kittySequenceTimeout = null;
-            }, KITTY_SEQUENCE_TIMEOUT_MS);
-            break;
-          }
-        }
-      }
-
-      return { parsed: parsedAny, remaining: remainingBuffer };
-    };
-
-    const handleKittyProtocol = (key: Key): boolean => {
-      // Clear any pending timeout when new input arrives
-      if (kittySequenceTimeout) {
-        clearTimeout(kittySequenceTimeout);
-        kittySequenceTimeout = null;
-      }
-
-      // Check if this could start a kitty sequence
-      const shouldBuffer = couldBeKittySequence(key.sequence);
-      const isExcluded = [
-        PASTE_MODE_PREFIX,
-        PASTE_MODE_SUFFIX,
-        FOCUS_IN,
-        FOCUS_OUT,
-      ].some((prefix) => key.sequence.startsWith(prefix));
-
-      if (kittySequenceBuffer || (shouldBuffer && !isExcluded)) {
-        kittySequenceBuffer += key.sequence;
-
-        if (debugKeystrokeLogging) {
-          console.log(
-            '[DEBUG] Kitty buffer accumulating:',
-            JSON.stringify(kittySequenceBuffer),
-          );
-        }
-
-        // Try immediate parsing
-        const result = processKittyBuffer(kittySequenceBuffer);
-        kittySequenceBuffer = result.remaining;
-
-        if (result.parsed || kittySequenceBuffer) {
-          return true;
-        }
-      }
-
-      return false;
-    };
-
-    const handleKeypress = (_: unknown, key: Key) => {
-      if (mouseEventsEnabled && parseMouseEvent(key.sequence)) {
         return;
       }
 
-      if (
-        key &&
-        keypressLogger.enabled &&
-        (key.name === 'return' || key.sequence === '\r')
-      ) {
-        keypressLogger.debug(
-          () =>
-            `handleKeypress return event seq=${JSON.stringify(
-              key.sequence,
-            )} ctrl=${key.ctrl} meta=${key.meta} paste=${isPaste} kitty=${
-              key.kittyProtocol ? '1' : '0'
-            }`,
-        );
-      }
-      if (handleFocusEvent(key)) return;
-      if (handlePasteEvent(key)) return;
-
-      // Handle Ctrl+Z (suspend) - must check before other handlers
-      if (key.name === 'z' && key.ctrl && !key.meta && rawManaged) {
-        // Disable raw mode
-        setRawMode(false);
-
-        // Restore cursor and disable terminal modes
-        process.stdout.write(SHOW_CURSOR);
-        process.stdout.write(DISABLE_BRACKETED_PASTE);
-        process.stdout.write(DISABLE_FOCUS_TRACKING);
-
-        // Send SIGTSTP to suspend the process
-        process.kill(process.pid, 'SIGTSTP');
-        return;
-      }
-
-      if (isPaste) {
-        pasteBuffer = Buffer.concat([pasteBuffer, Buffer.from(key.sequence)]);
-        return;
-      }
-
-      if (handleDragSequence(key)) return;
-
-      if (handleAltKeyMapping(key)) return;
-
-      if (handleBackslashEnter(key)) return;
-
-      if (handleArrowKeys(key)) return;
-
-      if (handleCtrlC(key)) return;
-
-      if (kittyProtocolEnabled && handleKittyProtocol(key)) return;
-
-      // Handle Meta+Enter for legacy terminals
-      if (key.name === 'return' && key.sequence === `${ESC}\r`) {
-        key.meta = true;
-      }
-
-      const shouldInsert = !key.ctrl && !key.meta && key.sequence.length > 0;
-      broadcast({
-        ...key,
-        paste: isPaste,
-        insertable: shouldInsert,
-      });
+      broadcast(key);
     };
 
-    const handleRawKeypress = (data: Buffer) => {
-      if (keypressLogger.enabled) {
-        keypressLogger.debug(
-          () =>
-            `handleRawKeypress chunk length=${data.length} endsWithCR=${
-              data.length > 0 && data[data.length - 1] === 13
-            }`,
-        );
-      }
+    process.stdin.setEncoding('utf8'); // Make data events emit strings
 
-      if (mouseSequenceBuffer.length > MAX_MOUSE_BUFFER_SIZE) {
-        mouseSequenceBuffer = mouseSequenceBuffer.slice(-MAX_MOUSE_BUFFER_SIZE);
-      }
+    let processor = nonKeyboardEventFilter(handleDragDropAndBroadcast);
+    processor = bufferBackslashEnter(processor);
+    processor = bufferPaste(processor);
+    let dataListener = createDataListener(processor);
 
-      const stripMouseSequences = (chunk: Buffer): Buffer => {
-        const input = mouseSequenceBuffer + chunk.toString('utf8');
-        mouseSequenceBuffer = '';
-
-        let output = '';
-        let i = 0;
-        while (i < input.length) {
-          if (input[i] !== ESC) {
-            output += input[i];
-            i += 1;
-            continue;
-          }
-
-          const slice = input.slice(i);
-          const parsed = parseMouseEvent(slice);
-          if (parsed) {
-            i += parsed.length;
-            continue;
-          }
-
-          if (isIncompleteMouseSequence(slice)) {
-            mouseSequenceBuffer = slice;
-            break;
-          }
-
-          output += input[i];
-          i += 1;
+    if (debugKeystrokeLogging) {
+      const old = dataListener;
+      dataListener = (data: string) => {
+        if (data.length > 0) {
+          debugLogger.log(`[DEBUG] Raw StdIn: ${JSON.stringify(data)}`);
         }
-
-        return Buffer.from(output, 'utf8');
+        old(data);
       };
-
-      const filteredData = mouseEventsEnabled
-        ? stripMouseSequences(data)
-        : data;
-      if (filteredData.length === 0) {
-        return;
-      }
-
-      const pasteModePrefixBuffer = Buffer.from(PASTE_MODE_PREFIX);
-      const pasteModeSuffixBuffer = Buffer.from(PASTE_MODE_SUFFIX);
-
-      let pos = 0;
-      while (pos < filteredData.length) {
-        const prefixPos = filteredData.indexOf(pasteModePrefixBuffer, pos);
-        const suffixPos = filteredData.indexOf(pasteModeSuffixBuffer, pos);
-        const isPrefixNext =
-          prefixPos !== -1 && (suffixPos === -1 || prefixPos < suffixPos);
-        const isSuffixNext =
-          suffixPos !== -1 && (prefixPos === -1 || suffixPos < prefixPos);
-
-        let nextMarkerPos = -1;
-        let markerLength = 0;
-
-        if (isPrefixNext) {
-          nextMarkerPos = prefixPos;
-          markerLength = pasteModePrefixBuffer.length;
-        } else if (isSuffixNext) {
-          nextMarkerPos = suffixPos;
-          markerLength = pasteModeSuffixBuffer.length;
-        }
-
-        if (nextMarkerPos === -1) {
-          keypressStream.write(filteredData.slice(pos));
-          return;
-        }
-
-        const nextData = filteredData.slice(pos, nextMarkerPos);
-        if (nextData.length > 0) {
-          keypressStream.write(nextData);
-        }
-        const createPasteKeyEvent = (
-          name: 'paste-start' | 'paste-end',
-        ): Key => ({
-          name,
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: false,
-          sequence: '',
-        });
-        if (isPrefixNext) {
-          handleKeypress(undefined, createPasteKeyEvent('paste-start'));
-        } else if (isSuffixNext) {
-          handleKeypress(undefined, createPasteKeyEvent('paste-end'));
-        }
-        pos = nextMarkerPos + markerLength;
-      }
-    };
-
-    // Handle SIGCONT (process resume after tmux reattach or fg)
-    const handleSigcont = () => {
-      if (!rawManaged) return;
-
-      // Resume stdin and re-enable raw mode
-      stdin.resume();
-      setRawMode(true);
-
-      // Re-send terminal control sequences
-      process.stdout.write(ENABLE_BRACKETED_PASTE);
-      process.stdout.write(ENABLE_FOCUS_TRACKING);
-      enableSupportedProtocol();
-
-      // Trigger a refresh to ensure the UI re-renders with proper prompt state
-      // This is necessary because tmux reattach can cause the terminal to lose
-      // the current display state, including the prompt text and cursor position
-      setRefreshGeneration((prev) => prev + 1);
-    };
-
-    process.on('SIGCONT', handleSigcont);
-
-    let rl: readline.Interface;
-    if (usePassthrough) {
-      rl = readline.createInterface({
-        input: keypressStream,
-        escapeCodeTimeout: 0,
-      });
-      readline.emitKeypressEvents(keypressStream, rl);
-      keypressStream.on('keypress', handleKeypress);
-      stdin.on('data', handleRawKeypress);
-    } else {
-      rl = readline.createInterface({ input: stdin, escapeCodeTimeout: 0 });
-      readline.emitKeypressEvents(stdin, rl);
-      stdin.on('keypress', handleKeypress);
     }
 
+    stdin.on('data', dataListener);
     return () => {
-      if (keypressLogger.enabled) {
-        keypressLogger.debug(
-          () =>
-            `Cleaning up keypress listeners (generation ${refreshGeneration})`,
-        );
-      }
-      if (usePassthrough) {
-        keypressStream.removeListener('keypress', handleKeypress);
-        stdin.removeListener('data', handleRawKeypress);
-      } else {
-        stdin.removeListener('keypress', handleKeypress);
-      }
-
-      rl.close();
-
-      // Remove SIGCONT listener
-      process.removeListener('SIGCONT', handleSigcont);
-
-      // Restore the terminal to its original state.
+      stdin.removeListener('data', dataListener);
       if (wasRaw === false) {
         setRawMode(false);
       }
 
-      // Best-effort restore of terminal modes we enable while running.
-      // If we exit without running these, the user's terminal can be left with
-      // bracketed paste / focus tracking enabled, which makes subsequent shells
-      // print escape sequences for mouse/keys.
-      process.stdout.write(SHOW_CURSOR);
-      process.stdout.write(DISABLE_BRACKETED_PASTE);
-      process.stdout.write(DISABLE_FOCUS_TRACKING);
-
-      if (backslashTimeout) {
-        clearTimeout(backslashTimeout);
-        backslashTimeout = null;
-      }
-
-      if (kittySequenceTimeout) {
-        clearTimeout(kittySequenceTimeout);
-        kittySequenceTimeout = null;
-      }
-
-      // Flush any pending kitty sequence data to avoid data loss on exit.
-      if (kittySequenceBuffer) {
-        broadcast({
-          name: '',
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: false,
-          sequence: kittySequenceBuffer,
-        });
-        kittySequenceBuffer = '';
-      }
-
-      // Flush any pending paste data to avoid data loss on exit.
-      if (isPaste) {
+      clearDraggingTimer();
+      if (dragBuffer) {
         broadcast({
           name: '',
           ctrl: false,
           meta: false,
           shift: false,
           paste: true,
-          sequence: pasteBuffer.toString(),
+          sequence: dragBuffer,
         });
-        pasteBuffer = Buffer.alloc(0);
-      }
-
-      if (draggingTimerRef.current) {
-        clearTimeout(draggingTimerRef.current);
-        draggingTimerRef.current = null;
-      }
-      if (isDraggingRef.current && dragBufferRef.current) {
-        broadcast({
-          name: '',
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: true,
-          sequence: dragBufferRef.current,
-          insertable: true,
-        });
-        isDraggingRef.current = false;
-        dragBufferRef.current = '';
+        dragBuffer = '';
       }
     };
-  }, [
-    stdin,
-    setRawMode,
-    kittyProtocolEnabled,
-    mouseEventsEnabled,
-    config,
-    subscribers,
-    debugKeystrokeLogging,
-    refreshGeneration,
-  ]);
-
-  const refresh = useCallback(() => {
-    if (keypressLogger.enabled) {
-      keypressLogger.debug(() => 'KeypressProvider refresh requested');
-    }
-    setRefreshGeneration((prev) => prev + 1);
-  }, []);
+  }, [stdin, setRawMode, config, debugKeystrokeLogging, broadcast]);
 
   const contextValue = useMemo(
-    () => ({ subscribe, unsubscribe, refresh }),
-    [subscribe, unsubscribe, refresh],
+    () => ({ subscribe, unsubscribe }),
+    [subscribe, unsubscribe],
   );
 
   return (

@@ -20,6 +20,7 @@ import { getRuntimeApi } from '../contexts/RuntimeContext.js';
 import {
   DebugLogger,
   MultiProviderTokenStore,
+  getProtectedSettingKeys,
 } from '@vybestack/llxprt-code-core';
 import { withFuzzyFilter } from '../utils/fuzzyFilter.js';
 
@@ -444,18 +445,7 @@ const saveCommand: SlashCommand = {
           }
         }
 
-        const PROTECTED_SETTINGS = [
-          'auth-key',
-          'auth-keyfile',
-          'base-url',
-          'apiKey',
-          'apiKeyfile',
-          'model',
-          'provider',
-          'currentProfile',
-          'GOOGLE_CLOUD_PROJECT',
-          'GOOGLE_CLOUD_LOCATION',
-        ];
+        const PROTECTED_SETTINGS = getProtectedSettingKeys();
 
         const currentEphemerals = runtime.getEphemeralSettings();
         const filteredEphemerals = Object.fromEntries(
@@ -876,41 +866,171 @@ const setDefaultCommand: SlashCommand = {
 };
 
 /**
- * Profile list subcommand
+ * Profile create subcommand
  */
-const listCommand: SlashCommand = {
-  name: 'list',
-  description: 'list all saved profiles',
+const createCommand: SlashCommand = {
+  name: 'create',
+  description: 'interactive wizard to create a new profile',
   kind: CommandKind.BUILT_IN,
   action: async (
     _context: CommandContext,
     _args: string,
-  ): Promise<MessageActionReturn> => {
-    try {
-      const profiles = await listProfiles();
+  ): Promise<OpenDialogActionReturn> => ({
+    type: 'dialog',
+    dialog: 'createProfile',
+  }),
+};
 
-      if (profiles.length === 0) {
-        return {
-          type: 'message',
-          messageType: 'info',
-          content:
-            'No profiles saved yet. Use /profile save "<name>" to create one.',
-        };
-      }
+/**
+ * Profile list subcommand
+ * Opens interactive profile list dialog
+ */
+const listCommand: SlashCommand = {
+  name: 'list',
+  description: 'list all saved profiles (interactive)',
+  kind: CommandKind.BUILT_IN,
+  action: async (
+    _context: CommandContext,
+    _args: string,
+  ): Promise<MessageActionReturn | OpenDialogActionReturn> => {
+    // Open interactive profile list dialog
+    logger.log(() => 'list action returning profileList dialog');
+    return {
+      type: 'dialog',
+      dialog: 'profileList',
+    };
+  },
+};
 
-      const profileList = profiles.map((name) => `  • ${name}`).join('\n');
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: `Saved profiles:\n${profileList}`,
-      };
-    } catch (error) {
+const profileShowSchema: CommandArgumentSchema = [
+  {
+    kind: 'value',
+    name: 'profile',
+    description: 'Select profile to view',
+    completer: profileNameCompleter,
+  },
+];
+
+/**
+ * Profile show subcommand
+ * Opens profile detail dialog directly for the specified profile
+ */
+const showCommand: SlashCommand = {
+  name: 'show',
+  description: 'view details of a specific profile',
+  kind: CommandKind.BUILT_IN,
+  schema: profileShowSchema,
+  action: async (
+    _context: CommandContext,
+    args: string,
+  ): Promise<MessageActionReturn | OpenDialogActionReturn> => {
+    const trimmedArgs = args?.trim();
+
+    if (!trimmedArgs) {
       return {
         type: 'message',
         messageType: 'error',
-        content: `Failed to list profiles: ${error instanceof Error ? error.message : String(error)}`,
+        content: 'Usage: /profile show <profile-name>',
       };
     }
+
+    // Extract profile name - handle quoted names
+    const profileNameMatch = trimmedArgs.match(/^"([^"]+)"$/);
+    const profileName = profileNameMatch ? profileNameMatch[1] : trimmedArgs;
+
+    if (!profileName) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: 'Usage: /profile show <profile-name>',
+      };
+    }
+
+    // Verify profile exists
+    try {
+      const profiles = await listProfiles();
+      if (!profiles.includes(profileName)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: `Profile '${profileName}' not found. Use /profile list to see available profiles.`,
+        };
+      }
+    } catch {
+      // Continue anyway, the dialog will show the error
+    }
+
+    return {
+      type: 'dialog',
+      dialog: 'profileDetail',
+      dialogData: { profileName },
+    };
+  },
+};
+
+const profileEditSchema: CommandArgumentSchema = [
+  {
+    kind: 'value',
+    name: 'profile',
+    description: 'Select profile to edit',
+    completer: profileNameCompleter,
+  },
+];
+
+/**
+ * Profile edit subcommand
+ * Opens profile editor dialog directly for the specified profile
+ */
+const editCommand: SlashCommand = {
+  name: 'edit',
+  description: 'edit a specific profile',
+  kind: CommandKind.BUILT_IN,
+  schema: profileEditSchema,
+  action: async (
+    _context: CommandContext,
+    args: string,
+  ): Promise<MessageActionReturn | OpenDialogActionReturn> => {
+    const trimmedArgs = args?.trim();
+
+    if (!trimmedArgs) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: 'Usage: /profile edit <profile-name>',
+      };
+    }
+
+    // Extract profile name - handle quoted names
+    const profileNameMatch = trimmedArgs.match(/^"([^"]+)"$/);
+    const profileName = profileNameMatch ? profileNameMatch[1] : trimmedArgs;
+
+    if (!profileName) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: 'Usage: /profile edit <profile-name>',
+      };
+    }
+
+    // Verify profile exists
+    try {
+      const profiles = await listProfiles();
+      if (!profiles.includes(profileName)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: `Profile '${profileName}' not found. Use /profile list to see available profiles.`,
+        };
+      }
+    } catch {
+      // Continue anyway, the dialog will show the error
+    }
+
+    return {
+      type: 'dialog',
+      dialog: 'profileEditor',
+      dialogData: { profileName },
+    };
   },
 };
 
@@ -924,9 +1044,12 @@ export const profileCommand: SlashCommand = {
   subCommands: [
     saveCommand,
     loadCommand,
+    createCommand,
     deleteCommand,
     setDefaultCommand,
     listCommand,
+    showCommand,
+    editCommand,
   ],
   action: async (
     _context: CommandContext,
@@ -939,6 +1062,9 @@ export const profileCommand: SlashCommand = {
   /profile save loadbalancer <lb-name> <roundrobin|failover> <profile1> <profile2> [...]
                                 - Save a load balancer profile
   /profile load <name>          - Load a saved profile
+  /profile show <name>          - View details of a specific profile
+  /profile edit <name>          - Edit a specific profile
+  /profile create               - Interactive wizard to create a profile
   /profile delete <name>        - Delete a saved profile
   /profile set-default <name>   - Set profile to load on startup (or "none")
   /profile list                 - List all saved profiles`,

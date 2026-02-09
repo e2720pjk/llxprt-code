@@ -26,12 +26,48 @@ if (typeof window === 'undefined') {
 }
 
 export class DebugLogger {
+  // Add static registry for singleton-per-namespace pattern
+  private static instances: Map<string, DebugLogger> = new Map();
+
   private debugInstance: Debugger; // Line 11
   private _namespace: string; // Line 12
   private _configManager: ConfigurationManager; // Line 13
   private _fileOutput: FileOutput; // Line 14
   private _enabled: boolean; // Line 15
   private _level: string = 'debug';
+  private boundOnConfigChange: () => void; // Store bound reference for unsubscribe
+
+  /**
+   * Factory method to get or create a DebugLogger for a namespace.
+   * Returns cached instance if one exists, ensuring singleton-per-namespace.
+   */
+  static getLogger(namespace: string): DebugLogger {
+    let logger = DebugLogger.instances.get(namespace);
+    if (!logger) {
+      logger = new DebugLogger(namespace);
+      DebugLogger.instances.set(namespace, logger);
+    }
+    return logger;
+  }
+
+  /**
+   * Dispose all cached logger instances.
+   * Call this in test cleanup or application shutdown.
+   */
+  static disposeAll(): void {
+    for (const logger of DebugLogger.instances.values()) {
+      logger._configManager.unsubscribe(logger.boundOnConfigChange);
+    }
+    DebugLogger.instances.clear();
+  }
+
+  /**
+   * Reset for testing - clears instances without unsubscribing
+   * (use disposeAll in production)
+   */
+  static resetForTesting(): void {
+    DebugLogger.instances.clear();
+  }
 
   constructor(namespace: string) {
     // Lines 17-24: Initialize logger
@@ -40,7 +76,9 @@ export class DebugLogger {
     this._configManager = ConfigurationManager.getInstance(); // Line 20
     this._fileOutput = FileOutput.getInstance(); // Line 21
     this._enabled = this.checkEnabled(); // Line 22
-    this._configManager.subscribe(() => this.onConfigChange()); // Line 23
+    // Store bound reference so we can unsubscribe later
+    this.boundOnConfigChange = () => this.onConfigChange();
+    this._configManager.subscribe(this.boundOnConfigChange);
   }
 
   get namespace(): string {
@@ -100,6 +138,8 @@ export class DebugLogger {
       level: 'log',
       message,
       args: args.length > 0 ? args : undefined,
+      runId: this._fileOutput.runId,
+      pid: process.pid,
     };
 
     const target = this._configManager.getOutputTarget();
@@ -145,6 +185,8 @@ export class DebugLogger {
       level: 'debug',
       message,
       args: args.length > 0 ? args : undefined,
+      runId: this._fileOutput.runId,
+      pid: process.pid,
     };
 
     const target = this._configManager.getOutputTarget();
@@ -158,12 +200,15 @@ export class DebugLogger {
   }
 
   warn(messageOrFn: string | (() => string), ...args: unknown[]): void {
-    // Use error level for warnings for now
-    this.error(messageOrFn, ...args);
+    // Use warn level for warnings
+    this._logWithLevel('warn', messageOrFn, ...args);
   }
 
-  error(messageOrFn: string | (() => string), ...args: unknown[]): void {
-    // Lines 66-70
+  private _logWithLevel(
+    level: 'warn' | 'error',
+    messageOrFn: string | (() => string),
+    ...args: unknown[]
+  ): void {
     if (!this._enabled) {
       return;
     }
@@ -185,9 +230,11 @@ export class DebugLogger {
     const logEntry: LogEntry = {
       timestamp,
       namespace: this._namespace,
-      level: 'error',
+      level,
       message,
       args: args.length > 0 ? args : undefined,
+      runId: this._fileOutput.runId,
+      pid: process.pid,
     };
 
     const target = this._configManager.getOutputTarget();
@@ -198,6 +245,10 @@ export class DebugLogger {
     if (target.includes('stderr')) {
       this.debugInstance(message, ...args);
     }
+  }
+
+  error(messageOrFn: string | (() => string), ...args: unknown[]): void {
+    this._logWithLevel('error', messageOrFn, ...args);
   }
 
   checkEnabled(): boolean {
@@ -266,9 +317,12 @@ export class DebugLogger {
   }
 
   async dispose(): Promise<void> {
-    // Lines 116-119
-    this._configManager.unsubscribe(this.onConfigChange);
-    // Flush pending writes handled by FileOutput
+    // Unsubscribe using the bound reference
+    this._configManager.unsubscribe(this.boundOnConfigChange);
+    // Remove from registry if present
+    if (DebugLogger.instances.get(this._namespace) === this) {
+      DebugLogger.instances.delete(this._namespace);
+    }
     await this._fileOutput.dispose();
   }
 }

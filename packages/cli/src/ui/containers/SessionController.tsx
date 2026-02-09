@@ -18,7 +18,6 @@ import { useRuntimeApi, getRuntimeApi } from '../contexts/RuntimeContext.js';
 import { Config, getErrorMessage } from '@vybestack/llxprt-code-core';
 import { loadHierarchicalLlxprtMemory } from '../../config/config.js';
 import { loadSettings } from '../../config/settings.js';
-import process from 'node:process';
 import {
   SessionStateProvider,
   useSessionState,
@@ -68,13 +67,11 @@ export const SessionContext = createContext<SessionContextType | undefined>(
 interface SessionControllerProps {
   children: React.ReactNode;
   config: Config;
-  isAuthenticating?: boolean;
 }
 
 export const SessionController: React.FC<SessionControllerProps> = ({
   children,
   config,
-  isAuthenticating = false,
 }) => {
   const runtime = useRuntimeApi();
   const statusSnapshot = runtime.getActiveProviderStatus();
@@ -92,7 +89,7 @@ export const SessionController: React.FC<SessionControllerProps> = ({
 
   return (
     <SessionStateProvider initialState={initialState}>
-      <SessionControllerInner {...{ children, config, isAuthenticating }} />
+      <SessionControllerInner {...{ children, config }} />
     </SessionStateProvider>
   );
 };
@@ -182,19 +179,19 @@ const SessionControllerInner: React.FC<SessionControllerProps> = ({
     );
 
     try {
-      // Note: loadHierarchicalLlxprtMemory now requires settings, but SessionController
-      // doesn't have access to settings. This needs to be refactored.
-      // For now, using the internal config loading that has settings.
+      const settings = loadSettings(config.getWorkingDir());
       const { memoryContent, fileCount } = await loadHierarchicalLlxprtMemory(
-        process.cwd(),
+        config.getWorkingDir(),
         config.shouldLoadMemoryFromIncludeDirectories()
           ? config.getWorkspaceContext().getDirectories()
           : [],
         config.getDebugMode(),
         config.getFileService(),
-        loadSettings(process.cwd()).merged, // Get merged settings object
-        config.getExtensionContextFilePaths(),
+        settings.merged,
+        config.getExtensions(),
         config.getFolderTrust(),
+        settings.merged.ui?.memoryImportFormat || 'tree',
+        config.getFileFilteringOptions(),
       );
       config.setUserMemory(memoryContent);
       config.setLlxprtMdFileCount(fileCount);

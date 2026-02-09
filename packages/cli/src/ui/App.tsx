@@ -5,7 +5,7 @@
  */
 
 import { useReducer } from 'react';
-import type { Config } from '@vybestack/llxprt-code-core';
+import type { Config, PersistedSession } from '@vybestack/llxprt-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import { KeypressProvider } from './contexts/KeypressContext.js';
 import { MouseProvider } from './contexts/MouseContext.js';
@@ -17,7 +17,6 @@ import { RuntimeContextProvider } from './contexts/RuntimeContext.js';
 import { OverflowProvider } from './contexts/OverflowContext.js';
 import { AppDispatchProvider } from './contexts/AppDispatchContext.js';
 import { ScrollProvider } from './contexts/ScrollProvider.js';
-import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
 import { inkRenderOptions } from './inkRenderOptions.js';
 import { isMouseEventsEnabled } from './mouseEventsEnabled.js';
 import { appReducer, initialAppState } from './reducers/appReducer.js';
@@ -28,6 +27,7 @@ interface AppProps {
   settings: LoadedSettings;
   startupWarnings?: string[];
   version: string;
+  restoredSession?: PersistedSession;
 }
 
 /**
@@ -46,7 +46,6 @@ interface AppProps {
  * - AppContainer: Main UI container with UIState/UIActions contexts
  */
 export const AppWrapper = (props: AppProps) => {
-  const kittyProtocolStatus = useKittyKeyboardProtocol();
   const renderOptions = inkRenderOptions(props.config, props.settings);
   const mouseEventsEnabled = isMouseEventsEnabled(
     renderOptions,
@@ -55,10 +54,8 @@ export const AppWrapper = (props: AppProps) => {
 
   return (
     <KeypressProvider
-      kittyProtocolEnabled={kittyProtocolStatus.enabled}
       config={props.config}
       debugKeystrokeLogging={props.settings.merged.debugKeystrokeLogging}
-      mouseEventsEnabled={mouseEventsEnabled}
     >
       <MouseProvider
         mouseEventsEnabled={mouseEventsEnabled}

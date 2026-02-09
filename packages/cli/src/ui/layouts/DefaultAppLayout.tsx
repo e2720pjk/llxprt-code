@@ -100,6 +100,7 @@ export const DefaultAppLayout = ({
     constrainHeight,
     showErrorDetails,
     showToolDescriptions,
+    isTodoPanelCollapsed,
     consoleMessages,
     slashCommands,
     staticKey,
@@ -123,6 +124,8 @@ export const DefaultAppLayout = ({
     tokenMetrics,
     currentModel,
     availableTerminalHeight: uiAvailableTerminalHeight,
+    activeShellPtyId,
+    embeddedShellFocused,
   } = uiState;
 
   // Use the UI state's availableTerminalHeight if constrainHeight is true
@@ -148,19 +151,25 @@ export const DefaultAppLayout = ({
     uiState.shouldShowIdePrompt ||
     uiState.showIdeRestartPrompt ||
     uiState.isFolderTrustDialogOpen ||
+    uiState.isWelcomeDialogOpen ||
     uiState.isPermissionsDialogOpen ||
     uiState.shellConfirmationRequest ||
     uiState.confirmationRequest ||
     uiState.isThemeDialogOpen ||
     uiState.isSettingsDialogOpen ||
-    uiState.isAuthenticating ||
     uiState.isAuthDialogOpen ||
     uiState.isOAuthCodeDialogOpen ||
     uiState.isEditorDialogOpen ||
     uiState.isProviderDialogOpen ||
-    uiState.isProviderModelDialogOpen ||
     uiState.isLoadProfileDialogOpen ||
+    uiState.isCreateProfileDialogOpen ||
+    uiState.isProfileListDialogOpen ||
+    uiState.isProfileDetailDialogOpen ||
+    uiState.isProfileEditorDialogOpen ||
     uiState.isToolsDialogOpen ||
+    uiState.isLoggingDialogOpen ||
+    uiState.isSubagentDialogOpen ||
+    uiState.isModelsDialogOpen ||
     uiState.showPrivacyNotice;
 
   if (quittingMessages) {
@@ -216,6 +225,8 @@ export const DefaultAppLayout = ({
               isFocused={!uiState.isEditorDialogOpen}
               slashCommands={slashCommands}
               showTodoPanel={showTodoPanelSetting}
+              activeShellPtyId={activeShellPtyId}
+              embeddedShellFocused={embeddedShellFocused}
             />
           ))}
           <ShowMoreLines constrainHeight={constrainHeight} />
@@ -241,6 +252,8 @@ export const DefaultAppLayout = ({
             config={config}
             slashCommands={slashCommands}
             showTodoPanel={showTodoPanelSetting}
+            activeShellPtyId={activeShellPtyId}
+            embeddedShellFocused={embeddedShellFocused}
           />
         ),
       })),
@@ -284,7 +297,9 @@ export const DefaultAppLayout = ({
               history={history}
             />
 
-            {showTodoPanelSetting && <TodoPanel width={inputWidth} />}
+            {showTodoPanelSetting && (
+              <TodoPanel width={inputWidth} collapsed={isTodoPanelCollapsed} />
+            )}
 
             <BucketAuthConfirmation
               config={config}
@@ -455,6 +470,8 @@ export const DefaultAppLayout = ({
                 config={config}
                 slashCommands={slashCommands}
                 showTodoPanel={showTodoPanelSetting}
+                activeShellPtyId={activeShellPtyId}
+                embeddedShellFocused={embeddedShellFocused}
               />
             )),
           ]}
@@ -476,6 +493,8 @@ export const DefaultAppLayout = ({
                 isFocused={!uiState.isEditorDialogOpen}
                 slashCommands={slashCommands}
                 showTodoPanel={showTodoPanelSetting}
+                activeShellPtyId={activeShellPtyId}
+                embeddedShellFocused={embeddedShellFocused}
               />
             ))}
             <ShowMoreLines constrainHeight={constrainHeight} />
@@ -489,7 +508,9 @@ export const DefaultAppLayout = ({
             history={history}
           />
 
-          {showTodoPanelSetting && <TodoPanel width={inputWidth} />}
+          {showTodoPanelSetting && (
+            <TodoPanel width={inputWidth} collapsed={isTodoPanelCollapsed} />
+          )}
 
           {/* OAuth bucket auth confirmation - manages its own state via message bus */}
           <BucketAuthConfirmation config={config} isFocused={!dialogsVisible} />

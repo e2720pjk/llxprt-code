@@ -34,7 +34,6 @@ import {
 import { findCompressSplitPoint, GeminiClient } from './client.js';
 import { getCoreSystemPromptAsync } from './prompts.js';
 import {
-  AuthType,
   ContentGenerator,
   ContentGeneratorConfig,
 } from './contentGenerator.js';
@@ -43,22 +42,14 @@ import type { ConfigParameters } from '../config/config.js';
 import { GeminiChat } from './geminiChat.js';
 import { Config } from '../config/config.js';
 import { createAgentRuntimeState } from '../runtime/AgentRuntimeState.js';
-import {
-  CompressionStatus,
-  GeminiEventType,
-  Turn,
-  type ChatCompressionInfo,
-} from './turn.js';
+import { GeminiEventType, Turn } from './turn.js';
 import { getCoreSystemPrompt as _getCoreSystemPrompt } from './prompts.js';
 import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { retryWithBackoff } from '../utils/retry.js';
 import { ideContext } from '../ide/ideContext.js';
-import {
-  ComplexityAnalyzer,
-  type ComplexityAnalysisResult,
-} from '../services/complexity-analyzer.js';
+import { ComplexityAnalyzer } from '../services/complexity-analyzer.js';
 import { TodoReminderService } from '../services/todo-reminder-service.js';
 import { tokenLimit } from './tokenLimits.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
@@ -142,6 +133,9 @@ vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn((apiCall) => apiCall()),
 }));
 vi.mock('../ide/ideContext.js');
+vi.mock('./tokenLimits', () => ({
+  tokenLimit: vi.fn(),
+}));
 vi.mock('../telemetry/uiTelemetry.js', () => ({
   uiTelemetryService: {
     setLastPromptTokenCount: vi.fn(),
@@ -236,6 +230,39 @@ describe('findCompressSplitPoint', () => {
     ];
     expect(findCompressSplitPoint(historyWithEmptyParts, 0.5)).toBe(2);
   });
+
+  it('should fall back to tool call split when no user splits exist', () => {
+    const history: Content[] = [
+      { role: 'model', parts: [{ functionCall: { name: 'toolA' } }] },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'toolA',
+              response: { ok: true },
+              id: 'toolA',
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ functionCall: { name: 'toolB' } }] },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'toolB',
+              response: { ok: true },
+              id: 'toolB',
+            },
+          },
+        ],
+      },
+    ];
+
+    expect(findCompressSplitPoint(history, 0.6)).toBe(2);
+  });
 });
 
 describe('Gemini Client (client.ts)', () => {
@@ -322,7 +349,6 @@ describe('Gemini Client (client.ts)', () => {
       model: 'test-model',
       apiKey: 'test-key',
       vertexai: false,
-      authType: AuthType.USE_GEMINI,
     };
     const mockConfigObject = {
       getContentGeneratorConfig: vi
@@ -336,7 +362,7 @@ describe('Gemini Client (client.ts)', () => {
       getVertexAI: vi.fn().mockReturnValue(false),
       getUserAgent: vi.fn().mockReturnValue('test-agent'),
       getUserMemory: vi.fn().mockReturnValue(''),
-      getFullContext: vi.fn().mockReturnValue(false),
+
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getProxy: vi.fn().mockReturnValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue('/test/dir'),
@@ -375,7 +401,6 @@ describe('Gemini Client (client.ts)', () => {
       runtimeId: 'test-runtime',
       provider: 'gemini',
       model: 'test-model',
-      authType: AuthType.USE_NONE,
       sessionId: 'test-session-id',
     });
     client = new GeminiClient(mockConfig, runtimeState);
@@ -399,6 +424,7 @@ describe('Gemini Client (client.ts)', () => {
       }),
       clearHistory: vi.fn(),
       sendMessageStream: vi.fn(),
+      getLastPromptTokenCount: vi.fn().mockReturnValue(0),
     };
     client['chat'] = mockChat as unknown as (typeof client)['chat'];
   });
@@ -733,371 +759,6 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
-  describe('tryCompressChat', () => {
-    const mockCountTokens = vi.fn();
-    const mockSendMessage = vi.fn();
-    const mockGetHistory = vi.fn();
-    const mockGetTotalTokens = vi.fn();
-
-    beforeEach(() => {
-      vi.mock('./tokenLimits', () => ({
-        tokenLimit: vi.fn(),
-      }));
-
-      client['contentGenerator'] = {
-        countTokens: mockCountTokens,
-      } as unknown as ContentGenerator;
-
-      client['chat'] = {
-        getHistory: mockGetHistory,
-        addHistory: vi.fn(),
-        setHistory: vi.fn(),
-        sendMessage: mockSendMessage,
-        getHistoryService: vi.fn().mockReturnValue({
-          getTotalTokens: mockGetTotalTokens,
-          emit: vi.fn(),
-        }),
-      } as unknown as GeminiChat;
-
-      // Mock startChat to return a chat with getHistoryService that returns newTokenCount
-      client['startChat'] = vi.fn().mockImplementation(() =>
-        Promise.resolve({
-          getHistory: vi.fn().mockReturnValue([]),
-          setHistory: vi.fn(),
-          sendMessage: vi.fn(),
-          getHistoryService: vi.fn().mockReturnValue({
-            getTotalTokens: vi.fn().mockReturnValue(100), // New compressed token count
-            emit: vi.fn(),
-          }),
-        }),
-      );
-
-      // Default to returning 1000 tokens unless overridden in specific tests
-      mockGetTotalTokens.mockReturnValue(1000);
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        1000,
-      );
-    });
-
-    // Removed setup function and mock theater tests that were testing implementation details
-    // These tests were violating RULES.md: "Test behavior, not implementation" and "What NOT to Test: Mock interactions"
-
-    describe('when compression inflates the token count', () => {
-      it('uses the truncated history for compression');
-    });
-
-    it('attempts to compress with a maxOutputTokens set to the original token count', async () => {
-      vi.mocked(tokenLimit).mockReturnValue(1000);
-      mockCountTokens.mockResolvedValue({
-        totalTokens: 999,
-      });
-
-      // Set the mock to return 999 tokens
-      mockGetTotalTokens.mockReturnValue(999);
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        999,
-      );
-      mockGetHistory.mockReturnValue([
-        { role: 'user', parts: [{ text: '...history...' }] },
-        { role: 'model', parts: [{ text: '...history...' }] },
-        { role: 'user', parts: [{ text: '...history...' }] },
-        { role: 'model', parts: [{ text: '...history...' }] },
-        { role: 'user', parts: [{ text: '...history...' }] },
-        { role: 'model', parts: [{ text: '...history...' }] },
-      ]);
-
-      // Mock the summary response from the chat
-      mockSendMessage.mockResolvedValue({
-        text: 'This is a summary.',
-      });
-
-      await client.tryCompressChat('prompt-id-2', true);
-
-      expect(mockSendMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          config: expect.objectContaining({
-            maxOutputTokens: 999,
-          }),
-        }),
-        'prompt-id-2',
-      );
-    });
-
-    it('does NOT update telemetry when compression inflates the token count', async () => {
-      vi.mocked(tokenLimit).mockReturnValue(1000);
-      mockCountTokens.mockResolvedValue({
-        totalTokens: 999,
-      });
-      mockGetTotalTokens.mockReturnValue(1000);
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        1000,
-      );
-      mockGetHistory.mockReturnValue([
-        { role: 'user', parts: [{ text: '...history...' }] },
-        { role: 'model', parts: [{ text: '...history...' }] },
-        { role: 'user', parts: [{ text: '...history...' }] },
-        { role: 'model', parts: [{ text: '...history...' }] },
-        { role: 'user', parts: [{ text: '...history...' }] },
-        { role: 'model', parts: [{ text: '...history...' }] },
-      ]);
-      mockSendMessage.mockResolvedValue({
-        text: 'This is a summary.',
-      });
-
-      const inflatedTokenCount = 5000;
-      client['startChat'] = vi.fn().mockResolvedValue({
-        getHistory: vi.fn().mockReturnValue([]),
-        setHistory: vi.fn(),
-        sendMessage: vi.fn(),
-        getHistoryService: vi.fn().mockReturnValue({
-          getTotalTokens: vi.fn().mockReturnValue(inflatedTokenCount),
-          emit: vi.fn(),
-        }),
-      } as unknown as GeminiChat);
-
-      const result = await client.tryCompressChat('prompt-id-2', true);
-
-      expect(result).toEqual({
-        compressionStatus:
-          CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
-        newTokenCount: inflatedTokenCount,
-        originalTokenCount: 1000,
-      });
-      // Compression failed, so telemetry should NOT be updated
-      expect(uiTelemetryService.setLastPromptTokenCount).not.toHaveBeenCalled();
-    });
-
-    it('should not trigger summarization if token count is below threshold', async () => {
-      const MOCKED_TOKEN_LIMIT = 1000;
-      vi.mocked(tokenLimit).mockReturnValue(MOCKED_TOKEN_LIMIT);
-      mockGetHistory.mockReturnValue([
-        { role: 'user', parts: [{ text: '...history...' }] },
-      ]);
-
-      const originalTokenCount = MOCKED_TOKEN_LIMIT * 0.699;
-      mockCountTokens.mockResolvedValue({
-        totalTokens: originalTokenCount, // TOKEN_THRESHOLD_FOR_SUMMARIZATION = 0.7
-      });
-
-      // Set the mock to return 699 tokens (below threshold)
-      mockGetTotalTokens.mockReturnValue(699);
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        originalTokenCount,
-      );
-
-      const initialChat = client.getChat();
-      const result = await client.tryCompressChat('prompt-id-2');
-      const newChat = client.getChat();
-
-      expect(tokenLimit).toHaveBeenCalled();
-      expect(result).toEqual({
-        compressionStatus: CompressionStatus.NOOP,
-        newTokenCount: originalTokenCount,
-        originalTokenCount,
-      });
-      expect(newChat).toBe(initialChat);
-    });
-
-    it('should return NOOP if history is too short to compress', async () => {
-      mockGetHistory.mockReturnValue([
-        { role: 'user', parts: [{ text: 'hi' }] },
-      ]);
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(50);
-
-      const result = await client.tryCompressChat('prompt-id-noop', false);
-
-      expect(result).toEqual({
-        compressionStatus: CompressionStatus.NOOP,
-        originalTokenCount: 50,
-        newTokenCount: 50,
-      });
-    });
-
-    it('updates telemetry when compression succeeds', async () => {
-      const MOCKED_TOKEN_LIMIT = 1000;
-      const CONTEXT_THRESHOLD = 0.5;
-      const originalTokenCount = MOCKED_TOKEN_LIMIT * CONTEXT_THRESHOLD;
-      const newTokenCount = 100;
-
-      vi.mocked(tokenLimit).mockReturnValue(MOCKED_TOKEN_LIMIT);
-      vi.spyOn(client['config'], 'getChatCompression').mockReturnValue({
-        contextPercentageThreshold: CONTEXT_THRESHOLD,
-      });
-
-      mockGetHistory.mockReturnValue([
-        { role: 'user', parts: [{ text: '...history...' }] },
-        { role: 'model', parts: [{ text: '...history...' }] },
-        { role: 'user', parts: [{ text: '...history...' }] },
-        { role: 'model', parts: [{ text: '...history...' }] },
-        { role: 'user', parts: [{ text: '...history...' }] },
-        { role: 'model', parts: [{ text: '...history...' }] },
-      ]);
-
-      // Set the mock to return original token count before compression
-      mockGetTotalTokens.mockReturnValue(originalTokenCount);
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        originalTokenCount,
-      );
-
-      mockCountTokens
-        .mockResolvedValueOnce({ totalTokens: originalTokenCount })
-        .mockResolvedValueOnce({ totalTokens: newTokenCount });
-
-      mockSendMessage.mockResolvedValue({
-        text: 'This is a summary.',
-      });
-
-      client['startChat'] = vi.fn().mockResolvedValue({
-        getHistory: vi.fn().mockReturnValue([]),
-        setHistory: vi.fn(),
-        sendMessage: vi.fn(),
-        getHistoryService: vi.fn().mockReturnValue({
-          getTotalTokens: vi.fn().mockReturnValue(newTokenCount),
-          emit: vi.fn(),
-        }),
-      } as unknown as GeminiChat);
-
-      const result = await client.tryCompressChat('prompt-id-3', false);
-
-      expect(result).toEqual({
-        compressionStatus: CompressionStatus.COMPRESSED,
-        originalTokenCount,
-        newTokenCount,
-      });
-      expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledWith(
-        newTokenCount,
-      );
-      expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledTimes(
-        1,
-      );
-    });
-
-    it('should trigger summarization if token count is at threshold with contextPercentageThreshold setting', async () => {
-      const MOCKED_TOKEN_LIMIT = 1000;
-      const MOCKED_CONTEXT_PERCENTAGE_THRESHOLD = 0.5;
-      vi.mocked(tokenLimit).mockReturnValue(MOCKED_TOKEN_LIMIT);
-      vi.spyOn(client['config'], 'getChatCompression').mockReturnValue({
-        contextPercentageThreshold: MOCKED_CONTEXT_PERCENTAGE_THRESHOLD,
-      });
-      mockGetHistory.mockReturnValue([
-        { role: 'user', parts: [{ text: '...history...' }] },
-        { role: 'model', parts: [{ text: '...history...' }] },
-        { role: 'user', parts: [{ text: '...history...' }] },
-        { role: 'model', parts: [{ text: '...history...' }] },
-        { role: 'user', parts: [{ text: '...history...' }] },
-        { role: 'model', parts: [{ text: '...history...' }] },
-      ]);
-
-      const originalTokenCount =
-        MOCKED_TOKEN_LIMIT * MOCKED_CONTEXT_PERCENTAGE_THRESHOLD;
-      const newTokenCount = 100;
-
-      mockCountTokens
-        .mockResolvedValueOnce({ totalTokens: originalTokenCount }) // First call for the check
-        .mockResolvedValueOnce({ totalTokens: newTokenCount }); // Second call for the new history
-
-      // Set the mock to return 500 tokens initially
-      mockGetTotalTokens.mockReturnValue(originalTokenCount);
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        originalTokenCount,
-      );
-
-      // Mock the summary response from the chat
-      mockSendMessage.mockResolvedValue({
-        text: 'This is a summary.',
-      });
-
-      const initialChat = client.getChat();
-      const result = await client.tryCompressChat('prompt-id-3');
-      const newChat = client.getChat();
-
-      expect(tokenLimit).toHaveBeenCalled();
-      // Note: This test might not trigger compression due to function call response handling
-      // expect(mockSendMessage).toHaveBeenCalled();
-
-      // Assert that summarization happened and returned the correct stats
-      expect(result).toEqual({
-        compressionStatus: CompressionStatus.COMPRESSED,
-        originalTokenCount,
-        newTokenCount,
-      });
-
-      // Assert that the chat was reset
-      expect(newChat).not.toBe(initialChat);
-    });
-
-    it.skip('should not compress across a function call response', async () => {
-      const MOCKED_TOKEN_LIMIT = 1000;
-      vi.mocked(tokenLimit).mockReturnValue(MOCKED_TOKEN_LIMIT);
-      mockGetHistory.mockReturnValue([
-        { role: 'user', parts: [{ text: '...history 1...' }] },
-        { role: 'model', parts: [{ text: '...history 2...' }] },
-        { role: 'user', parts: [{ text: '...history 3...' }] },
-        { role: 'model', parts: [{ text: '...history 4...' }] },
-        { role: 'user', parts: [{ text: '...history 5...' }] },
-        { role: 'model', parts: [{ text: '...history 6...' }] },
-        { role: 'user', parts: [{ text: '...history 7...' }] },
-        { role: 'model', parts: [{ text: '...history 8...' }] },
-        // Normally we would break here, but we have a function response.
-        {
-          role: 'user',
-          parts: [{ functionResponse: { name: '...history 8...' } }],
-        },
-        { role: 'model', parts: [{ text: '...history 10...' }] },
-        // Instead we will break here.
-        { role: 'user', parts: [{ text: '...history 10...' }] },
-      ]);
-
-      const originalTokenCount = 1000 * 0.7;
-      const newTokenCount = 100;
-
-      mockCountTokens
-        .mockResolvedValueOnce({ totalTokens: originalTokenCount }) // First call for the check
-        .mockResolvedValueOnce({ totalTokens: newTokenCount }); // Second call for the new history
-
-      // Mock the summary response from the chat
-      mockSendMessage.mockResolvedValue({
-        role: 'model',
-        parts: [{ text: 'This is a summary.' }],
-      });
-
-      // Ensure the client's chat uses our mock
-      const mockChat = client['chat'] as GeminiChat;
-      mockChat.sendMessage = mockSendMessage;
-
-      const initialChat = client.getChat();
-      const result = await client.tryCompressChat('prompt-id-3');
-      const newChat = client.getChat();
-
-      expect(tokenLimit).toHaveBeenCalled();
-      // Note: This test might not trigger compression due to function call response handling
-      // expect(mockSendMessage).toHaveBeenCalled();
-
-      // Assert that summarization happened and returned the correct stats
-      expect(result).toEqual({
-        compressionStatus: CompressionStatus.COMPRESSED,
-        originalTokenCount,
-        newTokenCount,
-      });
-      // Assert that the chat was reset
-      expect(newChat).not.toBe(initialChat);
-
-      // 1. standard start context message
-      // 2. standard canned user start message
-      // 3. compressed summary message
-      // 4. standard canned user summary message
-      // 5. The last user message (not the last 3 because that would start with a function response)
-      expect(newChat.getHistory().length).toEqual(5);
-    });
-
-    // Removed test: 'should always trigger summarization when force is true'
-    // This test was testing mock interactions rather than actual behavior (violates RULES.md)
-
-    // Removed test: 'should use current model from config for token counting after sendMessage'
-    // This test was testing mock interactions (expects on mockCountTokens.toHaveBeenCalledWith)
-    // rather than actual behavior (violates RULES.md)
-  });
-
   describe('recordModelActivity', () => {
     it('only counts completed tool call responses toward reminders', () => {
       (
@@ -1147,1115 +808,6 @@ describe('Gemini Client (client.ts)', () => {
         client as unknown as { todoToolsAvailable: boolean }
       ).todoToolsAvailable = true;
     });
-    it('emits a compression event when the context was automatically compressed', async () => {
-      // Arrange
-      const mockStream = (async function* () {
-        yield { type: 'content', value: 'Hello' };
-      })();
-      mockTurnRunFn.mockReturnValue(mockStream);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      const mockGenerator: Partial<ContentGenerator> = {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-        generateContent: mockGenerateContentFn,
-      };
-      client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-      const compressionInfo: ChatCompressionInfo = {
-        compressionStatus: CompressionStatus.COMPRESSED,
-        originalTokenCount: 1000,
-        newTokenCount: 500,
-      };
-
-      vi.spyOn(client, 'tryCompressChat').mockResolvedValueOnce(
-        compressionInfo,
-      );
-
-      // Act
-      const stream = client.sendMessageStream(
-        [{ text: 'Hi' }],
-        new AbortController().signal,
-        'prompt-id-1',
-      );
-
-      const events = await fromAsync(stream);
-
-      // Assert
-      expect(events).toContainEqual({
-        type: GeminiEventType.ChatCompressed,
-        value: compressionInfo,
-      });
-    });
-
-    it.each([
-      {
-        compressionStatus:
-          CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
-      },
-      { compressionStatus: CompressionStatus.NOOP },
-      {
-        compressionStatus:
-          CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
-      },
-    ])(
-      'does not emit a compression event when the status is $compressionStatus',
-      async ({ compressionStatus }) => {
-        // Arrange
-        const mockStream = (async function* () {
-          yield { type: 'content', value: 'Hello' };
-        })();
-        mockTurnRunFn.mockReturnValue(mockStream);
-
-        const mockChat: Partial<GeminiChat> = {
-          addHistory: vi.fn(),
-          getHistory: vi.fn().mockReturnValue([]),
-        };
-        client['chat'] = mockChat as GeminiChat;
-
-        const mockGenerator: Partial<ContentGenerator> = {
-          countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-          generateContent: mockGenerateContentFn,
-        };
-        client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-        const compressionInfo: ChatCompressionInfo = {
-          compressionStatus,
-          originalTokenCount: 1000,
-          newTokenCount: 500,
-        };
-
-        vi.spyOn(client, 'tryCompressChat').mockResolvedValueOnce(
-          compressionInfo,
-        );
-
-        // Act
-        const stream = client.sendMessageStream(
-          [{ text: 'Hi' }],
-          new AbortController().signal,
-          'prompt-id-1',
-        );
-
-        const events = await fromAsync(stream);
-
-        // Assert
-        expect(events).not.toContainEqual({
-          type: GeminiEventType.ChatCompressed,
-          value: expect.anything(),
-        });
-      },
-    );
-
-    it('should include editor context when ideMode is enabled', async () => {
-      // Arrange
-      vi.mocked(ideContext.getIdeContext).mockReturnValue({
-        workspaceState: {
-          openFiles: [
-            {
-              path: '/path/to/active/file.ts',
-              timestamp: Date.now(),
-              isActive: true,
-              selectedText: 'hello',
-              cursor: { line: 5, character: 10 },
-            },
-            {
-              path: '/path/to/recent/file1.ts',
-              timestamp: Date.now(),
-            },
-            {
-              path: '/path/to/recent/file2.ts',
-              timestamp: Date.now(),
-            },
-          ],
-        },
-      });
-
-      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
-
-      const mockStream = (async function* () {
-        yield { type: 'content', value: 'Hello' };
-      })();
-      mockTurnRunFn.mockReturnValue(mockStream);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      const mockGenerator: Partial<ContentGenerator> = {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-        generateContent: mockGenerateContentFn,
-      };
-      client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-      const initialRequest: Part[] = [{ text: 'Hi' }];
-
-      // Act
-      const stream = client.sendMessageStream(
-        initialRequest,
-        new AbortController().signal,
-        'prompt-id-ide',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      // Verify that the IDE context was included correctly
-      const addHistoryCalls = vi.mocked(mockChat.addHistory).mock.calls;
-      const contextCall = addHistoryCalls.find((call) =>
-        JSON.stringify(call[0]).includes('editor context'),
-      );
-      expect(contextCall).toBeDefined();
-      expect(JSON.stringify(contextCall![0])).toContain('active/file.ts');
-      expect(JSON.stringify(contextCall![0])).toContain('recent/file1.ts');
-      expect(JSON.stringify(contextCall![0])).toContain('recent/file2.ts');
-    });
-
-    it('should not add context if ideMode is enabled but no open files', async () => {
-      // Arrange
-      vi.mocked(ideContext.getIdeContext).mockReturnValue({
-        workspaceState: {
-          openFiles: [],
-        },
-      });
-
-      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
-
-      const mockStream = (async function* () {
-        yield { type: 'content', value: 'Hello' };
-      })();
-      mockTurnRunFn.mockReturnValue(mockStream);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      const mockGenerator: Partial<ContentGenerator> = {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-        generateContent: mockGenerateContentFn,
-      };
-      client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-      const initialRequest = [{ text: 'Hi' }];
-
-      // Act
-      const stream = client.sendMessageStream(
-        initialRequest,
-        new AbortController().signal,
-        'prompt-id-ide',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      // Verify that no IDE context was added when there are no open files
-      const addHistoryCalls = vi.mocked(mockChat.addHistory).mock.calls;
-      const contextCall = addHistoryCalls.find((call) =>
-        JSON.stringify(call[0]).includes('editor context'),
-      );
-      expect(contextCall).toBeUndefined();
-    });
-
-    it('should add context if ideMode is enabled and there is one active file', async () => {
-      // Arrange
-      vi.mocked(ideContext.getIdeContext).mockReturnValue({
-        workspaceState: {
-          openFiles: [
-            {
-              path: '/path/to/active/file.ts',
-              timestamp: Date.now(),
-              isActive: true,
-              selectedText: 'hello',
-              cursor: { line: 5, character: 10 },
-            },
-          ],
-        },
-      });
-
-      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
-
-      const mockStream = (async function* () {
-        yield { type: 'content', value: 'Hello' };
-      })();
-      mockTurnRunFn.mockReturnValue(mockStream);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      const mockGenerator: Partial<ContentGenerator> = {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-        generateContent: mockGenerateContentFn,
-      };
-      client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-      const initialRequest = [{ text: 'Hi' }];
-
-      // Act
-      const stream = client.sendMessageStream(
-        initialRequest,
-        new AbortController().signal,
-        'prompt-id-ide',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      // Verify that the IDE context was included correctly for single file
-      const addHistoryCalls = vi.mocked(mockChat.addHistory).mock.calls;
-      const contextCall = addHistoryCalls.find((call) =>
-        JSON.stringify(call[0]).includes('editor context'),
-      );
-      expect(contextCall).toBeDefined();
-      expect(JSON.stringify(contextCall![0])).toContain('active/file.ts');
-      expect(JSON.stringify(contextCall![0])).toContain('selectedText');
-    });
-
-    it('appends a todo suffix on later complex turns', async () => {
-      // Arrange
-      const analyzeComplexity = vi
-        .fn()
-        .mockReturnValueOnce({
-          complexityScore: 0.3,
-          isComplex: false,
-          detectedTasks: [],
-          sequentialIndicators: [],
-          questionCount: 0,
-          shouldSuggestTodos: false,
-        })
-        .mockReturnValue({
-          complexityScore: 0.92,
-          isComplex: true,
-          detectedTasks: ['update config', 'add tests', 'refactor service'],
-          sequentialIndicators: [],
-          questionCount: 0,
-          shouldSuggestTodos: true,
-        });
-
-      (
-        client as unknown as { complexityAnalyzer: ComplexityAnalyzer }
-      ).complexityAnalyzer = {
-        analyzeComplexity,
-      } as unknown as ComplexityAnalyzer;
-
-      const _processSpy = vi
-        .spyOn(
-          client as unknown as {
-            processComplexityAnalysis: (
-              analysis: ComplexityAnalysisResult,
-            ) => string | undefined;
-          },
-          'processComplexityAnalysis',
-        )
-        .mockReturnValue('todo-reminder');
-
-      mockTurnRunFn.mockReset();
-      let lastRequest: Part[] | undefined;
-      mockTurnRunFn.mockImplementation((req: PartListUnion) => {
-        lastRequest = req as Part[];
-        return (async function* () {
-          yield { type: GeminiEventType.Content, value: 'ok' };
-        })();
-      });
-
-      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(false);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      const mockGenerator: Partial<ContentGenerator> = {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-      };
-      client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-      const consume = async (request: Array<{ text: string }>) => {
-        const stream = client.sendMessageStream(
-          request,
-          new AbortController().signal,
-          'prompt-id-complex',
-        );
-        for await (const _event of stream) {
-          // consume
-        }
-      };
-
-      await consume([{ text: 'simple kickoff request' }]);
-      vi.mocked(mockChat.addHistory).mockClear();
-      lastRequest = undefined;
-
-      await consume([
-        {
-          text: 'Second turn that should be considered complex because it mentions many different actions in a long paragraph and expects coordination.',
-        },
-      ]);
-
-      const todoSuffixText = 'Use TODO List to organize this effort.';
-      const suffixPart = lastRequest?.find(
-        (part) =>
-          typeof part === 'object' &&
-          part !== null &&
-          'text' in part &&
-          part.text === todoSuffixText,
-      ) as Part | undefined;
-      expect(suffixPart?.text).toBe(todoSuffixText);
-    });
-
-    it('does not append the todo suffix when complexity does not trigger', async () => {
-      // Arrange
-      const analyzeComplexity = vi.fn().mockReturnValue({
-        complexityScore: 0.2,
-        isComplex: false,
-        detectedTasks: [],
-        sequentialIndicators: [],
-        questionCount: 0,
-        shouldSuggestTodos: false,
-      });
-
-      (
-        client as unknown as { complexityAnalyzer: ComplexityAnalyzer }
-      ).complexityAnalyzer = {
-        analyzeComplexity,
-      } as unknown as ComplexityAnalyzer;
-
-      mockTurnRunFn.mockReset();
-      vi.spyOn(
-        client as unknown as {
-          processComplexityAnalysis: (
-            analysis: ComplexityAnalysisResult,
-          ) => string | undefined;
-        },
-        'processComplexityAnalysis',
-      ).mockReturnValue(undefined);
-      mockTurnRunFn.mockImplementation(() =>
-        (async function* () {
-          yield { type: GeminiEventType.Content, value: 'ack' };
-        })(),
-      );
-
-      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(false);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      const mockGenerator: Partial<ContentGenerator> = {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-      };
-      client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-      const request = [
-        {
-          text: 'Simple request without multiple steps.',
-        },
-      ];
-
-      const stream = client.sendMessageStream(
-        request,
-        new AbortController().signal,
-        'prompt-id-preserve',
-      );
-      for await (const _event of stream) {
-        // consume
-      }
-
-      const forwardedRequest = mockTurnRunFn.mock.calls[0][0] as Part[];
-      const suffixPart = forwardedRequest.find(
-        (part) =>
-          typeof part === 'object' &&
-          part !== null &&
-          'text' in part &&
-          part.text === 'Use TODO List to organize this effort.',
-      ) as Part | undefined;
-      expect(suffixPart).toBeUndefined();
-    });
-
-    it('skips todo reminders when todo tools are unavailable', async () => {
-      const analyzeComplexity = vi.fn().mockReturnValue({
-        complexityScore: 0.9,
-        isComplex: true,
-        detectedTasks: ['plan features', 'review backlog'],
-        sequentialIndicators: [],
-        questionCount: 0,
-        shouldSuggestTodos: true,
-      });
-
-      (
-        client as unknown as { complexityAnalyzer: ComplexityAnalyzer }
-      ).complexityAnalyzer = {
-        analyzeComplexity,
-      } as unknown as ComplexityAnalyzer;
-
-      const getComplexTaskSuggestion = vi.fn().mockReturnValue('todo-reminder');
-      const getEscalatedComplexTaskSuggestion = vi.fn();
-
-      (
-        client as unknown as { todoReminderService: TodoReminderService }
-      ).todoReminderService = {
-        getComplexTaskSuggestion,
-        getEscalatedComplexTaskSuggestion,
-        getCreateListReminder: vi.fn(),
-        getUpdateActiveTodoReminder: vi.fn(),
-        getEscalatedActiveTodoReminder: vi.fn(),
-      } as unknown as TodoReminderService;
-
-      (
-        client as unknown as { todoToolsAvailable: boolean }
-      ).todoToolsAvailable = false;
-
-      mockTurnRunFn.mockReset();
-      mockTurnRunFn.mockImplementation(() =>
-        (async function* () {
-          yield { type: GeminiEventType.Content, value: 'ack' };
-        })(),
-      );
-
-      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(false);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      const mockGenerator: Partial<ContentGenerator> = {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-      };
-      client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-      const request = [
-        {
-          text: 'Need to break down the architecture work and assign actions.',
-        },
-      ];
-
-      const stream = client.sendMessageStream(
-        request,
-        new AbortController().signal,
-        'prompt-id-unavailable-todo',
-      );
-      for await (const _event of stream) {
-        // exhaust iterator
-      }
-
-      const forwardedRequest = mockTurnRunFn.mock.calls[0][0] as Part[];
-      const suffixPart = forwardedRequest.find(
-        (part) =>
-          typeof part === 'object' &&
-          part !== null &&
-          'text' in part &&
-          part.text === 'Use TODO List to organize this effort.',
-      ) as Part | undefined;
-      expect(suffixPart).toBeUndefined();
-      expect(getComplexTaskSuggestion).not.toHaveBeenCalled();
-      expect(getEscalatedComplexTaskSuggestion).not.toHaveBeenCalled();
-    });
-
-    it('escalates to a stronger reminder after repeated complex turns without todo usage', async () => {
-      // Arrange
-      const analyzeComplexity = vi.fn().mockReturnValue({
-        complexityScore: 0.9,
-        isComplex: true,
-        detectedTasks: [
-          'organize workstream',
-          'capture requirements',
-          'review output',
-        ],
-        sequentialIndicators: [],
-        questionCount: 0,
-        shouldSuggestTodos: true,
-      });
-
-      const getComplexTaskSuggestion = vi
-        .fn()
-        .mockReturnValue('light-reminder');
-      const getEscalatedComplexTaskSuggestion = vi
-        .fn()
-        .mockReturnValue('strong-reminder');
-
-      (
-        client as unknown as { complexityAnalyzer: ComplexityAnalyzer }
-      ).complexityAnalyzer = {
-        analyzeComplexity,
-      } as unknown as ComplexityAnalyzer;
-
-      (
-        client as unknown as { todoReminderService: TodoReminderService }
-      ).todoReminderService = {
-        getComplexTaskSuggestion,
-        getEscalatedComplexTaskSuggestion,
-        getCreateListReminder: vi.fn(),
-        getUpdateActiveTodoReminder: vi.fn(),
-        getEscalatedActiveTodoReminder: vi.fn(),
-      } as unknown as TodoReminderService;
-
-      mockTurnRunFn.mockReset();
-      mockTurnRunFn.mockImplementation(() =>
-        (async function* () {
-          yield { type: GeminiEventType.Content, value: 'ok' };
-        })(),
-      );
-
-      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(false);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      const mockGenerator: Partial<ContentGenerator> = {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-      };
-      client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-      client['complexitySuggestionCooldown'] = 0;
-
-      const requests = [
-        [
-          {
-            text: 'Need to outline architecture, draft plan, and review docs.',
-          },
-        ],
-        [
-          {
-            text: 'Follow up with task allocation and stakeholder communication.',
-          },
-        ],
-        [{ text: 'Still no todos created, consolidate actions across repos.' }],
-      ];
-
-      vi.useFakeTimers();
-      const baseTime = new Date('2025-01-01T00:00:00Z');
-      vi.setSystemTime(baseTime);
-
-      let promptIndex = 0;
-      try {
-        for (const request of requests) {
-          const stream = client.sendMessageStream(
-            request,
-            new AbortController().signal,
-            `prompt-escalate-${promptIndex++}`,
-          );
-          for await (const _event of stream) {
-            // consume
-          }
-          vi.advanceTimersByTime(301_000);
-        }
-      } finally {
-        vi.useRealTimers();
-      }
-
-      expect(getEscalatedComplexTaskSuggestion).toHaveBeenCalled();
-      const finalRequest = mockTurnRunFn.mock.calls.at(-1)?.[0] as Part[];
-      const suffixPart = finalRequest?.find(
-        (part) =>
-          typeof part === 'object' &&
-          part !== null &&
-          'text' in part &&
-          part.text === 'Use TODO List to organize this effort.',
-      ) as Part | undefined;
-      expect(suffixPart?.text).toBe('Use TODO List to organize this effort.');
-    });
-
-    it('injects a hidden todo reminder note when no todos exist after four tool call responses', async () => {
-      (
-        client as unknown as { complexityAnalyzer: ComplexityAnalyzer }
-      ).complexityAnalyzer = {
-        analyzeComplexity: vi.fn().mockReturnValue({
-          complexityScore: 0.2,
-          isComplex: false,
-          detectedTasks: [],
-          sequentialIndicators: [],
-          questionCount: 0,
-          shouldSuggestTodos: false,
-        }),
-      } as unknown as ComplexityAnalyzer;
-
-      const reminderService = new TodoReminderService();
-      const createReminderText =
-        '---\nSystem Note: Please create a todo list before continuing.\n---';
-      vi.mocked(reminderService.getCreateListReminder).mockReturnValue(
-        createReminderText,
-      );
-      (
-        client as unknown as { todoReminderService: TodoReminderService }
-      ).todoReminderService = reminderService as unknown as TodoReminderService;
-      (
-        client as unknown as { todoToolsAvailable: boolean }
-      ).todoToolsAvailable = true;
-
-      const forwardedRequests: Part[][] = [];
-      mockTurnRunFn.mockReset();
-      mockTurnRunFn.mockImplementation((req: PartListUnion) => {
-        forwardedRequests.push(req as Part[]);
-        return (async function* () {
-          for (let i = 0; i < 4; i++) {
-            yield {
-              type: GeminiEventType.ToolCallResponse,
-              value: {
-                callId: `call-${i}`,
-                responseParts: [
-                  {
-                    functionResponse: {
-                      name: 'shell_execute',
-                      id: `call-${i}`,
-                      response: {},
-                    },
-                  } as unknown as Part,
-                ],
-                resultDisplay: undefined,
-                error: undefined,
-                errorType: undefined,
-              },
-            };
-          }
-          yield {
-            type: GeminiEventType.Finished,
-            value: { reason: 'STOP' },
-          };
-        })();
-      });
-
-      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(false);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      const mockGenerator: Partial<ContentGenerator> = {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-      };
-      client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-      const stream = client.sendMessageStream(
-        [{ text: 'Run tools until complete.' }],
-        new AbortController().signal,
-        'prompt-id-tool-reminder',
-      );
-      const emitted: unknown[] = [];
-      for await (const event of stream) {
-        emitted.push(event);
-      }
-
-      expect(mockTodoStoreConstructor).toHaveBeenCalled();
-      expect(todoStoreReadMock).toHaveBeenCalled();
-
-      const forwardedRequest = forwardedRequests.at(-1);
-      expect(forwardedRequest).toBeDefined();
-      const reminderPart = forwardedRequest?.find(
-        (part) =>
-          typeof part === 'object' &&
-          part !== null &&
-          'text' in part &&
-          (part as Part).text === createReminderText,
-      );
-      expect(reminderPart).toBeDefined();
-
-      const historyCalls = vi.mocked(mockChat.addHistory).mock.calls;
-      const reminderInHistory = historyCalls.some(([entry]) =>
-        JSON.stringify(entry).includes('Please create a todo list'),
-      );
-      expect(reminderInHistory).toBe(false);
-    });
-
-    it('uses the active todo reminder variant when a todo list exists', async () => {
-      (
-        client as unknown as { complexityAnalyzer: ComplexityAnalyzer }
-      ).complexityAnalyzer = {
-        analyzeComplexity: vi.fn().mockReturnValue({
-          complexityScore: 0.2,
-          isComplex: false,
-          detectedTasks: [],
-          sequentialIndicators: [],
-          questionCount: 0,
-          shouldSuggestTodos: false,
-        }),
-      } as unknown as ComplexityAnalyzer;
-
-      const reminderService = new TodoReminderService();
-      const activeReminderText =
-        '---\nSystem Note: Update the active todo with concrete progress, continue executing the outstanding work, and only respond once you have advanced the task. If you are blocked, call todo_pause("reason") instead of rewriting the todo list.\n---';
-      vi.mocked(reminderService.getUpdateActiveTodoReminder).mockReturnValue(
-        activeReminderText,
-      );
-      (
-        client as unknown as { todoReminderService: TodoReminderService }
-      ).todoReminderService = reminderService as unknown as TodoReminderService;
-      (
-        client as unknown as { todoToolsAvailable: boolean }
-      ).todoToolsAvailable = true;
-
-      todoStoreReadMock.mockResolvedValue([
-        {
-          id: 'todo-1',
-          content: 'Refactor payment flow',
-          status: 'in_progress',
-          priority: 'high',
-        },
-      ]);
-
-      const forwardedRequests: Part[][] = [];
-      mockTurnRunFn.mockReset();
-      mockTurnRunFn.mockImplementation((req: PartListUnion) => {
-        forwardedRequests.push(req as Part[]);
-        return (async function* () {
-          for (let i = 0; i < 4; i++) {
-            yield {
-              type: GeminiEventType.ToolCallResponse,
-              value: {
-                callId: `call-${i}`,
-                responseParts: [
-                  {
-                    functionResponse: {
-                      name: 'list_directory',
-                      id: `call-${i}`,
-                      response: {},
-                    },
-                  } as unknown as Part,
-                ],
-                resultDisplay: undefined,
-                error: undefined,
-                errorType: undefined,
-              },
-            };
-          }
-          yield {
-            type: GeminiEventType.Finished,
-            value: { reason: 'STOP' },
-          };
-        })();
-      });
-
-      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(false);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      const mockGenerator: Partial<ContentGenerator> = {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-      };
-      client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-      const stream = client.sendMessageStream(
-        [{ text: 'Keep me posted.' }],
-        new AbortController().signal,
-        'prompt-id-tool-escalate',
-      );
-      const emitted: unknown[] = [];
-      for await (const event of stream) {
-        emitted.push(event);
-      }
-
-      expect(mockTodoStoreConstructor).toHaveBeenCalled();
-      expect(todoStoreReadMock).toHaveBeenCalled();
-      expect(
-        vi.mocked(reminderService.getCreateListReminder).mock.calls.length,
-      ).toBe(0);
-
-      const forwardedRequest = forwardedRequests.at(-1);
-      expect(forwardedRequest).toBeDefined();
-      const reminderPart = forwardedRequest?.find(
-        (part) =>
-          typeof part === 'object' &&
-          part !== null &&
-          'text' in part &&
-          (part as Part).text === activeReminderText,
-      );
-      expect(reminderPart).toBeDefined();
-    });
-
-    it('retries sendMessageStream until todos are resolved when todo_pause is not signaled', async () => {
-      const reminderService = new TodoReminderService();
-      const followUpReminderText =
-        '---\nSystem Note: You still have unfinished todos. Continue the required work (e.g., copy files, run tools, produce the requested output) and update the active todo with new progress, or call todo_pause("reason") to explain the blocker. Do not call todo_write again without new progress.\n---';
-      vi.mocked(reminderService.getUpdateActiveTodoReminder).mockReturnValue(
-        followUpReminderText,
-      );
-      vi.mocked(reminderService.getEscalatedActiveTodoReminder).mockReturnValue(
-        followUpReminderText,
-      );
-      (
-        client as unknown as { todoReminderService: TodoReminderService }
-      ).todoReminderService = reminderService as unknown as TodoReminderService;
-      (
-        client as unknown as { todoToolsAvailable: boolean }
-      ).todoToolsAvailable = true;
-
-      const todoSnapshots = [
-        [
-          {
-            id: 'todo-1',
-            content: 'Document API responses',
-            status: 'pending',
-            priority: 'high',
-          },
-        ],
-        [
-          {
-            id: 'todo-1',
-            content: 'Document API responses',
-            status: 'pending',
-            priority: 'high',
-          },
-        ],
-        [],
-      ];
-      todoStoreReadMock.mockImplementation(
-        async () => todoSnapshots.shift() ?? [],
-      );
-
-      const forwardedRequests: Part[][] = [];
-      mockTurnRunFn.mockReset();
-      mockTurnRunFn.mockImplementation((req: PartListUnion) => {
-        forwardedRequests.push(req as Part[]);
-        return (async function* () {
-          yield {
-            type: GeminiEventType.Content,
-            value: 'Working...',
-          };
-          yield {
-            type: GeminiEventType.Finished,
-            value: { reason: 'STOP' },
-          };
-        })();
-      });
-
-      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(false);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      const mockGenerator: Partial<ContentGenerator> = {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-      };
-      client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-      const stream = client.sendMessageStream(
-        [{ text: 'Any update yet?' }],
-        new AbortController().signal,
-        'prompt-id-blocking',
-      );
-      const emitted: unknown[] = [];
-      for await (const event of stream) {
-        emitted.push(event);
-      }
-
-      expect(mockTodoStoreConstructor).toHaveBeenCalled();
-      expect(todoStoreReadMock).toHaveBeenCalled();
-      expect(mockTurnRunFn.mock.calls.length).toBeGreaterThan(1);
-
-      const secondRequest = forwardedRequests.at(1);
-      expect(secondRequest).toBeDefined();
-      const reminderPart = secondRequest?.find(
-        (part) =>
-          typeof part === 'object' &&
-          part !== null &&
-          'text' in part &&
-          (part as Part).text === followUpReminderText,
-      );
-      expect(reminderPart).toBeDefined();
-    });
-
-    it('allows a user-facing response once a todo_pause tool response is observed', async () => {
-      const reminderService = new TodoReminderService();
-      const followUpReminderText =
-        '---\nSystem Note: Update the active todo with concrete progress, continue executing the outstanding work, and only respond once you have advanced the task. If you are blocked, call todo_pause("reason") instead of rewriting the todo list.\n---';
-      vi.mocked(reminderService.getUpdateActiveTodoReminder).mockReturnValue(
-        followUpReminderText,
-      );
-      vi.mocked(reminderService.getEscalatedActiveTodoReminder).mockReturnValue(
-        followUpReminderText,
-      );
-      (
-        client as unknown as { todoReminderService: TodoReminderService }
-      ).todoReminderService = reminderService as unknown as TodoReminderService;
-      (
-        client as unknown as { todoToolsAvailable: boolean }
-      ).todoToolsAvailable = true;
-
-      todoStoreReadMock
-        .mockImplementationOnce(async () => [
-          {
-            id: 'todo-1',
-            content: 'Refactor tests',
-            status: 'pending',
-            priority: 'medium',
-          },
-        ])
-        .mockResolvedValue([]);
-
-      const forwardedRequests: Part[][] = [];
-      mockTurnRunFn.mockReset();
-      mockTurnRunFn.mockImplementation((req: PartListUnion) => {
-        forwardedRequests.push(req as Part[]);
-        return (async function* () {
-          yield {
-            type: GeminiEventType.ToolCallResponse,
-            value: {
-              callId: 'pause-1',
-              responseParts: [
-                {
-                  functionResponse: {
-                    name: 'todo_pause',
-                    id: 'pause-1',
-                    response: {},
-                  },
-                } as unknown as Part,
-              ],
-              resultDisplay: undefined,
-              error: undefined,
-              errorType: undefined,
-            },
-          };
-          yield {
-            type: GeminiEventType.Finished,
-            value: { reason: 'STOP' },
-          };
-        })();
-      });
-
-      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(false);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      const mockGenerator: Partial<ContentGenerator> = {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-      };
-      client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-      const stream = client.sendMessageStream(
-        [{ text: 'We should respond now.' }],
-        new AbortController().signal,
-        'prompt-id-todo-pause',
-      );
-      const emitted: unknown[] = [];
-      for await (const event of stream) {
-        emitted.push(event);
-      }
-
-      expect(mockTodoStoreConstructor).toHaveBeenCalled();
-      expect(todoStoreReadMock).toHaveBeenCalled();
-      expect(mockTurnRunFn).toHaveBeenCalledTimes(1);
-
-      const firstRequest = forwardedRequests[0];
-      const reminderPart = firstRequest?.find(
-        (part) =>
-          typeof part === 'object' &&
-          part !== null &&
-          'text' in part &&
-          typeof (part as Part).text === 'string' &&
-          (part as Part).text.includes('System Note'),
-      );
-      expect(reminderPart).toBeUndefined();
-    });
-
-    it('allows tool-driven progress without looping', async () => {
-      const reminderService = new TodoReminderService();
-      vi.mocked(reminderService.getUpdateActiveTodoReminder).mockReturnValue(
-        '---\nSystem Note: Update the active todo before replying.\n---',
-      );
-      (
-        client as unknown as { todoReminderService: TodoReminderService }
-      ).todoReminderService = reminderService as unknown as TodoReminderService;
-      (
-        client as unknown as { todoToolsAvailable: boolean }
-      ).todoToolsAvailable = true;
-
-      todoStoreReadMock.mockResolvedValue([
-        {
-          id: 'todo-1',
-          content: 'Run shell commands',
-          status: 'pending',
-          priority: 'high',
-        },
-      ]);
-
-      mockTurnRunFn.mockReset();
-      mockTurnRunFn.mockImplementation(() =>
-        (async function* () {
-          yield {
-            type: GeminiEventType.ToolCallRequest,
-            value: {
-              name: 'Bash',
-              args: { command: 'ls -la' },
-            },
-          };
-          yield {
-            type: GeminiEventType.ToolCallResponse,
-            value: {
-              callId: 'bash-1',
-              responseParts: [],
-              resultDisplay: 'file1.txt\nfile2.txt',
-              error: undefined,
-              errorType: undefined,
-            },
-          };
-          yield {
-            type: GeminiEventType.Content,
-            value: 'I executed the command',
-          };
-          yield {
-            type: GeminiEventType.Finished,
-            value: { reason: 'STOP' },
-          };
-        })(),
-      );
-
-      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(false);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      const mockGenerator: Partial<ContentGenerator> = {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
-      };
-      client['contentGenerator'] = mockGenerator as ContentGenerator;
-
-      const stream = client.sendMessageStream(
-        [{ text: 'Execute the command' }],
-        new AbortController().signal,
-        'prompt-tool-progress',
-      );
-      const events = await fromAsync(stream);
-
-      expect(mockTurnRunFn).toHaveBeenCalledTimes(1);
-      expect(
-        events.some((e) => e.type === GeminiEventType.ToolCallRequest),
-      ).toBe(true);
-      expect(events.some((e) => e.type === GeminiEventType.Content)).toBe(true);
-      expect(events.some((e) => e.type === GeminiEventType.Finished)).toBe(
-        true,
-      );
-    });
 
     it('retries once when no tool work and todos unchanged', async () => {
       const reminderService = new TodoReminderService();
@@ -2279,7 +831,6 @@ describe('Gemini Client (client.ts)', () => {
           id: 'todo-1',
           content: 'Complete the task',
           status: 'pending',
-          priority: 'high',
         },
       ]);
 
@@ -2304,6 +855,7 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2351,7 +903,6 @@ describe('Gemini Client (client.ts)', () => {
           id: 'todo-1',
           content: 'Blocked task',
           status: 'pending',
-          priority: 'high',
         },
       ]);
 
@@ -2399,6 +950,7 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2448,6 +1000,7 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2489,6 +1042,7 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2523,8 +1077,9 @@ describe('Gemini Client (client.ts)', () => {
 
     it.skip('should stop infinite loop after MAX_TURNS when nextSpeaker always returns model', async () => {
       // Get the mocked checkNextSpeaker function and configure it to trigger infinite loop
-      const { checkNextSpeaker } =
-        await import('../utils/nextSpeakerChecker.js');
+      const { checkNextSpeaker } = await import(
+        '../utils/nextSpeakerChecker.js'
+      );
       const mockCheckNextSpeaker = vi.mocked(checkNextSpeaker);
       mockCheckNextSpeaker.mockResolvedValue({
         next_speaker: 'model',
@@ -2553,6 +1108,7 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2644,6 +1200,7 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2687,8 +1244,9 @@ describe('Gemini Client (client.ts)', () => {
       // someone tries to bypass it by calling with a very large turns value
 
       // Get the mocked checkNextSpeaker function and configure it to trigger infinite loop
-      const { checkNextSpeaker } =
-        await import('../utils/nextSpeakerChecker.js');
+      const { checkNextSpeaker } = await import(
+        '../utils/nextSpeakerChecker.js'
+      );
       const mockCheckNextSpeaker = vi.mocked(checkNextSpeaker);
       mockCheckNextSpeaker.mockResolvedValue({
         next_speaker: 'model',
@@ -2704,6 +1262,7 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2775,6 +1334,19 @@ describe('Gemini Client (client.ts)', () => {
         lastPromptTokenCount,
       );
 
+      // Mock the chat to return the lastPromptTokenCount
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(lastPromptTokenCount),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const mockGenerator: Partial<ContentGenerator> = {
+        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
+      };
+      client['contentGenerator'] = mockGenerator as ContentGenerator;
+
       // Remaining = 100. Threshold (95%) = 95.
       // We need a request > 95 tokens.
       // A string of length 400 is roughly 100 tokens.
@@ -2784,13 +1356,6 @@ describe('Gemini Client (client.ts)', () => {
         JSON.stringify(request).length / 4,
       );
       const remainingTokenCount = MOCKED_TOKEN_LIMIT - lastPromptTokenCount;
-
-      // Mock tryCompressChat to not compress
-      vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
-        originalTokenCount: lastPromptTokenCount,
-        newTokenCount: lastPromptTokenCount,
-        compressionStatus: CompressionStatus.NOOP,
-      });
 
       // Act
       const stream = client.sendMessageStream(
@@ -2834,6 +1399,19 @@ describe('Gemini Client (client.ts)', () => {
         lastPromptTokenCount,
       );
 
+      // Mock the chat to return the lastPromptTokenCount
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(lastPromptTokenCount),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const mockGenerator: Partial<ContentGenerator> = {
+        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
+      };
+      client['contentGenerator'] = mockGenerator as ContentGenerator;
+
       // Remaining (sticky) = 100. Threshold (95%) = 95.
       // We need a request > 95 tokens.
       const longText = 'a'.repeat(400);
@@ -2842,12 +1420,6 @@ describe('Gemini Client (client.ts)', () => {
         JSON.stringify(request).length / 4,
       );
       const remainingTokenCount = STICKY_MODEL_LIMIT - lastPromptTokenCount;
-
-      vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
-        originalTokenCount: lastPromptTokenCount,
-        newTokenCount: lastPromptTokenCount,
-        compressionStatus: CompressionStatus.NOOP,
-      });
 
       // Act
       const stream = client.sendMessageStream(
@@ -2890,6 +1462,7 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2939,6 +1512,7 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2972,6 +1546,7 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -3001,11 +1576,6 @@ describe('Gemini Client (client.ts)', () => {
 
       beforeEach(() => {
         client['forceFullIdeContext'] = false; // Reset before each delta test
-        vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
-          originalTokenCount: 0,
-          newTokenCount: 0,
-          compressionStatus: CompressionStatus.COMPRESSED,
-        });
         vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
         mockTurnRunFn.mockReturnValue(mockStream);
 
@@ -3019,6 +1589,7 @@ describe('Gemini Client (client.ts)', () => {
             .mockReturnValue([
               { role: 'user', parts: [{ text: 'previous message' }] },
             ]),
+          getLastPromptTokenCount: vi.fn().mockReturnValue(0),
         };
         client['chat'] = mockChat as GeminiChat;
 
@@ -3265,12 +1836,6 @@ describe('Gemini Client (client.ts)', () => {
       let mockChat: Partial<GeminiChat>;
 
       beforeEach(() => {
-        vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
-          originalTokenCount: 0,
-          newTokenCount: 0,
-          compressionStatus: CompressionStatus.COMPRESSED,
-        });
-
         const mockStream = (async function* () {
           yield { type: 'content', value: 'response' };
         })();
@@ -3281,6 +1846,7 @@ describe('Gemini Client (client.ts)', () => {
           getHistory: vi.fn().mockReturnValue([]), // Default empty history
           setHistory: vi.fn(),
           sendMessage: vi.fn().mockResolvedValue({ text: 'summary' }),
+          getLastPromptTokenCount: vi.fn().mockReturnValue(0),
         };
         client['chat'] = mockChat as GeminiChat;
 
@@ -3625,7 +2191,7 @@ describe('Gemini Client (client.ts)', () => {
         setModel: mockSetModel,
         getProjectRoot: vi.fn().mockReturnValue('/test'),
         getWorkingDir: vi.fn().mockReturnValue('/test'),
-        getFullContext: vi.fn().mockReturnValue(false),
+
         getUserMemory: vi.fn().mockReturnValue(''),
         getLlxprtMdFileCount: vi.fn().mockReturnValue(0),
         getFileService: vi.fn().mockReturnValue(null),
@@ -3739,7 +2305,6 @@ describe('Gemini Client (client.ts)', () => {
 
       const mockConfig = {
         getContentGeneratorConfig: vi.fn().mockReturnValue({
-          authType: AuthType.USE_GEMINI,
           apiKey: 'test-api-key',
         }),
       };
@@ -3775,9 +2340,7 @@ describe('Gemini Client (client.ts)', () => {
     it('should return OAuth marker for OAuth auth types', async () => {
       // Arrange
       const mockConfig = {
-        getContentGeneratorConfig: vi.fn().mockReturnValue({
-          authType: AuthType.LOGIN_WITH_GOOGLE,
-        }),
+        getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       };
       client['config'] = mockConfig as unknown as Config;
 

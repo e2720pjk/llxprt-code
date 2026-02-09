@@ -19,7 +19,11 @@ import {
   type JsonObject,
 } from './extensions/variables.js';
 import { SettingScope, loadSettings } from './settings.js';
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  isWorkspaceTrusted,
+  loadTrustedFolders,
+  TrustLevel,
+} from './trustedFolders.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import { downloadFromGitHubRelease } from './extensions/github.js';
 import type { LoadExtensionContext } from './extensions/variableSchema.js';
@@ -32,6 +36,7 @@ export { ExtensionEnablementManager } from './extensions/extensionEnablement.js'
 export const EXTENSIONS_DIRECTORY_NAME = '.llxprt/extensions';
 
 export const EXTENSIONS_CONFIG_FILENAME = 'llxprt-extension.json';
+export const EXTENSIONS_CONFIG_FILENAME_FALLBACK = 'gemini-extension.json';
 export const INSTALL_METADATA_FILENAME = '.llxprt-extension-install.json';
 
 /**
@@ -206,19 +211,35 @@ export function loadExtension(
   }
 
   const installMetadata = loadInstallMetadata(extensionDir);
+  const settings = loadSettings(workspaceDir).merged;
+  if (
+    (installMetadata?.type === 'git' ||
+      installMetadata?.type === 'github-release') &&
+    settings.security?.blockGitExtensions
+  ) {
+    return null;
+  }
+
   let effectiveExtensionPath = extensionDir;
 
   if (installMetadata?.type === 'link') {
     effectiveExtensionPath = installMetadata.source;
   }
 
-  const configFilePath = path.join(
+  // Try llxprt-extension.json first, then fall back to gemini-extension.json
+  let configFilePath = path.join(
     effectiveExtensionPath,
     EXTENSIONS_CONFIG_FILENAME,
   );
   if (!fs.existsSync(configFilePath)) {
+    configFilePath = path.join(
+      effectiveExtensionPath,
+      EXTENSIONS_CONFIG_FILENAME_FALLBACK,
+    );
+  }
+  if (!fs.existsSync(configFilePath)) {
     console.error(
-      `Warning: extension directory ${effectiveExtensionPath} does not contain a config file ${configFilePath}.`,
+      `Warning: extension directory ${effectiveExtensionPath} does not contain a config file (${EXTENSIONS_CONFIG_FILENAME} or ${EXTENSIONS_CONFIG_FILENAME_FALLBACK}).`,
     );
     return null;
   }
@@ -226,7 +247,7 @@ export function loadExtension(
   try {
     const configContent = fs.readFileSync(configFilePath, 'utf-8');
     let config = recursivelyHydrateStrings(JSON.parse(configContent), {
-      extensionPath: extensionDir,
+      extensionPath: effectiveExtensionPath,
       workspacePath: workspaceDir,
       '/': path.sep,
       pathSeparator: path.sep,
@@ -456,10 +477,28 @@ export async function installOrUpdateExtension(
 ): Promise<string> {
   const isUpdate = !!previousExtensionConfig;
   const settings = loadSettings(cwd).merged;
-  if (isWorkspaceTrusted(settings) === false) {
+  if (
+    (installMetadata.type === 'git' ||
+      installMetadata.type === 'github-release') &&
+    settings.security?.blockGitExtensions
+  ) {
     throw new Error(
-      `Could not install extension from untrusted folder at ${installMetadata.source}`,
+      'Installing extensions from remote sources is disallowed by your current settings.',
     );
+  }
+  if (isWorkspaceTrusted(settings) === false) {
+    if (
+      await requestConsent(
+        `The current workspace at "${cwd}" is not trusted. Do you want to trust this workspace to install extensions?`,
+      )
+    ) {
+      const trustedFolders = loadTrustedFolders();
+      trustedFolders.setValue(cwd, TrustLevel.TRUST_FOLDER);
+    } else {
+      throw new Error(
+        `Could not install extension because the current workspace at ${cwd} is not trusted.`,
+      );
+    }
   }
 
   const extensionsDir = ExtensionStorage.getUserExtensionsDir();
@@ -506,7 +545,7 @@ export async function installOrUpdateExtension(
     });
     if (!newExtensionConfig) {
       throw new Error(
-        `Invalid extension at ${installMetadata.source}. Please make sure it has a valid llxprt-extension.json file.`,
+        `Invalid extension at ${installMetadata.source}. Please make sure it has a valid ${EXTENSIONS_CONFIG_FILENAME} or ${EXTENSIONS_CONFIG_FILENAME_FALLBACK} file.`,
       );
     }
 
@@ -648,7 +687,14 @@ export async function loadExtensionConfig(
   context: LoadExtensionContext,
 ): Promise<ExtensionConfig | null> {
   const { extensionDir, workspaceDir } = context;
-  const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
+  // Try llxprt-extension.json first, then fall back to gemini-extension.json
+  let configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
+  if (!fs.existsSync(configFilePath)) {
+    configFilePath = path.join(
+      extensionDir,
+      EXTENSIONS_CONFIG_FILENAME_FALLBACK,
+    );
+  }
   if (!fs.existsSync(configFilePath)) {
     return null;
   }
@@ -692,13 +738,13 @@ export async function uninstallExtension(
   _cwd: string = process.cwd(),
 ): Promise<void> {
   const installedExtensions = loadUserExtensions();
-  const extensionName = installedExtensions.find(
+  const extension = installedExtensions.find(
     (installed) =>
       installed.name.toLowerCase() === extensionIdentifier.toLowerCase() ||
       installed.installMetadata?.source.toLowerCase() ===
         extensionIdentifier.toLowerCase(),
-  )?.name;
-  if (!extensionName) {
+  );
+  if (!extension) {
     throw new Error(
       `Extension "${extensionIdentifier}" not found. Run llxprt extensions list to see available extensions.`,
     );
@@ -707,12 +753,16 @@ export async function uninstallExtension(
   if (!isUpdate) {
     const manager = new ExtensionEnablementManager(
       ExtensionStorage.getUserExtensionsDir(),
-      [extensionName],
+      [extension.name],
     );
-    manager.remove(extensionName);
+    manager.remove(extension.name);
   }
 
-  const storage = new ExtensionStorage(extensionName);
+  const storage = new ExtensionStorage(
+    extension.installMetadata?.type === 'link'
+      ? extension.name
+      : path.basename(extension.path),
+  );
   return await fs.promises.rm(storage.getExtensionDir(), {
     recursive: true,
     force: true,

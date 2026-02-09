@@ -14,7 +14,7 @@ import {
   type MockedFunction,
 } from 'vitest';
 import React, { act } from 'react';
-import { renderHook } from '@testing-library/react';
+import { renderHook } from '../../test-utils/render.js';
 import { useEditorSettings } from './useEditorSettings.js';
 import { LoadedSettings, SettingScope } from '../../config/settings.js';
 import { MessageType, type HistoryItem } from '../types.js';
@@ -25,6 +25,8 @@ import {
 } from '@vybestack/llxprt-code-core';
 import { AppDispatchProvider } from '../contexts/AppDispatchContext.js';
 import { type AppState, type AppAction } from '../reducers/appReducer.js';
+
+import { SettingPaths } from '../../config/settingPaths.js';
 
 vi.mock('@vybestack/llxprt-code-core', async () => {
   const actual = await vi.importActual('@vybestack/llxprt-code-core');
@@ -58,10 +60,13 @@ describe('useEditorSettings', () => {
         theme: false,
         auth: false,
         editor: false,
-        providerModel: false,
         provider: false,
         privacy: false,
         loadProfile: false,
+        createProfile: false,
+        profileList: false,
+        profileDetail: false,
+        profileEditor: false,
         tools: false,
         oauthCode: false,
       },
@@ -166,7 +171,7 @@ describe('useEditorSettings', () => {
 
     expect(mockLoadedSettings.setValue).toHaveBeenCalledWith(
       scope,
-      'preferredEditor',
+      SettingPaths.General.PreferredEditor,
       editorType,
     );
 
@@ -208,7 +213,7 @@ describe('useEditorSettings', () => {
 
     expect(mockLoadedSettings.setValue).toHaveBeenCalledWith(
       scope,
-      'preferredEditor',
+      SettingPaths.General.PreferredEditor,
       undefined,
     );
 
@@ -252,7 +257,7 @@ describe('useEditorSettings', () => {
 
       expect(mockLoadedSettings.setValue).toHaveBeenCalledWith(
         scope,
-        'preferredEditor',
+        SettingPaths.General.PreferredEditor,
         editorType,
       );
 
@@ -288,7 +293,7 @@ describe('useEditorSettings', () => {
 
       expect(mockLoadedSettings.setValue).toHaveBeenCalledWith(
         scope,
-        'preferredEditor',
+        SettingPaths.General.PreferredEditor,
         editorType,
       );
 

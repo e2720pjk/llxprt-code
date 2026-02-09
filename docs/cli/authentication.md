@@ -19,7 +19,6 @@ LLxprt Code supports multiple authentication methods for various AI providers. F
       ```bash
       export GOOGLE_CLOUD_PROJECT="YOUR_PROJECT_ID"
       ```
-
       - For repeated use, you can add the environment variable to your [.env file](#persisting-environment-variables-with-env-files) or your shell's configuration file (like `~/.bashrc`, `~/.zshrc`, or `~/.profile`). For example, the following command adds the environment variable to a `~/.bashrc` file:
 
       ```bash
@@ -175,7 +174,12 @@ If none of these environment variables are set in a non-interactive session, the
 
 ## Multi-Provider Authentication
 
-LLxprt Code supports authentication with multiple AI providers beyond Google. Use the `/auth` command to manage OAuth authentication for providers that support it.
+LLxprt Code supports authentication with multiple AI providers beyond Google. Use the `/auth` command to manage OAuth authentication for providers that support it:
+
+- **Anthropic** - OAuth for Claude models
+- **Gemini** - OAuth for Google AI
+- **Codex** - OAuth for ChatGPT Plus/Pro subscribers (use `/auth codex` for OAuth; access GPT-5 without API keys)
+- **Qwen** - OAuth for Alibaba Cloud models
 
 ### The `/auth` Command
 
@@ -183,7 +187,7 @@ LLxprt Code supports authentication with multiple AI providers beyond Google. Us
 /auth <provider> <action> [bucket-name]
 ```
 
-**Providers:** `anthropic`, `gemini`, `qwen`, and others
+**Providers:** `anthropic`, `gemini`, `codex` (OpenAI), `qwen`, and others
 
 **Actions:**
 
@@ -205,6 +209,9 @@ OAuth buckets let you manage multiple authentication contexts per provider. This
 # Named buckets
 /auth anthropic login work@company.com
 /auth anthropic login personal@gmail.com
+
+# OpenAI OAuth for ChatGPT Plus/Pro subscribers
+/auth codex login
 ```
 
 **Viewing buckets:**

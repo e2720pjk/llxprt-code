@@ -58,6 +58,7 @@ import {
 } from '../utils/toolOutputLimiter.js';
 import { DebugLogger } from '../debug/index.js';
 import { buildToolGovernance, isToolBlocked } from './toolGovernance.js';
+import type { AnsiOutput } from '../utils/terminalSerializer.js';
 
 const toolSchedulerLogger = new DebugLogger('llxprt:core:tool-scheduler');
 
@@ -103,9 +104,10 @@ export type ExecutingToolCall = {
   request: ToolCallRequestInfo;
   tool: AnyDeclarativeTool;
   invocation: AnyToolInvocation;
-  liveOutput?: string;
+  liveOutput?: string | AnsiOutput;
   startTime?: number;
   outcome?: ToolConfirmationOutcome;
+  pid?: number;
 };
 
 export type CancelledToolCall = {
@@ -156,7 +158,7 @@ export type ConfirmHandler = (
 
 export type OutputUpdateHandler = (
   toolCallId: string,
-  outputChunk: string,
+  outputChunk: string | AnsiOutput,
 ) => void;
 
 export type AllToolCallsCompleteHandler = (
@@ -373,7 +375,7 @@ const createErrorResponse = (
   agentId: request.agentId ?? DEFAULT_AGENT_ID,
 });
 
-interface CoreToolSchedulerOptions {
+export interface CoreToolSchedulerOptions {
   config: Config;
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
@@ -385,17 +387,19 @@ interface CoreToolSchedulerOptions {
 }
 
 export class CoreToolScheduler {
+  private readonly logger = DebugLogger.getLogger('llxprt:scheduler');
   private toolRegistry: ToolRegistry;
   private toolCalls: ToolCall[] = [];
   private outputUpdateHandler?: OutputUpdateHandler;
   private onAllToolCallsComplete?: AllToolCallsCompleteHandler;
   private onToolCallsUpdate?: ToolCallsUpdateHandler;
-  private getPreferredEditor: () => EditorType | undefined;
+  private getPreferredEditor: () => EditorType | undefined = () => undefined;
   private config: Config;
-  private onEditorClose: () => void;
+  private onEditorClose: () => void = () => undefined;
   private onEditorOpen?: () => void;
   private isFinalizingToolCalls = false;
   private isScheduling = false;
+  private toolContextInteractiveMode: boolean;
   private requestQueue: QueuedRequest[] = [];
   private messageBusUnsubscribe?: () => void;
   private pendingConfirmations: Map<string, string> = new Map();
@@ -408,20 +412,21 @@ export class CoreToolScheduler {
       toolName: string;
       scheduledCall: ScheduledToolCall;
       executionIndex: number;
+      isCancelled?: boolean; // If true, skip publishing (already transitioned to cancelled)
     }
   > = new Map();
   private nextPublishIndex = 0;
-  private readonly toolContextInteractiveMode: boolean;
+  // Track the abort signal for each tool call so we can use it when handling
+  // confirmation responses from the message bus
+  private callIdToSignal: Map<string, AbortSignal> = new Map();
+  private processedConfirmations: Set<string> = new Set();
+  // Track all callIds seen at the scheduler boundary to prevent duplicate execution
+  private seenCallIds: Set<string> = new Set();
 
   constructor(options: CoreToolSchedulerOptions) {
     this.config = options.config;
     this.toolRegistry = options.config.getToolRegistry();
-    this.outputUpdateHandler = options.outputUpdateHandler;
-    this.onAllToolCallsComplete = options.onAllToolCallsComplete;
-    this.onToolCallsUpdate = options.onToolCallsUpdate;
-    this.getPreferredEditor = options.getPreferredEditor;
-    this.onEditorClose = options.onEditorClose;
-    this.onEditorOpen = options.onEditorOpen;
+    this.setCallbacks(options);
     this.toolContextInteractiveMode =
       options.toolContextInteractiveMode ?? true;
 
@@ -430,6 +435,15 @@ export class CoreToolScheduler {
       MessageBusType.TOOL_CONFIRMATION_RESPONSE,
       this.handleMessageBusResponse.bind(this),
     );
+  }
+
+  setCallbacks(options: CoreToolSchedulerOptions): void {
+    this.outputUpdateHandler = options.outputUpdateHandler;
+    this.onAllToolCallsComplete = options.onAllToolCallsComplete;
+    this.onToolCallsUpdate = options.onToolCallsUpdate;
+    this.getPreferredEditor = options.getPreferredEditor;
+    this.onEditorClose = options.onEditorClose;
+    this.onEditorOpen = options.onEditorOpen;
   }
 
   /**
@@ -457,7 +471,7 @@ export class CoreToolScheduler {
             `Received TOOL_CONFIRMATION_RESPONSE for unknown correlationId=${response.correlationId}`,
         );
       }
-      return; // Not our confirmation request
+      return;
     }
 
     const waitingToolCall = this.toolCalls.find(
@@ -473,6 +487,7 @@ export class CoreToolScheduler {
         );
       }
       this.pendingConfirmations.delete(response.correlationId);
+
       return;
     }
 
@@ -491,12 +506,25 @@ export class CoreToolScheduler {
           : ToolConfirmationOutcome.Cancel
         : ToolConfirmationOutcome.Cancel);
 
-    const abortController = new AbortController();
+    // Use the original signal stored for this call. If it's missing, the call
+    // has already completed/cancelled and we should ignore this response.
+    const originalSignal = this.callIdToSignal.get(callId);
+    if (!originalSignal) {
+      if (toolSchedulerLogger.enabled) {
+        toolSchedulerLogger.debug(
+          () =>
+            `Skipping TOOL_CONFIRMATION_RESPONSE for callId=${callId} because signal is missing (call already finalized).`,
+        );
+      }
+      this.pendingConfirmations.delete(response.correlationId);
+      return;
+    }
+    const signal = originalSignal;
     void this.handleConfirmationResponse(
       callId,
       waitingToolCall.confirmationDetails.onConfirm,
       derivedOutcome,
-      abortController.signal,
+      signal,
       response.payload,
       true,
     );
@@ -512,6 +540,8 @@ export class CoreToolScheduler {
       this.messageBusUnsubscribe = undefined;
     }
     this.pendingConfirmations.clear();
+    this.processedConfirmations.clear();
+    this.seenCallIds.clear();
 
     // Clean up any pending stale correlation ID timeouts
     for (const timeout of this.staleCorrelationIds.values()) {
@@ -753,6 +783,19 @@ export class CoreToolScheduler {
     });
   }
 
+  private setPidInternal(targetCallId: string, pid: number): void {
+    this.toolCalls = this.toolCalls.map((call) => {
+      if (call.request.callId !== targetCallId || call.status !== 'executing') {
+        return call;
+      }
+      return {
+        ...call,
+        pid,
+      } as ExecutingToolCall;
+    });
+    this.notifyToolCallsUpdate();
+  }
+
   private isRunning(): boolean {
     return (
       this.isFinalizingToolCalls ||
@@ -859,9 +902,24 @@ export class CoreToolScheduler {
         }
         return req;
       });
+
+      // Filter out duplicate calls at the scheduler boundary to prevent duplicate execution
+      const freshRequests = requestsToProcess.filter(
+        (r) => !this.seenCallIds.has(r.callId),
+      );
+      for (const req of freshRequests) {
+        this.seenCallIds.add(req.callId);
+      }
+      if (freshRequests.length === 0) {
+        // All calls were duplicates, nothing to do
+        return;
+      }
+
+      // Use only fresh requests for all subsequent processing
+      const requestsToProcessActual = freshRequests;
       const governance = buildToolGovernance(this.config);
 
-      const newToolCalls: ToolCall[] = requestsToProcess.map(
+      const newToolCalls: ToolCall[] = requestsToProcessActual.map(
         (reqInfo): ToolCall => {
           if (isToolBlocked(reqInfo.name, governance)) {
             const errorMessage = `Tool "${reqInfo.name}" is disabled in the current profile.`;
@@ -940,6 +998,8 @@ export class CoreToolScheduler {
         }
 
         const { request: reqInfo, invocation } = toolCall;
+        // Store the signal for this call so we can use it later in message bus responses
+        this.callIdToSignal.set(reqInfo.callId, signal);
 
         try {
           if (signal.aborted) {
@@ -1072,6 +1132,16 @@ export class CoreToolScheduler {
     payload?: ToolConfirmationPayload,
     skipBusPublish = false,
   ): Promise<void> {
+    if (this.processedConfirmations.has(callId)) {
+      if (toolSchedulerLogger.enabled) {
+        toolSchedulerLogger.debug(
+          () => `Skipping duplicate confirmation for callId=${callId}`,
+        );
+      }
+      return;
+    }
+    this.processedConfirmations.add(callId);
+
     const toolCall = this.toolCalls.find(
       (c) => c.request.callId === callId && c.status === 'awaiting_approval',
     );
@@ -1113,6 +1183,15 @@ export class CoreToolScheduler {
           isModifying: true,
         } as ToolCallConfirmationDetails);
 
+        const contentOverrides =
+          waitingToolCall.confirmationDetails.type === 'edit'
+            ? {
+                currentContent:
+                  waitingToolCall.confirmationDetails.originalContent,
+                proposedContent: waitingToolCall.confirmationDetails.newContent,
+              }
+            : undefined;
+
         const { updatedParams, updatedDiff } = await modifyWithEditor<
           typeof waitingToolCall.request.args
         >(
@@ -1122,6 +1201,7 @@ export class CoreToolScheduler {
           signal,
           this.onEditorClose,
           this.onEditorOpen,
+          contentOverrides,
         );
         this.setArgsInternal(callId, updatedParams);
         const newCorrelationId = randomUUID();
@@ -1132,6 +1212,9 @@ export class CoreToolScheduler {
           correlationId: newCorrelationId,
         } as ToolCallConfirmationDetails;
         this.pendingConfirmations.set(newCorrelationId, callId);
+        // Remove from processedConfirmations so the tool can be confirmed again
+        // after editor modification
+        this.processedConfirmations.delete(callId);
         const context = this.getPolicyContextFromInvocation(
           waitingToolCall.invocation,
           waitingToolCall.request,
@@ -1352,37 +1435,167 @@ export class CoreToolScheduler {
     });
   }
 
+  /**
+   * Buffer a cancelled placeholder so ordered publishing can skip past this
+   * index without waiting forever. The tool is already transitioned to
+   * 'cancelled' status before this is called.
+   */
+  private bufferCancelled(
+    callId: string,
+    scheduledCall: ScheduledToolCall,
+    executionIndex: number,
+  ): void {
+    const cancelledResult: ToolResult = {
+      error: {
+        message: 'Tool call cancelled by user.',
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+      llmContent: 'Tool call cancelled by user.',
+      returnDisplay: 'Cancelled',
+    };
+    this.pendingResults.set(callId, {
+      result: cancelledResult,
+      callId,
+      toolName: scheduledCall.request.name,
+      scheduledCall,
+      executionIndex,
+      isCancelled: true, // Mark so publishBufferedResults can skip publishing
+    });
+  }
+
+  // Reentrancy guard for publishBufferedResults to prevent race conditions
+  // when multiple async tool completions trigger publishing simultaneously
+  private isPublishingBufferedResults = false;
+  // Flag to track if another publish was requested while we were publishing
+  private pendingPublishRequest = false;
+  // Total number of tools in the current batch (set when execution starts)
+  private currentBatchSize = 0;
+
   private async publishBufferedResults(signal: AbortSignal): Promise<void> {
-    const callsInOrder = this.toolCalls.filter(
-      (call) => call.status === 'scheduled' || call.status === 'executing',
-    );
-
-    // Publish results in original request order
-    while (this.nextPublishIndex < callsInOrder.length) {
-      const expectedCall = callsInOrder[this.nextPublishIndex];
-      const buffered = this.pendingResults.get(expectedCall.request.callId);
-
-      if (!buffered) {
-        // Next result not ready yet, stop publishing
-        break;
-      }
-
-      // Publish this result
-      await this.publishResult(buffered, signal);
-
-      // Remove from buffer
-      this.pendingResults.delete(buffered.callId);
-      this.nextPublishIndex++;
+    // If already publishing, mark that we need another pass after current one completes
+    if (this.isPublishingBufferedResults) {
+      this.pendingPublishRequest = true;
+      return;
     }
+    this.isPublishingBufferedResults = true;
+    this.pendingPublishRequest = false;
 
-    // Check if all tools completed
-    if (
-      this.nextPublishIndex === callsInOrder.length &&
-      callsInOrder.length > 0
-    ) {
-      // Reset for next batch
-      this.nextPublishIndex = 0;
-      this.pendingResults.clear();
+    try {
+      // Loop to handle cases where new results arrive while we're publishing
+      do {
+        this.pendingPublishRequest = false;
+
+        // Issue #987 fix: Handle the race condition where tools complete before
+        // currentBatchSize is set. If we have pending results but currentBatchSize
+        // is 0, recalculate the batch size from the pending results to prevent
+        // an infinite setImmediate loop.
+        if (this.currentBatchSize === 0 && this.pendingResults.size > 0) {
+          // Find the maximum executionIndex to determine batch size
+          let maxIndex = -1;
+          for (const buffered of this.pendingResults.values()) {
+            if (buffered.executionIndex > maxIndex) {
+              maxIndex = buffered.executionIndex;
+            }
+          }
+          // Batch size is maxIndex + 1 (since indices are 0-based)
+          // Sanity check: batch size should not exceed the number of pending results
+          // in case of sparse indices (though this shouldn't happen in practice)
+          const recoveredBatchSize = Math.min(
+            maxIndex + 1,
+            this.pendingResults.size,
+          );
+          this.currentBatchSize =
+            recoveredBatchSize > 0 ? recoveredBatchSize : 1;
+          if (toolSchedulerLogger.enabled) {
+            toolSchedulerLogger.debug(
+              () =>
+                `Recovered batch size from pending results: currentBatchSize=${this.currentBatchSize}, pendingResults.size=${this.pendingResults.size}, maxIndex=${maxIndex}`,
+            );
+          }
+        }
+
+        // Publish results in execution order using the stored executionIndex.
+        // We iterate while there are buffered results that match the next expected index.
+        // This approach doesn't rely on filtering toolCalls by status, which changes
+        // as we publish results (status goes from 'executing' to 'success').
+        while (this.nextPublishIndex < this.currentBatchSize) {
+          // Find the buffered result with the next expected executionIndex
+          let nextBuffered:
+            | {
+                result: ToolResult;
+                callId: string;
+                toolName: string;
+                scheduledCall: ScheduledToolCall;
+                executionIndex: number;
+                isCancelled?: boolean;
+              }
+            | undefined;
+
+          for (const buffered of this.pendingResults.values()) {
+            if (buffered.executionIndex === this.nextPublishIndex) {
+              nextBuffered = buffered;
+              break;
+            }
+          }
+
+          if (!nextBuffered) {
+            // The result for the next index isn't ready yet, stop publishing
+            break;
+          }
+
+          // Skip publishing for cancelled tools - they're already in terminal state
+          // Just remove from buffer and advance the index
+          if (!nextBuffered.isCancelled) {
+            // Publish this result
+            await this.publishResult(nextBuffered, signal);
+          }
+
+          // Remove from buffer
+          this.pendingResults.delete(nextBuffered.callId);
+          this.nextPublishIndex++;
+        }
+
+        // Check if all tools in this batch completed
+        if (
+          this.nextPublishIndex === this.currentBatchSize &&
+          this.currentBatchSize > 0
+        ) {
+          // Reset for next batch
+          this.nextPublishIndex = 0;
+          this.currentBatchSize = 0;
+          this.pendingResults.clear();
+        }
+      } while (this.pendingPublishRequest);
+    } finally {
+      this.isPublishingBufferedResults = false;
+
+      // After releasing the lock, check if there are still pending results
+      // that need publishing. This handles the race condition where:
+      // 1. We break out of the while loop waiting for result N
+      // 2. Result N arrives and calls publishBufferedResults
+      // 3. That call sees isPublishingBufferedResults=true, sets pendingPublishRequest=true, and returns
+      // 4. We then check pendingPublishRequest in the do-while, but it was set AFTER we checked
+      // 5. We exit without publishing the remaining buffered results
+      //
+      // By checking pendingResults.size here after releasing the lock, we ensure
+      // any buffered results get published.
+      if (this.pendingResults.size > 0) {
+        // Use setImmediate to avoid deep recursion and allow the event loop to process
+        // other pending tool completions first
+        // Avoid scheduling when there are no results to publish yet.
+        let hasNextBuffered = false;
+        for (const buffered of this.pendingResults.values()) {
+          if (buffered.executionIndex === this.nextPublishIndex) {
+            hasNextBuffered = true;
+            break;
+          }
+        }
+        if (hasNextBuffered) {
+          setImmediate(() => {
+            void this.publishBufferedResults(signal);
+          });
+        }
+      }
     }
   }
 
@@ -1409,18 +1622,10 @@ export class CoreToolScheduler {
         result.metadata as Record<string, unknown> | undefined,
       );
 
-      const responseParts = [
-        // First, the tool call
-        {
-          functionCall: {
-            id: callId,
-            name: toolName,
-            args: scheduledCall.request.args,
-          },
-        },
-        // Then, spread the response(s)
-        ...response,
-      ] as Part[];
+      // Only include functionResponse parts - the functionCall is already in
+      // history from the original assistant message. Including it again would
+      // create duplicate tool_use blocks for Anthropic. (Issue #1150)
+      const responseParts = [...response] as Part[];
 
       const successResponse: ToolCallResponseInfo = {
         callId,
@@ -1431,6 +1636,10 @@ export class CoreToolScheduler {
         agentId:
           metadataAgentId ?? scheduledCall.request.agentId ?? DEFAULT_AGENT_ID,
       };
+
+      this.logger.debug(
+        `callId=${callId}, toolName=${toolName}, returnDisplay type=${typeof result.returnDisplay}, hasValue=${!!result.returnDisplay}`,
+      );
 
       this.setStatusInternal(callId, 'success', successResponse);
     } else {
@@ -1459,6 +1668,10 @@ export class CoreToolScheduler {
         (call) => call.status === 'scheduled',
       );
 
+      // Store the batch size for ordered publishing - this is set once at the start
+      // and doesn't change as tools complete, ensuring we know when all are done
+      this.currentBatchSize = callsToExecute.length;
+
       // Assign execution indices for ordered publishing
       const executionIndices = new Map<string, number>();
       callsToExecute.forEach((call, index) => {
@@ -1476,23 +1689,32 @@ export class CoreToolScheduler {
 
         this.setStatusInternal(callId, 'executing');
 
-        const liveOutputCallback =
-          scheduledCall.tool.canUpdateOutput && this.outputUpdateHandler
-            ? (outputChunk: string) => {
-                if (this.outputUpdateHandler) {
-                  this.outputUpdateHandler(callId, outputChunk);
-                }
-                this.toolCalls = this.toolCalls.map((tc) =>
-                  tc.request.callId === callId && tc.status === 'executing'
-                    ? { ...tc, liveOutput: outputChunk }
-                    : tc,
-                );
-                this.notifyToolCallsUpdate();
+        const liveOutputCallback = scheduledCall.tool.canUpdateOutput
+          ? (outputChunk: string | AnsiOutput) => {
+              if (this.outputUpdateHandler) {
+                this.outputUpdateHandler(callId, outputChunk);
               }
-            : undefined;
+              this.toolCalls = this.toolCalls.map((tc) =>
+                tc.request.callId === callId && tc.status === 'executing'
+                  ? { ...tc, liveOutput: outputChunk }
+                  : tc,
+              );
+              this.notifyToolCallsUpdate();
+            }
+          : undefined;
+
+        const setPidCallback = (pid: number) => {
+          this.setPidInternal(callId, pid);
+        };
 
         invocation
-          .execute(signal, liveOutputCallback)
+          .execute(
+            signal,
+            liveOutputCallback,
+            undefined,
+            undefined,
+            setPidCallback,
+          )
           .then(async (toolResult: ToolResult) => {
             if (signal.aborted) {
               this.setStatusInternal(
@@ -1500,6 +1722,10 @@ export class CoreToolScheduler {
                 'cancelled',
                 'User cancelled tool execution.',
               );
+              // Buffer a cancelled placeholder so ordered publishing can continue
+              // This prevents later tools from getting stuck waiting for this index
+              this.bufferCancelled(callId, scheduledCall, executionIndex);
+              await this.publishBufferedResults(signal);
               return;
             }
 
@@ -1522,6 +1748,9 @@ export class CoreToolScheduler {
                 'cancelled',
                 'User cancelled tool execution.',
               );
+              // Buffer a cancelled placeholder so ordered publishing can continue
+              this.bufferCancelled(callId, scheduledCall, executionIndex);
+              await this.publishBufferedResults(signal);
             } else {
               this.bufferError(
                 callId,
@@ -1530,6 +1759,39 @@ export class CoreToolScheduler {
                 executionIndex,
               );
               await this.publishBufferedResults(signal);
+            }
+          })
+          // Issue #957: Final catch handler to ensure tool always reaches
+          // terminal state even if publishBufferedResults throws. This prevents
+          // tools from getting stuck in 'executing' state and blocking the
+          // scheduler indefinitely.
+          .catch((publishError: Error) => {
+            if (toolSchedulerLogger.enabled) {
+              toolSchedulerLogger.debug(
+                () =>
+                  `Error during tool result publishing for ${toolName} (${callId}): ${publishError.message}`,
+              );
+            }
+
+            // Check if the tool is still in a non-terminal state
+            const toolCall = this.toolCalls.find(
+              (tc) => tc.request.callId === callId,
+            );
+            if (
+              toolCall &&
+              toolCall.status !== 'success' &&
+              toolCall.status !== 'error' &&
+              toolCall.status !== 'cancelled'
+            ) {
+              // Force transition to error state to unblock the scheduler
+              const errorResponse = createErrorResponse(
+                scheduledCall.request,
+                new Error(
+                  `Failed to publish tool result: ${publishError.message}`,
+                ),
+                ToolErrorType.UNHANDLED_EXCEPTION,
+              );
+              this.setStatusInternal(callId, 'error', errorResponse);
             }
           });
       });
@@ -1548,23 +1810,22 @@ export class CoreToolScheduler {
       const completedCalls = [...this.toolCalls] as CompletedToolCall[];
       this.toolCalls = [];
 
+      // Clean up signal mappings for completed calls
       for (const call of completedCalls) {
+        this.callIdToSignal.delete(call.request.callId);
         logToolCall(this.config, new ToolCallEvent(call));
       }
 
       if (this.onAllToolCallsComplete) {
         this.isFinalizingToolCalls = true;
-        await this.onAllToolCallsComplete(completedCalls);
-        this.isFinalizingToolCalls = false;
+        try {
+          await this.onAllToolCallsComplete(completedCalls);
+        } finally {
+          this.isFinalizingToolCalls = false;
+        }
       }
+
       this.notifyToolCallsUpdate();
-      // After completion, process the next item in the queue.
-      if (this.requestQueue.length > 0) {
-        const next = this.requestQueue.shift()!;
-        this._schedule(next.request, next.signal)
-          .then(next.resolve)
-          .catch(next.reject);
-      }
     }
   }
 
@@ -1630,7 +1891,17 @@ export class CoreToolScheduler {
       }
     }
 
-    // 2. Cancel all active tool calls
+    // 2. Reset batch bookkeeping state to prevent stale state issues
+    // if the scheduler is reused after cancellation
+    this.pendingResults.clear();
+    this.nextPublishIndex = 0;
+    this.currentBatchSize = 0;
+    this.isPublishingBufferedResults = false;
+    this.pendingPublishRequest = false;
+    this.processedConfirmations.clear();
+    this.seenCallIds.clear();
+
+    // 3. Cancel all active tool calls
     this.toolCalls = this.toolCalls.map((call) => {
       if (
         call.status === 'success' ||

@@ -13,7 +13,8 @@ import {
   type MockedFunction,
   type Mock,
 } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook } from '../../test-utils/render.js';
+import { act } from 'react';
 import { useAutoAcceptIndicator } from './useAutoAcceptIndicator.js';
 
 import type { Config as ActualConfigType } from '@vybestack/llxprt-code-core';
@@ -37,6 +38,7 @@ vi.mock('@vybestack/llxprt-code-core', async () => {
 interface MockConfigInstanceShape {
   getApprovalMode: Mock<() => ApprovalMode>;
   setApprovalMode: Mock<(value: ApprovalMode) => void>;
+  isYoloModeDisabled: Mock<() => boolean>;
   isTrustedFolder: Mock<() => boolean>;
   getCoreTools: Mock<() => string[]>;
   getToolDiscoveryCommand: Mock<() => string | undefined>;
@@ -46,7 +48,7 @@ interface MockConfigInstanceShape {
   getSandbox: Mock<() => boolean | string>;
   getDebugMode: Mock<() => boolean>;
   getQuestion: Mock<() => string | undefined>;
-  getFullContext: Mock<() => boolean>;
+
   getUserAgent: Mock<() => string>;
   getUserMemory: Mock<() => string>;
   getLlxprtMdFileCount: Mock<() => number>;
@@ -76,6 +78,7 @@ describe('useAutoAcceptIndicator', () => {
         setApprovalMode: instanceSetApprovalModeMock as Mock<
           (value: ApprovalMode) => void
         >,
+        isYoloModeDisabled: vi.fn().mockReturnValue(false),
         isTrustedFolder: vi.fn().mockReturnValue(true) as Mock<() => boolean>,
         getCoreTools: vi.fn().mockReturnValue([]) as Mock<() => string[]>,
         getToolDiscoveryCommand: vi.fn().mockReturnValue(undefined) as Mock<
@@ -93,7 +96,7 @@ describe('useAutoAcceptIndicator', () => {
         getQuestion: vi.fn().mockReturnValue(undefined) as Mock<
           () => string | undefined
         >,
-        getFullContext: vi.fn().mockReturnValue(false) as Mock<() => boolean>,
+
         getUserAgent: vi.fn().mockReturnValue('test-user-agent') as Mock<
           () => string
         >,

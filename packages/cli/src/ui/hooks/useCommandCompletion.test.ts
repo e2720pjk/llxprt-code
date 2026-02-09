@@ -7,12 +7,12 @@
 /** @vitest-environment jsdom */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { renderHook, act, waitFor } from '@testing-library/react';
+import { act, useEffect, useState, useCallback } from 'react';
+import { renderHook, waitFor } from '../../test-utils/render.js';
 import { useCommandCompletion } from './useCommandCompletion.js';
 import { CommandContext } from '../commands/types.js';
 import { Config } from '@vybestack/llxprt-code-core';
 import { useTextBuffer } from '../components/shared/text-buffer.js';
-import { useEffect, useState, useCallback } from 'react';
 import { Suggestion } from '../components/SuggestionsDisplay.js';
 import { UseAtCompletionProps, useAtCompletion } from './useAtCompletion.js';
 import {
@@ -241,6 +241,7 @@ describe('useCommandCompletion', () => {
             [],
             mockCommandContext,
             false,
+            false,
             mockConfig,
           ),
         );
@@ -265,6 +266,7 @@ describe('useCommandCompletion', () => {
             testRootDir,
             [],
             mockCommandContext,
+            false,
             false,
             mockConfig,
           );
@@ -299,6 +301,7 @@ describe('useCommandCompletion', () => {
             [],
             mockCommandContext,
             false,
+            false,
             mockConfig,
           ),
         );
@@ -327,6 +330,7 @@ describe('useCommandCompletion', () => {
             [],
             mockCommandContext,
             false,
+            false,
             mockConfig,
           ),
         );
@@ -353,6 +357,7 @@ describe('useCommandCompletion', () => {
             [],
             mockCommandContext,
             false,
+            false,
             mockConfig,
           ),
         );
@@ -366,6 +371,60 @@ describe('useCommandCompletion', () => {
           );
         });
       });
+
+      it.each([
+        {
+          shellModeActive: false,
+          expectedSuggestions: 1,
+          expectedShowSuggestions: true,
+          description:
+            'should show slash command suggestions when shellModeActive is false',
+        },
+        {
+          shellModeActive: true,
+          expectedSuggestions: 1,
+          expectedShowSuggestions: true,
+          description:
+            'should show slash command suggestions when shellModeActive is true',
+        },
+      ])(
+        '$description',
+        async ({
+          shellModeActive,
+          expectedSuggestions,
+          expectedShowSuggestions,
+        }) => {
+          setupMocks({
+            slashSuggestions: [{ label: 'clear', value: 'clear' }],
+          });
+
+          const { result } = renderHook(() => {
+            const textBuffer = useTextBufferForTest('/');
+            const completion = useCommandCompletion(
+              textBuffer,
+              testDirs,
+              testRootDir,
+              [],
+              mockCommandContext,
+              false,
+              shellModeActive, // Parameterized shellModeActive
+              mockConfig,
+            );
+            return { ...completion, textBuffer };
+          });
+
+          await waitFor(() => {
+            expect(result.current.suggestions.length).toBe(expectedSuggestions);
+            expect(result.current.showSuggestions).toBe(
+              expectedShowSuggestions,
+            );
+          });
+
+          act(() => {
+            result.current.resetCompletionState();
+          });
+        },
+      );
     });
 
     describe('Navigation', () => {
@@ -392,6 +451,7 @@ describe('useCommandCompletion', () => {
             [],
             mockCommandContext,
             false,
+            false,
             mockConfig,
           ),
         );
@@ -413,6 +473,7 @@ describe('useCommandCompletion', () => {
             [],
             mockCommandContext,
             false,
+            false,
             mockConfig,
           ),
         );
@@ -432,6 +493,7 @@ describe('useCommandCompletion', () => {
             testRootDir,
             [],
             mockCommandContext,
+            false,
             false,
             mockConfig,
           ),
@@ -458,6 +520,7 @@ describe('useCommandCompletion', () => {
             testRootDir,
             [],
             mockCommandContext,
+            false,
             false,
             mockConfig,
           ),
@@ -487,6 +550,7 @@ describe('useCommandCompletion', () => {
             testRootDir,
             [],
             mockCommandContext,
+            false,
             false,
             mockConfig,
           ),
@@ -525,6 +589,7 @@ describe('useCommandCompletion', () => {
             [],
             mockCommandContext,
             false,
+            false,
             mockConfig,
           ),
         );
@@ -553,6 +618,7 @@ describe('useCommandCompletion', () => {
           testRootDir,
           [],
           mockCommandContext,
+          false,
           false,
           mockConfig,
         );
@@ -583,6 +649,7 @@ describe('useCommandCompletion', () => {
           testRootDir,
           [],
           mockCommandContext,
+          false,
           false,
           mockConfig,
         );
@@ -617,6 +684,7 @@ describe('useCommandCompletion', () => {
           [],
           mockCommandContext,
           false,
+          false,
           mockConfig,
         );
         return { ...completion, textBuffer };
@@ -634,6 +702,70 @@ describe('useCommandCompletion', () => {
         '@src/file1.txt is a good file',
       );
     });
+
+    it('should complete a directory path ending with / without a trailing space', async () => {
+      setupMocks({
+        atSuggestions: [{ label: 'src/components/', value: 'src/components/' }],
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('@src/comp');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testDirs,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('@src/components/');
+    });
+
+    it('should complete a directory path ending with \\ without a trailing space', async () => {
+      setupMocks({
+        atSuggestions: [
+          { label: 'src\\components\\', value: 'src\\components\\' },
+        ],
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('@src\\comp');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testDirs,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('@src\\components\\');
+    });
   });
 
   describe('prompt completion filtering', () => {
@@ -650,6 +782,7 @@ describe('useCommandCompletion', () => {
           testRootDir,
           [],
           mockCommandContext,
+          false,
           false,
           mockConfig,
         );
@@ -676,6 +809,7 @@ describe('useCommandCompletion', () => {
           [],
           mockCommandContext,
           false,
+          false,
           mockConfig,
         );
         return { ...completion, textBuffer };
@@ -700,6 +834,7 @@ describe('useCommandCompletion', () => {
           testRootDir,
           [],
           mockCommandContext,
+          false,
           false,
           mockConfig,
         );

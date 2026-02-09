@@ -32,11 +32,14 @@ const baseExcludePatterns = [
   '**/ui/components/*.test.tsx',
   '**/ui/components/__tests__/*.test.tsx',
   '**/ui/components/messages/DiffRenderer.test.tsx',
-  '**/ui/components/messages/OAuthUrlMessage.test.tsx',
+  // GeminiMessage/ToolMessage - behavioral tests excluded due to ink-testing-library/ink-stub
+  // incompatibility in CI (renders empty string). Tests pass locally but fail in CI.
+  // Issue #1034 converted them from snapshot to behavioral tests but CI rendering issue remains.
+  '**/ui/components/messages/GeminiMessage.test.tsx',
+  '**/ui/components/messages/ToolMessage.test.tsx',
   '**/ui/components/messages/ToolConfirmationMessage.responsive.test.tsx',
   '**/ui/components/messages/ToolConfirmationMessage.test.tsx',
   '**/ui/components/messages/ToolGroupMessage.test.tsx',
-  '**/ui/components/messages/ToolMessage.test.tsx',
   // ThinkingBlockDisplay - ink-testing-library doesn't render styled Text in NO_COLOR mode
   '**/ui/components/messages/ThinkingBlockDisplay.test.tsx',
   '**/ui/components/messages/WarningMessage.test.tsx',
@@ -56,7 +59,13 @@ const baseExcludePatterns = [
   // Exclude UI component tests that may directly import React DOM
   '**/ui/components/**/*.test.ts',
   // Temporarily suppress remaining React 19 regressions until the hooks are migrated
-  '**/ui/hooks/**/*.test.ts',
+  // EXCEPT useToolScheduler.test.ts which we're actively working on for issue #1055
+  '**/ui/hooks/useEditorSettings.test.ts',
+  '**/ui/hooks/useReverseSearchCompletion.test.ts',
+  '**/ui/hooks/useGeminiStream.test.ts',
+  '**/ui/hooks/useGeminiStream.integration.test.ts',
+  '**/ui/hooks/useKeypress.test.ts',
+  '**/ui/hooks/usePermissionsModifyTrust.test.ts',
   '**/ui/hooks/**/*.spec.ts',
   // Block the command test that still imports the legacy runtime helpers
   '**/ui/commands/toolformatCommand.test.ts',
@@ -89,6 +98,14 @@ export default defineConfig({
       // ThinkingBlockDisplay test excluded - ink-testing-library doesn't render styled Text in NO_COLOR mode
       // Include useGeminiStream thinking test for Phase P07
       'src/ui/hooks/useGeminiStream.thinking.test.tsx',
+      // Include useGeminiStream dedup test for issue #1040
+      'src/ui/hooks/useGeminiStream.dedup.test.tsx',
+      // Include useToolScheduler test for issue #1055 - Phase 2
+      'src/ui/hooks/useToolScheduler.test.ts',
+      // Include OAuthUrlMessage test (migrated from @testing-library/react)
+      'src/ui/components/messages/OAuthUrlMessage.test.tsx',
+      // Include useSlashCompletion extension filtering tests for fa93b56243 reimplementation
+      'src/ui/hooks/useSlashCompletion.extensions.test.tsx',
     ],
     exclude: baseExcludePatterns,
     environment: 'jsdom',

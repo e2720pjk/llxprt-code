@@ -18,6 +18,7 @@ import {
   getCurrentLlxprtMdFilename,
   ApprovalMode,
   DEFAULT_GEMINI_MODEL,
+  DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
   FileDiscoveryService,
   TelemetryTarget,
@@ -30,13 +31,15 @@ import {
   MCPServerConfig,
   SettingsService,
   DebugLogger,
-  createPolicyEngineConfig,
   SHELL_TOOL_NAMES,
+  isRipgrepAvailable,
+  normalizeShellReplacement,
   type GeminiCLIExtension,
   type Profile,
 } from '@vybestack/llxprt-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { Settings } from './settings.js';
+import { createPolicyEngineConfig } from './policy.js';
 
 import { annotateActiveExtensions } from './extension.js';
 import { getCliVersion } from '../utils/version.js';
@@ -81,6 +84,8 @@ export const READ_ONLY_TOOL_NAMES = [
   'google_web_search',
   'web_fetch',
   'todo_read',
+  'todo_write',
+  'todo_pause',
   'task',
   'self_emitvalue',
 ] as const;
@@ -130,11 +135,13 @@ export interface CliArgs {
   model: string | undefined;
   sandbox: boolean | string | undefined;
   sandboxImage: string | undefined;
+  sandboxEngine: string | undefined;
+  sandboxProfileLoad: string | undefined;
   debug: boolean | undefined;
   prompt: string | undefined;
   promptInteractive: string | undefined;
   outputFormat: string | undefined;
-  allFiles: boolean | undefined;
+
   showMemoryUsage: boolean | undefined;
   yolo: boolean | undefined;
   approvalMode: string | undefined;
@@ -165,6 +172,7 @@ export interface CliArgs {
   promptWords: string[] | undefined;
   query: string | undefined;
   set: string[] | undefined;
+  continue: boolean | undefined;
 }
 
 export async function parseArguments(settings: Settings): Promise<CliArgs> {
@@ -196,8 +204,13 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         })
         .option('output-format', {
           type: 'string',
-          choices: [OutputFormat.TEXT, OutputFormat.JSON],
-          description: 'Output format for non-interactive mode (text or json).',
+          choices: [
+            OutputFormat.TEXT,
+            OutputFormat.JSON,
+            OutputFormat.STREAM_JSON,
+          ],
+          description:
+            'Output format for non-interactive mode (text, json, or stream-json).',
         })
         .option('sandbox', {
           alias: 's',
@@ -208,18 +221,23 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           type: 'string',
           description: 'Sandbox image URI.',
         })
+        .option('sandbox-engine', {
+          type: 'string',
+          choices: ['auto', 'docker', 'podman', 'sandbox-exec', 'none'],
+          description: 'Sandbox engine (auto|docker|podman|sandbox-exec|none).',
+        })
+        .option('sandbox-profile-load', {
+          type: 'string',
+          description:
+            'Load a sandbox profile from ~/.llxprt/sandboxes/<name>.json',
+        })
         .option('debug', {
           alias: 'd',
           type: 'boolean',
           description: 'Run in debug mode?',
           default: false,
         })
-        .option('all-files', {
-          alias: ['a'],
-          type: 'boolean',
-          description: 'Include ALL files in context?',
-          default: false,
-        })
+
         .option('show-memory-usage', {
           type: 'boolean',
           description: 'Show memory usage in status bar',
@@ -341,6 +359,13 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           description: 'Dump request body to ~/.llxprt/dumps/ on API errors.',
           default: false,
         })
+        .option('continue', {
+          alias: 'C',
+          type: 'boolean',
+          description:
+            'Resume the most recent session for this project. Can be combined with --prompt to continue with a new message.',
+          default: false,
+        })
         .deprecateOption(
           'telemetry',
           'Use settings.json instead. This flag will be removed in a future version.',
@@ -381,10 +406,7 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           'checkpointing',
           'Use settings.json instead. This flag will be removed in a future version.',
         )
-        .deprecateOption(
-          'all-files',
-          'Use @ includes in the application instead. This flag will be removed in a future version.',
-        )
+
         .deprecateOption(
           'prompt',
           'Use the positional prompt instead. This flag will be removed in a future version.',
@@ -569,10 +591,21 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
   // We no longer accept it as a CLI argument
 
   // Map camelCase names to match CliArgs interface
-  // Check if an MCP subcommand was handled
+  // Check if an MCP or extensions subcommand was handled
   // The _ array contains the commands that were run
   if (result._ && result._.length > 0 && result._[0] === 'mcp') {
     // An MCP subcommand was executed (like 'mcp list'), exit cleanly
+    process.exit(0);
+  }
+
+  if (
+    result._ &&
+    result._.length > 0 &&
+    (result._[0] === 'extensions' ||
+      result._[0] === 'extension' ||
+      result._[0] === 'ext')
+  ) {
+    // An extensions subcommand was executed (like 'extensions install'), exit cleanly
     process.exit(0);
   }
 
@@ -586,6 +619,8 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
     model: result.model as string | undefined,
     sandbox: result.sandbox as boolean | string | undefined,
     sandboxImage: result.sandboxImage as string | undefined,
+    sandboxEngine: result.sandboxEngine as string | undefined,
+    sandboxProfileLoad: result.sandboxProfileLoad as string | undefined,
     debug: result.debug as boolean | undefined,
     prompt:
       (result.prompt as string | undefined) ||
@@ -593,7 +628,7 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
       undefined,
     promptInteractive: result.promptInteractive as string | undefined,
     outputFormat: result.outputFormat as string | undefined,
-    allFiles: result.allFiles as boolean | undefined,
+
     showMemoryUsage: result.showMemoryUsage as boolean | undefined,
     yolo: result.yolo as boolean | undefined,
     approvalMode: result.approvalMode as string | undefined,
@@ -625,6 +660,7 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
     promptWords: result.promptWords as string[] | undefined,
     query: queryFromPromptWords,
     set: result.set as string[] | undefined,
+    continue: result.continue as boolean | undefined,
   };
 
   return cliArgs;
@@ -639,7 +675,7 @@ export async function loadHierarchicalLlxprtMemory(
   debugMode: boolean,
   fileService: FileDiscoveryService,
   settings: Settings,
-  extensionContextFilePaths: string[] = [],
+  extensions: GeminiCLIExtension[],
   folderTrust: boolean,
   memoryImportFormat: 'flat' | 'tree' = 'tree',
   fileFilteringOptions?: FileFilteringOptions,
@@ -665,7 +701,7 @@ export async function loadHierarchicalLlxprtMemory(
     includeDirectoriesToReadGemini,
     debugMode,
     fileService,
-    extensionContextFilePaths,
+    extensions,
     folderTrust,
     memoryImportFormat,
     fileFilteringOptions,
@@ -863,6 +899,11 @@ export async function loadCliConfig(
             )
           : undefined));
 
+  // Track whether profile was explicitly specified via --profile-load
+  const profileExplicitlySpecified =
+    bootstrapArgs.profileName != null &&
+    normaliseProfileName(bootstrapArgs.profileName) != null;
+
   if (profileToLoad) {
     try {
       const profileManager = new ProfileManager();
@@ -908,6 +949,13 @@ export async function loadCliConfig(
         return failureSummary;
       });
       console.error(failureSummary);
+
+      // If profile was explicitly specified via --profile-load, error out
+      if (profileExplicitlySpecified) {
+        throw error;
+      }
+
+      // Otherwise, warn and continue (profile from env var or default setting)
       profileWarnings.push(failureSummary);
       // Continue without the profile settings
     }
@@ -969,14 +1017,15 @@ export async function loadCliConfig(
     setServerGeminiMdFilename(getCurrentLlxprtMdFilename());
   }
 
-  const extensionContextFilePaths = activeExtensions.flatMap(
-    (e) => e.contextFiles,
-  );
-
   const fileService = new FileDiscoveryService(cwd);
 
-  const fileFiltering = {
+  const memoryFileFiltering = {
     ...DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
+    ...effectiveSettings.fileFiltering,
+  };
+
+  const fileFiltering = {
+    ...DEFAULT_FILE_FILTERING_OPTIONS,
     ...effectiveSettings.fileFiltering,
   };
 
@@ -1012,15 +1061,19 @@ export async function loadCliConfig(
       debugMode,
       fileService,
       effectiveSettings,
-      extensionContextFilePaths,
+      allExtensions,
       trustedFolder,
       memoryImportFormat,
-      fileFiltering,
+      memoryFileFiltering,
     );
 
   let mcpServers = mergeMcpServers(effectiveSettings, activeExtensions);
   const question =
     argv.promptInteractive || argv.prompt || (argv.promptWords || []).join(' ');
+
+  const extensionContextFilePaths = allExtensions
+    .filter((ext) => ext.isActive)
+    .flatMap((ext) => ext.contextFiles);
 
   // Determine approval mode with backward compatibility
   let approvalMode: ApprovalMode;
@@ -1045,6 +1098,24 @@ export async function loadCliConfig(
     // Fallback to legacy --yolo flag behavior
     approvalMode =
       argv.yolo || false ? ApprovalMode.YOLO : ApprovalMode.DEFAULT;
+  }
+
+  // Override approval mode if disableYoloMode is set.
+  if (effectiveSettings.security?.disableYoloMode) {
+    if (approvalMode === ApprovalMode.YOLO) {
+      logger.error('YOLO mode is disabled by the "disableYoloMode" setting.');
+      throw new Error(
+        'Cannot start in YOLO mode when it is disabled by settings',
+      );
+    }
+    // Note: We only block YOLO mode here. AUTO_EDIT and other modes are still
+    // allowed since disableYoloMode specifically targets YOLO mode only.
+  }
+
+  if (approvalMode === ApprovalMode.YOLO) {
+    logger.warn(
+      'YOLO mode is enabled. All tool calls will be automatically approved.',
+    );
   }
 
   // Force approval mode to default if the folder is not trusted.
@@ -1195,24 +1266,41 @@ export async function loadCliConfig(
       ? argv.screenReader
       : (effectiveSettings.accessibility?.screenReader ?? false);
 
-  const policyPathSetting = effectiveSettings.tools?.policyPath;
-  const resolvedPolicyPath = policyPathSetting
-    ? resolvePath(policyPathSetting)
-    : undefined;
+  // Merge CLI allowed tools into effectiveSettings for policy engine
+  // The allowedTools computed from CLI args needs to be available to the policy engine
+  if (allowedTools.length > 0) {
+    effectiveSettings = {
+      ...effectiveSettings,
+      tools: {
+        ...effectiveSettings.tools,
+        allowed: allowedTools,
+      },
+    };
+  }
 
-  // Create policy engine config from legacy approval mode and allowed tools
-  const policyEngineConfig = await createPolicyEngineConfig({
-    getApprovalMode: () => approvalMode,
-    getAllowedTools: () =>
-      argv.allowedTools || settings.allowedTools || undefined,
-    getNonInteractive: () => !interactive,
-    getUserPolicyPath: () => resolvedPolicyPath,
-  });
+  // Create policy engine config from settings and approval mode
+  const policyEngineConfig = await createPolicyEngineConfig(
+    effectiveSettings,
+    approvalMode,
+  );
 
   const outputFormat =
     argv.outputFormat === OutputFormat.JSON
       ? OutputFormat.JSON
       : OutputFormat.TEXT;
+
+  // Auto-detect ripgrep when useRipgrep is not explicitly set in settings
+  // Precedence: CLI arg (if available) > explicit setting in files > auto-detection
+  let useRipgrepSetting = effectiveSettings.useRipgrep;
+  if (useRipgrepSetting === undefined) {
+    const ripgrepAvailable = await isRipgrepAvailable();
+    useRipgrepSetting = ripgrepAvailable;
+    logger.debug(() =>
+      ripgrepAvailable
+        ? 'Ripgrep detected, auto-enabling for faster searches'
+        : 'Ripgrep not detected, using default grep implementation',
+    );
+  }
 
   const config = new Config({
     sessionId,
@@ -1224,7 +1312,7 @@ export async function loadCliConfig(
     debugMode,
     outputFormat,
     question,
-    fullContext: argv.allFiles || false,
+
     coreTools: effectiveSettings.coreTools || undefined,
     allowedTools: allowedTools.length > 0 ? allowedTools : undefined,
     policyEngineConfig,
@@ -1239,6 +1327,7 @@ export async function loadCliConfig(
     approvalMode,
     showMemoryUsage:
       argv.showMemoryUsage || effectiveSettings.ui?.showMemoryUsage || false,
+    disableYoloMode: effectiveSettings.security?.disableYoloMode,
     accessibility: {
       ...effectiveSettings.accessibility,
       screenReader,
@@ -1289,6 +1378,8 @@ export async function loadCliConfig(
     })),
     provider: finalProvider,
     extensions: allExtensions,
+    enableExtensionReloading:
+      effectiveSettings.experimental?.extensionReloading,
     blockedMcpServers,
     noBrowser: !!process.env.NO_BROWSER,
     summarizeToolOutput: effectiveSettings.summarizeToolOutput,
@@ -1297,11 +1388,24 @@ export async function loadCliConfig(
     interactive,
     folderTrust,
     trustedFolder,
-    shellReplacement: effectiveSettings.shellReplacement,
-    useRipgrep: effectiveSettings.useRipgrep,
+    shellReplacement: normalizeShellReplacement(
+      effectiveSettings.shellReplacement as
+        | 'allowlist'
+        | 'all'
+        | 'none'
+        | boolean
+        | undefined,
+    ),
+    useRipgrep: useRipgrepSetting,
     shouldUseNodePtyShell: effectiveSettings.shouldUseNodePtyShell,
+    allowPtyThemeOverride: effectiveSettings.allowPtyThemeOverride,
+    ptyScrollbackLimit: effectiveSettings.ptyScrollbackLimit,
     enablePromptCompletion: effectiveSettings.enablePromptCompletion ?? false,
     eventEmitter: appEvents,
+    continueSession: argv.continue ?? false,
+    // TODO: loading of hooks based on workspace trust
+    enableHooks: effectiveSettings.tools?.enableHooks ?? false,
+    hooks: effectiveSettings.hooks || {},
   });
 
   const enhancedConfig = config;
@@ -1322,8 +1426,9 @@ export async function loadCliConfig(
 
   // Register provider infrastructure AFTER runtime context but BEFORE any profile application
   // This is critical for applyProfileSnapshot to access the provider manager
-  const { registerCliProviderInfrastructure } =
-    await import('../runtime/runtimeSettings.js');
+  const { registerCliProviderInfrastructure } = await import(
+    '../runtime/runtimeSettings.js'
+  );
   if (runtimeState.oauthManager) {
     registerCliProviderInfrastructure(
       runtimeState.providerManager,
@@ -1504,8 +1609,9 @@ export async function loadCliConfig(
       bootstrapArgs.baseurlOverride ||
       (bootstrapArgs.setOverrides && bootstrapArgs.setOverrides.length > 0))
   ) {
-    const { applyCliArgumentOverrides } =
-      await import('../runtime/runtimeSettings.js');
+    const { applyCliArgumentOverrides } = await import(
+      '../runtime/runtimeSettings.js'
+    );
     await applyCliArgumentOverrides(
       {
         key: argv.key,

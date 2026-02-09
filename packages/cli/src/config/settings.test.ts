@@ -53,6 +53,7 @@ import { disableExtension } from './extension.js';
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
 import {
   loadSettings,
+  saveSettings,
   USER_SETTINGS_PATH, // This IS the mocked path.
   getSystemSettingsPath,
   getSystemDefaultsPath,
@@ -83,6 +84,19 @@ vi.mock('fs', async (importOriginal) => {
     writeFileSync: vi.fn(),
     mkdirSync: vi.fn(),
     realpathSync: (p: string) => p,
+  };
+});
+
+const mockCoreEvents = vi.hoisted(() => ({
+  emitFeedback: vi.fn(),
+}));
+
+vi.mock('@vybestack/llxprt-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@vybestack/llxprt-code-core')>();
+  return {
+    ...actual,
+    coreEvents: mockCoreEvents,
   };
 });
 
@@ -166,17 +180,18 @@ describe('Settings Loading and Merging', () => {
         disableFuzzySearch: false,
       });
       expect(settings.merged.security).toEqual({
+        disableYoloMode: false,
         folderTrust: { enabled: false },
         auth: {},
+        blockGitExtensions: false,
       });
       expect(settings.merged.tools).toMatchObject({
         autoAccept: false,
-        useRipgrep: false,
         enableToolOutputTruncation: true,
       });
       expect(settings.merged.mcp).toEqual({});
       expect(settings.merged.output).toEqual({ format: 'text' });
-      expect(settings.merged.selectedAuthType).toBe('provider');
+      expect(settings.merged.selectedAuthType).toBeUndefined();
       expect(settings.errors.length).toBe(0);
     });
 
@@ -217,7 +232,7 @@ describe('Settings Loading and Merging', () => {
         enablePromptCompletion: false,
         enableTextToolCallParsing: false,
         excludedProjectEnvVars: ['DEBUG', 'DEBUG_MODE'],
-        extensionManagement: false,
+        extensionManagement: true,
         extensions: {
           disabled: [],
           workspacesWithMigrationNudge: [],
@@ -242,10 +257,11 @@ describe('Settings Loading and Merging', () => {
         providerKeyfiles: {},
         providerToolFormatOverrides: {},
         security: {},
-        selectedAuthType: 'provider',
-        shellReplacement: false,
+        shellReplacement: 'allowlist',
         shouldUseNodePtyShell: false,
-        showLineNumbers: false,
+        allowPtyThemeOverride: false,
+        ptyScrollbackLimit: 600000,
+
         showStatusInTitle: false,
         textToolCallModels: [],
         toolCallProcessingMode: 'legacy',
@@ -254,459 +270,7 @@ describe('Settings Loading and Merging', () => {
           customThemes: {},
           theme: undefined,
         },
-        useRipgrep: false,
         ...systemSettingsContent,
-      });
-    });
-
-    it('should load user settings if only user file exists', () => {
-      const expectedUserSettingsPath = USER_SETTINGS_PATH; // Use the path actually resolved by the (mocked) module
-
-      (mockFsExistsSync as Mock).mockImplementation(
-        (p: fs.PathLike) => p === expectedUserSettingsPath,
-      );
-      const userSettingsContent = {
-        theme: 'dark',
-        contextFileName: 'USER_CONTEXT.md',
-      };
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === expectedUserSettingsPath)
-            return JSON.stringify(userSettingsContent);
-          return '{}';
-        },
-      );
-
-      const settings = loadSettings(MOCK_WORKSPACE_DIR);
-
-      expect(fs.readFileSync).toHaveBeenCalledWith(
-        expectedUserSettingsPath,
-        'utf-8',
-      );
-      expect(settings.user.settings).toEqual(userSettingsContent);
-      expect(settings.workspace.settings).toEqual({});
-      expect(settings.merged).toMatchObject({
-        accessibility: {},
-        chatCompression: {},
-        checkpointing: {},
-        contextFileName: 'USER_CONTEXT.md',
-        coreToolSettings: {},
-        debugKeystrokeLogging: false,
-        disableAutoUpdate: false,
-        disableUpdateNag: false,
-        emojifilter: 'auto',
-        enablePromptCompletion: false,
-        enableTextToolCallParsing: false,
-        excludedProjectEnvVars: ['DEBUG', 'DEBUG_MODE'],
-        extensionManagement: false,
-        extensions: {
-          disabled: [],
-          workspacesWithMigrationNudge: [],
-        },
-        fileFiltering: {},
-        folderTrust: false,
-        folderTrustFeature: false,
-        hasSeenIdeIntegrationNudge: false,
-        hideCWD: false,
-        hideModelInfo: false,
-        hideSandboxStatus: false,
-        ide: {},
-        includeDirectories: [],
-        loadMemoryFromIncludeDirectories: false,
-        mcp: {},
-        mcpServers: {},
-        oauthEnabledProviders: {},
-        openaiResponsesEnabled: false,
-        output: {},
-        providerApiKeys: {},
-        providerBaseUrls: {},
-        providerKeyfiles: {},
-        providerToolFormatOverrides: {},
-        security: {},
-        selectedAuthType: 'provider',
-        shellReplacement: false,
-        shouldUseNodePtyShell: false,
-        showLineNumbers: false,
-        showStatusInTitle: false,
-        textToolCallModels: [],
-        theme: 'dark',
-        toolCallProcessingMode: 'legacy',
-        tools: {},
-        ui: {
-          customThemes: {},
-          theme: undefined,
-        },
-        useRipgrep: false,
-      });
-      expect(settings.errors.length).toBe(0);
-    });
-
-    it('should load workspace settings if only workspace file exists', () => {
-      (mockFsExistsSync as Mock).mockImplementation(
-        (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
-      );
-      const workspaceSettingsContent = {
-        sandbox: true,
-        contextFileName: 'WORKSPACE_CONTEXT.md',
-      };
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
-            return JSON.stringify(workspaceSettingsContent);
-          return '{}';
-        },
-      );
-
-      const settings = loadSettings(MOCK_WORKSPACE_DIR);
-
-      expect(fs.readFileSync).toHaveBeenCalledWith(
-        MOCK_WORKSPACE_SETTINGS_PATH,
-        'utf-8',
-      );
-      expect(settings.user.settings).toEqual({});
-      expect(settings.workspace.settings).toEqual(workspaceSettingsContent);
-      expect(settings.merged).toMatchObject({
-        accessibility: {},
-        chatCompression: {},
-        checkpointing: {},
-        contextFileName: 'WORKSPACE_CONTEXT.md',
-        coreToolSettings: {},
-        debugKeystrokeLogging: false,
-        disableAutoUpdate: false,
-        disableUpdateNag: false,
-        emojifilter: 'auto',
-        enablePromptCompletion: false,
-        enableTextToolCallParsing: false,
-        excludedProjectEnvVars: ['DEBUG', 'DEBUG_MODE'],
-        extensionManagement: false,
-        extensions: {
-          disabled: [],
-          workspacesWithMigrationNudge: [],
-        },
-        fileFiltering: {},
-        folderTrust: false,
-        folderTrustFeature: false,
-        hasSeenIdeIntegrationNudge: false,
-        hideCWD: false,
-        hideModelInfo: false,
-        hideSandboxStatus: false,
-        ide: {},
-        includeDirectories: [],
-        loadMemoryFromIncludeDirectories: false,
-        mcp: {},
-        mcpServers: {},
-        oauthEnabledProviders: {},
-        openaiResponsesEnabled: false,
-        output: {},
-        providerApiKeys: {},
-        providerBaseUrls: {},
-        providerKeyfiles: {},
-        providerToolFormatOverrides: {},
-        sandbox: true,
-        security: {},
-        selectedAuthType: 'provider',
-        shellReplacement: false,
-        shouldUseNodePtyShell: false,
-        showLineNumbers: false,
-        showStatusInTitle: false,
-        textToolCallModels: [],
-        toolCallProcessingMode: 'legacy',
-        tools: {},
-        ui: {
-          customThemes: {},
-          theme: undefined,
-        },
-        useRipgrep: false,
-      });
-      expect(settings.errors.length).toBe(0);
-    });
-
-    it('should merge user and workspace settings, with workspace taking precedence', () => {
-      (mockFsExistsSync as Mock).mockReturnValue(true);
-      const userSettingsContent = {
-        theme: 'dark',
-        sandbox: false,
-        contextFileName: 'USER_CONTEXT.md',
-      };
-      const workspaceSettingsContent = {
-        sandbox: true,
-        coreTools: ['tool1'],
-        contextFileName: 'WORKSPACE_CONTEXT.md',
-      };
-
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
-            return JSON.stringify(workspaceSettingsContent);
-          return '{}';
-        },
-      );
-
-      const settings = loadSettings(MOCK_WORKSPACE_DIR);
-
-      expect(settings.user.settings).toEqual(userSettingsContent);
-      expect(settings.workspace.settings).toEqual(workspaceSettingsContent);
-      expect(settings.merged).toMatchObject({
-        accessibility: {},
-        chatCompression: {},
-        checkpointing: {},
-        contextFileName: 'WORKSPACE_CONTEXT.md',
-        coreTools: ['tool1'],
-        coreToolSettings: {},
-        debugKeystrokeLogging: false,
-        disableAutoUpdate: false,
-        disableUpdateNag: false,
-        emojifilter: 'auto',
-        enablePromptCompletion: false,
-        enableTextToolCallParsing: false,
-        excludedProjectEnvVars: ['DEBUG', 'DEBUG_MODE'],
-        extensionManagement: false,
-        extensions: {
-          disabled: [],
-          workspacesWithMigrationNudge: [],
-        },
-        fileFiltering: {},
-        folderTrust: false,
-        folderTrustFeature: false,
-        hasSeenIdeIntegrationNudge: false,
-        hideCWD: false,
-        hideModelInfo: false,
-        hideSandboxStatus: false,
-        ide: {},
-        includeDirectories: [],
-        loadMemoryFromIncludeDirectories: false,
-        mcp: {},
-        mcpServers: {},
-        oauthEnabledProviders: {},
-        openaiResponsesEnabled: false,
-        output: {},
-        providerApiKeys: {},
-        providerBaseUrls: {},
-        providerKeyfiles: {},
-        providerToolFormatOverrides: {},
-        sandbox: true,
-        security: {},
-        selectedAuthType: 'provider',
-        shellReplacement: false,
-        shouldUseNodePtyShell: false,
-        showLineNumbers: false,
-        showStatusInTitle: false,
-        textToolCallModels: [],
-        theme: 'dark',
-        toolCallProcessingMode: 'legacy',
-        tools: {},
-        ui: {
-          customThemes: {},
-          theme: undefined,
-        },
-        useRipgrep: false,
-      });
-      expect(settings.errors.length).toBe(0);
-    });
-
-    it('should merge system, user, and workspace settings with workspace overriding user and user overriding system for theme', () => {
-      (mockFsExistsSync as Mock).mockReturnValue(true);
-      const systemSettingsContent = {
-        theme: 'system-theme',
-        sandbox: false,
-        allowMCPServers: ['server1', 'server2'],
-        telemetry: { enabled: false },
-      };
-      const userSettingsContent = {
-        theme: 'dark',
-        sandbox: true,
-        contextFileName: 'USER_CONTEXT.md',
-      };
-      const workspaceSettingsContent = {
-        sandbox: false,
-        coreTools: ['tool1'],
-        contextFileName: 'WORKSPACE_CONTEXT.md',
-        allowMCPServers: ['server1', 'server2', 'server3'],
-      };
-
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === getSystemSettingsPath())
-            return JSON.stringify(systemSettingsContent);
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
-            return JSON.stringify(workspaceSettingsContent);
-          return '{}';
-        },
-      );
-
-      const settings = loadSettings(MOCK_WORKSPACE_DIR);
-
-      expect(settings.system.settings).toEqual(systemSettingsContent);
-      expect(settings.user.settings).toEqual(userSettingsContent);
-      expect(settings.workspace.settings).toEqual(workspaceSettingsContent);
-      expect(settings.merged).toMatchObject({
-        accessibility: {},
-        allowMCPServers: ['server1', 'server2'],
-        chatCompression: {},
-        checkpointing: {},
-        contextFileName: 'WORKSPACE_CONTEXT.md',
-        coreTools: ['tool1'],
-        coreToolSettings: {},
-        debugKeystrokeLogging: false,
-        disableAutoUpdate: false,
-        disableUpdateNag: false,
-        emojifilter: 'auto',
-        enablePromptCompletion: false,
-        enableTextToolCallParsing: false,
-        excludedProjectEnvVars: ['DEBUG', 'DEBUG_MODE'],
-        extensionManagement: false,
-        extensions: {
-          disabled: [],
-          workspacesWithMigrationNudge: [],
-        },
-        fileFiltering: {},
-        folderTrust: false,
-        folderTrustFeature: false,
-        hasSeenIdeIntegrationNudge: false,
-        hideCWD: false,
-        hideModelInfo: false,
-        hideSandboxStatus: false,
-        ide: {},
-        includeDirectories: [],
-        loadMemoryFromIncludeDirectories: false,
-        mcp: {},
-        mcpServers: {},
-        oauthEnabledProviders: {},
-        openaiResponsesEnabled: false,
-        output: {},
-        providerApiKeys: {},
-        providerBaseUrls: {},
-        providerKeyfiles: {},
-        providerToolFormatOverrides: {},
-        sandbox: false,
-        security: {},
-        selectedAuthType: 'provider',
-        shellReplacement: false,
-        shouldUseNodePtyShell: false,
-        showLineNumbers: false,
-        showStatusInTitle: false,
-        telemetry: { enabled: false },
-        textToolCallModels: [],
-        theme: 'system-theme',
-        toolCallProcessingMode: 'legacy',
-        tools: {},
-        ui: {
-          customThemes: {},
-          theme: undefined,
-        },
-        useRipgrep: false,
-      });
-      expect(settings.errors.length).toBe(0);
-    });
-
-    it('should merge all settings files with the correct precedence, letting user/workspace themes override system', () => {
-      (mockFsExistsSync as Mock).mockReturnValue(true);
-      const systemDefaultsContent = {
-        theme: 'default-theme',
-        sandbox: true,
-        telemetry: true,
-        includeDirectories: ['/system/defaults/dir'],
-      };
-      const userSettingsContent = {
-        theme: 'user-theme',
-        contextFileName: 'USER_CONTEXT.md',
-        includeDirectories: ['/user/dir1', '/user/dir2'],
-      };
-      const workspaceSettingsContent = {
-        sandbox: false,
-        contextFileName: 'WORKSPACE_CONTEXT.md',
-        includeDirectories: ['/workspace/dir'],
-      };
-      const systemSettingsContent = {
-        theme: 'system-theme',
-        telemetry: false,
-        includeDirectories: ['/system/dir'],
-      };
-
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === getSystemDefaultsPath())
-            return JSON.stringify(systemDefaultsContent);
-          if (p === getSystemSettingsPath())
-            return JSON.stringify(systemSettingsContent);
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
-            return JSON.stringify(workspaceSettingsContent);
-          return '{}';
-        },
-      );
-
-      const settings = loadSettings(MOCK_WORKSPACE_DIR);
-
-      expect(settings.systemDefaults.settings).toEqual(systemDefaultsContent);
-      expect(settings.system.settings).toEqual(systemSettingsContent);
-      expect(settings.user.settings).toEqual(userSettingsContent);
-      expect(settings.workspace.settings).toEqual(workspaceSettingsContent);
-      expect(settings.merged).toMatchObject({
-        accessibility: {},
-        chatCompression: {},
-        checkpointing: {},
-        contextFileName: 'WORKSPACE_CONTEXT.md',
-        coreToolSettings: {},
-        debugKeystrokeLogging: false,
-        disableAutoUpdate: false,
-        disableUpdateNag: false,
-        emojifilter: 'auto',
-        enablePromptCompletion: false,
-        enableTextToolCallParsing: false,
-        excludedProjectEnvVars: ['DEBUG', 'DEBUG_MODE'],
-        extensionManagement: false,
-        extensions: {
-          disabled: [],
-          workspacesWithMigrationNudge: [],
-        },
-        fileFiltering: {},
-        folderTrust: false,
-        folderTrustFeature: false,
-        hasSeenIdeIntegrationNudge: false,
-        hideCWD: false,
-        hideModelInfo: false,
-        hideSandboxStatus: false,
-        ide: {},
-        includeDirectories: [
-          '/system/defaults/dir',
-          '/user/dir1',
-          '/user/dir2',
-          '/workspace/dir',
-          '/system/dir',
-        ],
-        loadMemoryFromIncludeDirectories: false,
-        mcp: {},
-        mcpServers: {},
-        oauthEnabledProviders: {},
-        openaiResponsesEnabled: false,
-        output: {},
-        providerApiKeys: {},
-        providerBaseUrls: {},
-        providerKeyfiles: {},
-        providerToolFormatOverrides: {},
-        sandbox: false,
-        security: {},
-        selectedAuthType: 'provider',
-        shellReplacement: false,
-        shouldUseNodePtyShell: false,
-        showLineNumbers: false,
-        showStatusInTitle: false,
-        telemetry: false,
-        textToolCallModels: [],
-        theme: 'system-theme',
-        toolCallProcessingMode: 'legacy',
-        tools: {},
-        ui: {
-          customThemes: {},
-          theme: undefined,
-        },
-        useRipgrep: false,
       });
     });
 
@@ -764,6 +328,40 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       expect(settings.merged.folderTrust).toBe(true); // System setting should be used
+    });
+
+    it('should not allow user or workspace to override system disableYoloMode', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      const userSettingsContent = {
+        security: {
+          disableYoloMode: false,
+        },
+      };
+      const workspaceSettingsContent = {
+        security: {
+          disableYoloMode: false, // This should be ignored
+        },
+      };
+      const systemSettingsContent = {
+        security: {
+          disableYoloMode: true,
+        },
+      };
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === getSystemSettingsPath())
+            return JSON.stringify(systemSettingsContent);
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.disableYoloMode).toBe(true); // System setting should be used
     });
 
     it('should handle contextFileName correctly when only in user settings', () => {
@@ -1630,7 +1228,7 @@ describe('Settings Loading and Merging', () => {
           enablePromptCompletion: false,
           enableTextToolCallParsing: false,
           excludedProjectEnvVars: ['DEBUG', 'DEBUG_MODE'],
-          extensionManagement: false,
+          extensionManagement: true,
           extensions: {
             disabled: [],
             workspacesWithMigrationNudge: [],
@@ -1655,10 +1253,11 @@ describe('Settings Loading and Merging', () => {
           providerKeyfiles: {},
           providerToolFormatOverrides: {},
           security: {},
-          selectedAuthType: 'provider',
-          shellReplacement: false,
+          shellReplacement: 'allowlist',
           shouldUseNodePtyShell: false,
-          showLineNumbers: false,
+          allowPtyThemeOverride: false,
+          ptyScrollbackLimit: 600000,
+
           showStatusInTitle: false,
           textToolCallModels: [],
           toolCallProcessingMode: 'legacy',
@@ -1667,7 +1266,6 @@ describe('Settings Loading and Merging', () => {
             customThemes: {},
             theme: undefined,
           },
-          useRipgrep: false,
           ...systemSettingsContent,
         });
       });
@@ -2539,6 +2137,68 @@ describe('Settings Loading and Merging', () => {
 
       expect(mockDisableExtension).not.toHaveBeenCalled();
       expect(setValueSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('saveSettings', () => {
+    it('should save settings to file', () => {
+      const mockFsExistsSync = vi.mocked(fs.existsSync);
+      const mockFsWriteFileSync = vi.mocked(fs.writeFileSync);
+      mockFsExistsSync.mockReturnValue(true);
+      mockFsWriteFileSync.mockImplementation(() => {});
+
+      const settingsFile = {
+        path: '/mock/settings.json',
+        settings: { ui: { theme: 'dark' } },
+        originalSettings: { ui: { theme: 'dark' } },
+      } as unknown as SettingsFile;
+
+      saveSettings(settingsFile);
+
+      expect(mockFsWriteFileSync).toHaveBeenCalled();
+    });
+
+    it('should create directory if it does not exist', () => {
+      const mockFsExistsSync = vi.mocked(fs.existsSync);
+      const mockFsMkdirSync = vi.mocked(fs.mkdirSync);
+      const mockFsWriteFileSync = vi.mocked(fs.writeFileSync);
+      mockFsExistsSync.mockReturnValue(false);
+      mockFsWriteFileSync.mockImplementation(() => {});
+
+      const settingsFile = {
+        path: '/mock/new/dir/settings.json',
+        settings: {},
+        originalSettings: {},
+      } as unknown as SettingsFile;
+
+      saveSettings(settingsFile);
+
+      expect(mockFsExistsSync).toHaveBeenCalledWith('/mock/new/dir');
+      expect(mockFsMkdirSync).toHaveBeenCalledWith('/mock/new/dir', {
+        recursive: true,
+      });
+    });
+
+    it('should emit error feedback if saving fails', () => {
+      const mockFsExistsSync = vi.mocked(fs.existsSync);
+      const error = new Error('Write failed');
+      mockFsExistsSync.mockImplementation(() => {
+        throw error;
+      });
+
+      const settingsFile = {
+        path: '/mock/settings.json',
+        settings: {},
+        originalSettings: {},
+      } as unknown as SettingsFile;
+
+      saveSettings(settingsFile);
+
+      expect(mockCoreEvents.emitFeedback).toHaveBeenCalledWith(
+        'error',
+        'There was an error saving your latest settings changes.',
+        error,
+      );
     });
   });
 });

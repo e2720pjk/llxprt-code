@@ -6,9 +6,18 @@
 
 import type { AnyToolInvocation } from '../index.js';
 import type { Config } from '../config/config.js';
+import { normalizeShellReplacement } from '../config/config.js';
 import os from 'node:os';
 import { quote } from 'shell-quote';
 import { doesToolInvocationMatch } from './tool-utils.js';
+import {
+  isParserAvailable,
+  parseShellCommand,
+  extractCommandNames,
+  hasCommandSubstitution as treeSitterHasCommandSubstitution,
+  splitCommandsWithTree,
+  parseCommandDetails,
+} from './shell-parser.js';
 
 export const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
 
@@ -41,32 +50,26 @@ export interface ShellConfiguration {
  */
 export function getShellConfiguration(): ShellConfiguration {
   if (isWindows()) {
-    const comSpec = process.env.ComSpec || 'cmd.exe';
-    const executable = comSpec.toLowerCase();
-
-    if (
-      executable.endsWith('powershell.exe') ||
-      executable.endsWith('pwsh.exe')
-    ) {
-      // For PowerShell, the arguments are different.
-      // -NoProfile: Speeds up startup.
-      // -Command: Executes the following command.
-      return {
-        executable: comSpec,
-        argsPrefix: ['-NoProfile', '-Command'],
-        shell: 'powershell',
-      };
+    const comSpec = process.env['ComSpec'];
+    if (comSpec) {
+      const executable = comSpec.toLowerCase();
+      if (
+        executable.endsWith('powershell.exe') ||
+        executable.endsWith('pwsh.exe')
+      ) {
+        return {
+          executable: comSpec,
+          argsPrefix: ['-NoProfile', '-Command'],
+          shell: 'powershell',
+        };
+      }
     }
 
-    // Default to cmd.exe for anything else on Windows.
-    // Flags for CMD:
-    // /d: Skip execution of AutoRun commands.
-    // /s: Modifies the treatment of the command string (important for quoting).
-    // /c: Carries out the command specified by the string and then terminates.
+    // Default to PowerShell for all other Windows configurations.
     return {
-      executable: comSpec,
-      argsPrefix: ['/d', '/s', '/c'],
-      shell: 'cmd',
+      executable: 'powershell.exe',
+      argsPrefix: ['-NoProfile', '-Command'],
+      shell: 'powershell',
     };
   }
 
@@ -109,10 +112,31 @@ export function escapeShellArg(arg: string, shell: ShellType): string {
 /**
  * Splits a shell command into a list of individual commands, respecting quotes.
  * This is used to separate chained commands (e.g., using &&, ||, ;).
+ * Uses tree-sitter for accurate parsing when available, falls back to regex.
  * @param command The shell command string to parse
  * @returns An array of individual command strings
  */
 export function splitCommands(command: string): string[] {
+  // Try tree-sitter first for accurate parsing
+  if (isParserAvailable()) {
+    const tree = parseShellCommand(command);
+    if (tree) {
+      const result = splitCommandsWithTree(tree);
+      if (result.length > 0) {
+        return result;
+      }
+    }
+  }
+
+  // Fall back to regex-based parsing
+  return splitCommandsRegex(command);
+}
+
+/**
+ * Regex-based fallback for splitting shell commands.
+ * Used when tree-sitter is not available.
+ */
+function splitCommandsRegex(command: string): string[] {
   const commands: string[] = [];
   let currentCommand = '';
   let inSingleQuotes = false;
@@ -198,13 +222,27 @@ export function getCommandRoots(command: string): string[] {
   if (!command) {
     return [];
   }
+
+  // Try tree-sitter first for accurate parsing
+  if (isParserAvailable()) {
+    const tree = parseShellCommand(command);
+    if (tree) {
+      const result = extractCommandNames(tree);
+      if (result.length > 0) {
+        return result;
+      }
+    }
+  }
+
+  // Fall back to regex-based parsing
   return splitCommands(command)
     .map((c) => getCommandRoot(c))
     .filter((c): c is string => !!c);
 }
 
 export function stripShellWrapper(command: string): string {
-  const pattern = /^\s*(?:sh|bash|zsh|cmd.exe)\s+(?:\/c|-c)\s+/;
+  const pattern =
+    /^\s*(?:(?:sh|bash|zsh)\s+-c|cmd\.exe\s+\/c|powershell(?:\.exe)?\s+(?:-NoProfile\s+)?-Command|pwsh(?:\.exe)?\s+(?:-NoProfile\s+)?-Command)\s+/i;
   const match = command.match(pattern);
   if (match) {
     let newCommand = command.substring(match[0].length).trim();
@@ -224,10 +262,28 @@ export function stripShellWrapper(command: string): string {
  * - Single quotes ('): Everything literal, no substitution possible
  * - Double quotes ("): Command substitution with $() and backticks unless escaped with \
  * - No quotes: Command substitution with $(), <(), and backticks
+ * Uses tree-sitter for accurate parsing when available, falls back to regex.
  * @param command The shell command string to check
  * @returns true if command substitution would be executed by bash
  */
 export function detectCommandSubstitution(command: string): boolean {
+  // Try tree-sitter first for accurate parsing
+  if (isParserAvailable()) {
+    const tree = parseShellCommand(command);
+    if (tree) {
+      return treeSitterHasCommandSubstitution(tree);
+    }
+  }
+
+  // Fall back to regex-based detection
+  return detectCommandSubstitutionRegex(command);
+}
+
+/**
+ * Regex-based fallback for detecting command substitution.
+ * Used when tree-sitter is not available.
+ */
+function detectCommandSubstitutionRegex(command: string): boolean {
   let inSingleQuotes = false;
   let inDoubleQuotes = false;
   let inBackticks = false;
@@ -317,24 +373,33 @@ export function checkCommandPermissions(
   blockReason?: string;
   isHardDenial?: boolean;
 } {
-  // Check if shell replacement is allowed via ephemeral setting or config
-  const ephemeralValue = config.getEphemeralSetting?.('shell-replacement');
+  // Check shell replacement mode via ephemeral setting or config
+  const ephemeralValue = config.getEphemeralSetting?.('shell-replacement') as
+    | 'allowlist'
+    | 'all'
+    | 'none'
+    | boolean
+    | undefined;
   const configValue = config.getShellReplacement?.();
+  const shellReplacementMode = normalizeShellReplacement(
+    ephemeralValue ?? configValue ?? 'allowlist',
+  );
 
   // Debug logging when VERBOSE is set
   if (process.env.VERBOSE === 'true') {
     console.log('[SHELL-UTILS] Shell replacement check:', {
       ephemeralValue,
       configValue,
+      shellReplacementMode,
       command: command.substring(0, 50) + (command.length > 50 ? '...' : ''),
     });
   }
 
-  const shellReplacementAllowed =
-    ephemeralValue === true || configValue === true;
-
-  // Disallow command substitution for security unless explicitly allowed
-  if (!shellReplacementAllowed && detectCommandSubstitution(command)) {
+  // Handle shell replacement modes:
+  // - 'none': Block ALL command substitution (most restrictive)
+  // - 'allowlist': Allow substitution, validate inner commands against coreTools (default, matches upstream)
+  // - 'all': Allow all substitution unconditionally (least restrictive, legacy true behavior)
+  if (shellReplacementMode === 'none' && detectCommandSubstitution(command)) {
     return {
       allAllowed: false,
       disallowedCommands: [command],
@@ -345,7 +410,42 @@ export function checkCommandPermissions(
   }
 
   const normalize = (cmd: string): string => cmd.trim().replace(/\s+/g, ' ');
-  const commandsToValidate = splitCommands(command).map(normalize);
+  let commandsToValidate: string[];
+
+  // Mode behavior for command extraction:
+  // - 'allowlist': validate ALL nested commands (tree-sitter deep walk when available)
+  // - 'all': allow substitution without deep validation (legacy behavior)
+  // - 'none': handled above
+  if (shellReplacementMode === 'allowlist') {
+    // Try to use tree-sitter for deep command extraction
+    const parseResult = parseCommandDetails(command);
+    if (
+      parseResult &&
+      !parseResult.hasError &&
+      parseResult.details.length > 0
+    ) {
+      // Use tree-sitter results - extracts ALL commands including nested ones
+      commandsToValidate = parseResult.details
+        .map((detail) => normalize(detail.text))
+        .filter(Boolean);
+    } else if (parseResult?.hasError) {
+      // Tree-sitter detected a syntax error - reject for safety
+      return {
+        allAllowed: false,
+        disallowedCommands: [command],
+        blockReason: 'Command rejected because it could not be parsed safely',
+        isHardDenial: true,
+      };
+    } else {
+      // Tree-sitter not available, fall back to splitCommands
+      // This is less secure but allows basic functionality
+      commandsToValidate = splitCommands(command).map(normalize);
+    }
+  } else {
+    // 'all' mode: do not attempt deep extraction/validation.
+    // Just use simple command splitting (legacy behavior)
+    commandsToValidate = splitCommands(command).map(normalize);
+  }
   const invocation: AnyToolInvocation & { params: { command: string } } = {
     params: { command: '' },
   } as AnyToolInvocation & { params: { command: string } };

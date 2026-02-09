@@ -475,10 +475,21 @@ export abstract class BaseProvider implements IProvider {
   }
 
   /**
-   * Clears the authentication token cache
+   * Clears the authentication token cache.
+   * This ensures that after logout, fresh tokens are fetched on the next
+   * authentication attempt without requiring a provider switch.
+   *
+   * @plan PLAN-20251023-STATELESS-HARDENING
+   * @requirement Issue #975 - OAuth logout cache invalidation
    */
   clearAuthCache(): void {
-    // Legacy no-op retained for compatibility with existing logout flows.
+    // Invalidate cached tokens in the auth resolver
+    if (
+      this.authResolver &&
+      typeof this.authResolver.invalidateCache === 'function'
+    ) {
+      this.authResolver.invalidateCache();
+    }
   }
 
   /**
@@ -1150,8 +1161,11 @@ export abstract class BaseProvider implements IProvider {
    * - Provider config `customHeaders`
    * - Ephemeral `custom-headers`
    * - Ephemeral `user-agent` (mapped into a `User-Agent` header)
+   * - Invocation `customHeaders` (from separated settings)
    */
-  protected getCustomHeaders(): Record<string, string> | undefined {
+  protected getCustomHeaders(
+    options?: NormalizedGenerateChatOptions,
+  ): Record<string, string> | undefined {
     const baseHeaders =
       this.providerConfig?.customHeaders &&
       typeof this.providerConfig.customHeaders === 'object'
@@ -1178,6 +1192,10 @@ export abstract class BaseProvider implements IProvider {
 
     if (typeof userAgent === 'string' && userAgent.trim()) {
       combined['User-Agent'] = userAgent.trim();
+    }
+
+    if (options?.invocation?.customHeaders) {
+      Object.assign(combined, options.invocation.customHeaders);
     }
 
     return Object.keys(combined).length > 0 ? combined : undefined;

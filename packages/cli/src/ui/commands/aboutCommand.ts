@@ -114,8 +114,6 @@ export const aboutCommand: SlashCommand = {
     }
 
     const cliVersion = await getCliVersion();
-    const selectedAuthType =
-      context.services.settings.merged.selectedAuthType || '';
     const gcpProject = process.env.GOOGLE_CLOUD_PROJECT || '';
     const ideClient =
       (context.services.config?.getIdeMode() &&
@@ -126,8 +124,9 @@ export const aboutCommand: SlashCommand = {
     let keyfilePath = '';
     const keyStatus = '';
     try {
-      const { getProviderManager } =
-        await import('../../providers/providerManagerInstance.js');
+      const { getProviderManager } = await import(
+        '../../providers/providerManagerInstance.js'
+      );
       const providerManager = getProviderManager();
       const providerName = providerManager.getActiveProviderName();
       if (providerName) {
@@ -145,7 +144,6 @@ export const aboutCommand: SlashCommand = {
       osVersion,
       sandboxEnv,
       modelVersion,
-      selectedAuthType,
       gcpProject,
       keyfile: keyfilePath,
       key: keyStatus,

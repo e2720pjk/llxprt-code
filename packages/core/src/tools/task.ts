@@ -30,6 +30,10 @@ import { DebugLogger } from '../debug/DebugLogger.js';
 
 const taskLogger = new DebugLogger('llxprt:task');
 
+// Tool timeout settings (Issue #1049)
+const DEFAULT_TASK_TIMEOUT_SECONDS = 900;
+const MAX_TASK_TIMEOUT_SECONDS = 1800;
+
 export interface TaskToolParams {
   subagent_name?: string;
   subagentName?: string;
@@ -46,6 +50,7 @@ export interface TaskToolParams {
   context?: Record<string, unknown>;
   context_vars?: Record<string, unknown>;
   contextVars?: Record<string, unknown>;
+  timeout_seconds?: number;
 }
 
 interface TaskToolInvocationParams {
@@ -120,6 +125,7 @@ class TaskToolInvocation extends BaseToolInvocation<
   ToolResult
 > {
   constructor(
+    private readonly config: Config,
     params: TaskToolParams,
     private readonly normalized: TaskToolInvocationParams,
     private readonly deps: TaskToolInvocationDeps,
@@ -131,13 +137,19 @@ class TaskToolInvocation extends BaseToolInvocation<
     return `Run subagent '${this.normalized.subagentName}' to accomplish: ${this.normalized.goalPrompt}`;
   }
 
-  private createLaunchRequest(): SubagentLaunchRequest {
+  private createLaunchRequest(timeoutMs?: number): SubagentLaunchRequest {
     const { subagentName, behaviourPrompts, toolWhitelist, outputSpec } =
       this.normalized;
 
     const launchRequest: SubagentLaunchRequest = {
       name: subagentName,
     };
+
+    if (timeoutMs !== undefined) {
+      launchRequest.runConfig = {
+        max_time_minutes: timeoutMs / 60_000,
+      };
+    }
 
     if (behaviourPrompts.length > 0) {
       launchRequest.behaviourPrompts = behaviourPrompts;
@@ -193,7 +205,20 @@ class TaskToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     updateOutput?: (output: string) => void,
   ): Promise<ToolResult> {
+    const {
+      timeoutMs,
+      timeoutSeconds,
+      timeoutController,
+      timeoutId,
+      onUserAbort,
+    } = this.createTimeoutControllers(signal);
+
     if (signal.aborted) {
+      onUserAbort();
+      signal.removeEventListener('abort', onUserAbort);
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
       return this.createCancelledResult(
         'Task execution aborted before launch.',
       );
@@ -207,13 +232,17 @@ class TaskToolInvocation extends BaseToolInvocation<
         () =>
           `Failed to create orchestrator for '${this.normalized.subagentName}': ${error instanceof Error ? error.message : String(error)}`,
       );
+      signal.removeEventListener('abort', onUserAbort);
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
       return this.createErrorResult(
         error,
         'Task tool could not initialize subagent orchestrator.',
       );
     }
 
-    const launchRequest = this.createLaunchRequest();
+    const launchRequest = this.createLaunchRequest(timeoutMs);
     taskLogger.debug(() => `Launching subagent '${launchRequest.name}'`);
 
     let launchResult:
@@ -247,15 +276,32 @@ class TaskToolInvocation extends BaseToolInvocation<
     if (signal.aborted) {
       abortHandler();
       removeAbortHandler();
+      signal.removeEventListener('abort', onUserAbort);
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
       return this.createCancelledResult(
         'Task execution aborted before launch.',
       );
     }
 
     try {
-      launchResult = await orchestrator.launch(launchRequest, signal);
+      launchResult = await orchestrator.launch(
+        launchRequest,
+        timeoutController.signal,
+      );
     } catch (error) {
       removeAbortHandler();
+      signal.removeEventListener('abort', onUserAbort);
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+      if (this.isTimeoutError(signal, timeoutController, error)) {
+        return this.createTimeoutResult(
+          timeoutSeconds,
+          launchResult?.scope?.output,
+        );
+      }
       if (this.isAbortError(error) || aborted || signal.aborted) {
         return this.createCancelledResult('Task aborted during launch.');
       }
@@ -277,6 +323,10 @@ class TaskToolInvocation extends BaseToolInvocation<
 
     const teardown = async () => {
       removeAbortHandler();
+      signal.removeEventListener('abort', onUserAbort);
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
       try {
         await dispose();
       } catch {
@@ -340,6 +390,10 @@ class TaskToolInvocation extends BaseToolInvocation<
           scope.output,
         );
       }
+      if (this.isTimeoutError(signal, timeoutController)) {
+        await teardown();
+        return this.createTimeoutResult(timeoutSeconds, scope.output);
+      }
       const output = scope.output ?? {
         terminate_reason: SubagentTerminateMode.ERROR,
         emitted_vars: {},
@@ -368,6 +422,18 @@ class TaskToolInvocation extends BaseToolInvocation<
         },
       };
     } catch (error) {
+      if (this.isTimeoutError(signal, timeoutController, error)) {
+        await teardown();
+        return this.createTimeoutResult(timeoutSeconds, scope.output, agentId);
+      }
+      if (this.isAbortError(error) || aborted || signal.aborted) {
+        await teardown();
+        return this.createCancelledResult(
+          'Task execution aborted before completion.',
+          agentId,
+          scope.output,
+        );
+      }
       const result = this.createErrorResult(
         error,
         `Subagent '${this.normalized.subagentName}' failed during execution.`,
@@ -386,7 +452,8 @@ class TaskToolInvocation extends BaseToolInvocation<
     if (!error || typeof error !== 'object') {
       return false;
     }
-    return (error as { name?: string }).name === 'AbortError';
+    const result = (error as { name?: string }).name === 'AbortError';
+    return result;
   }
 
   private buildContextState(): ContextState {
@@ -453,7 +520,114 @@ class TaskToolInvocation extends BaseToolInvocation<
       },
       error: {
         message,
-        type: ToolErrorType.UNHANDLED_EXCEPTION,
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+    };
+  }
+
+  private createTimeoutControllers(signal: AbortSignal): {
+    timeoutMs?: number;
+    timeoutSeconds?: number;
+    timeoutController: AbortController;
+    timeoutId: ReturnType<typeof setTimeout> | null;
+    onUserAbort: () => void;
+  } {
+    const settings = this.config.getEphemeralSettings?.() ?? {};
+    const defaultTimeoutSeconds =
+      (settings['task-default-timeout-seconds'] as number | undefined) ??
+      DEFAULT_TASK_TIMEOUT_SECONDS;
+    const maxTimeoutSeconds =
+      (settings['task-max-timeout-seconds'] as number | undefined) ??
+      MAX_TASK_TIMEOUT_SECONDS;
+
+    const timeoutSeconds = this.resolveTimeoutSeconds(
+      this.params.timeout_seconds,
+      defaultTimeoutSeconds,
+      maxTimeoutSeconds,
+    );
+    // Convert seconds to milliseconds for setTimeout
+    const timeoutMs =
+      timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000;
+    const timeoutController = new AbortController();
+    const timeoutId =
+      timeoutMs === undefined
+        ? null
+        : setTimeout(() => timeoutController.abort(), timeoutMs);
+
+    const onUserAbort = () => {
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+      timeoutController.abort();
+    };
+
+    signal.addEventListener('abort', onUserAbort, { once: true });
+
+    return {
+      timeoutMs,
+      timeoutSeconds,
+      timeoutController,
+      timeoutId,
+      onUserAbort,
+    };
+  }
+
+  private resolveTimeoutSeconds(
+    requestedTimeoutSeconds: number | undefined,
+    defaultTimeoutSeconds: number,
+    maxTimeoutSeconds: number,
+  ): number | undefined {
+    if (requestedTimeoutSeconds === -1 || defaultTimeoutSeconds === -1) {
+      return undefined;
+    }
+
+    const effectiveTimeout = requestedTimeoutSeconds ?? defaultTimeoutSeconds;
+    if (maxTimeoutSeconds === -1) {
+      return effectiveTimeout;
+    }
+
+    if (effectiveTimeout > maxTimeoutSeconds) {
+      return maxTimeoutSeconds;
+    }
+
+    return effectiveTimeout;
+  }
+
+  private isTimeoutError(
+    signal: AbortSignal,
+    timeoutController: AbortController,
+    error?: unknown,
+  ): boolean {
+    if (!timeoutController.signal.aborted || signal.aborted) {
+      return false;
+    }
+    if (!error) {
+      return true;
+    }
+    return this.isAbortError(error);
+  }
+
+  private createTimeoutResult(
+    timeoutSeconds: number | undefined,
+    output?: OutputObject,
+    agentId?: string,
+  ): ToolResult {
+    const message = `Task timed out after ${timeoutSeconds ?? DEFAULT_TASK_TIMEOUT_SECONDS}s (timeout_seconds).`;
+    return {
+      llmContent: message,
+      returnDisplay: message,
+      metadata: {
+        agentId: agentId ?? DEFAULT_AGENT_ID,
+        terminateReason: output?.terminate_reason,
+        emittedVars: output?.emitted_vars ?? {},
+        ...(output?.final_message
+          ? { finalMessage: output.final_message }
+          : {}),
+        timedOut: true,
+      },
+      error: {
+        message,
+        type: ToolErrorType.TIMEOUT,
       },
     };
   }
@@ -510,6 +684,11 @@ export class TaskTool extends BaseDeclarativeTool<TaskToolParams, ToolResult> {
               'Expected output variables the subagent must emit before completing.',
             additionalProperties: { type: 'string' },
           },
+          timeout_seconds: {
+            type: 'number',
+            description:
+              'Optional timeout in seconds for the task execution (-1 for unlimited).',
+          },
           context: {
             type: 'object',
             description:
@@ -543,7 +722,7 @@ export class TaskTool extends BaseDeclarativeTool<TaskToolParams, ToolResult> {
 
   protected createInvocation(params: TaskToolParams): TaskToolInvocation {
     const normalized = this.normalizeParams(params);
-    return new TaskToolInvocation(params, normalized, {
+    return new TaskToolInvocation(this.config, params, normalized, {
       createOrchestrator: () => this.ensureOrchestrator(),
       getToolRegistry:
         typeof this.config.getToolRegistry === 'function'

@@ -32,6 +32,8 @@ const OPENAI_ALLOWED_PARAM_KEYS = new Set<string>([
   'audio',
   'audio_format',
   'prediction',
+  'prompt_cache_key',
+  'prompt_cache_retention',
 ]);
 
 const OPENAI_PARAM_KEY_ALIASES: Record<string, string> = {
@@ -56,6 +58,7 @@ const OPENAI_REASONING_INTERNAL_KEYS = new Set<string>([
   'includeInResponse',
   'format',
   'stripFromContext',
+  'verbosity',
 ]);
 
 function stripInternalReasoningKeys(
@@ -74,6 +77,10 @@ function stripInternalReasoningKeys(
       nestedValue === null ||
       OPENAI_REASONING_INTERNAL_KEYS.has(key)
     ) {
+      continue;
+    }
+    // Filter out summary='none' - 'none' means don't include summary in the request
+    if (key === 'summary' && nestedValue === 'none') {
       continue;
     }
     sanitized[key] = nestedValue;
@@ -105,6 +112,14 @@ export function filterOpenAIRequestParams(
         continue;
       }
       filtered[normalizedKey] = sanitized;
+      continue;
+    }
+
+    if (
+      normalizedKey === 'prompt_cache_key' &&
+      typeof value === 'string' &&
+      value.trim() === ''
+    ) {
       continue;
     }
 

@@ -6,10 +6,19 @@
  */
 
 import { type IProvider, type GenerateChatOptions } from './IProvider.js';
-import { type IModel } from './IModel.js';
 import { type IProviderManager } from './IProviderManager.js';
 import { Config } from '../config/config.js';
+import {
+  hydrateModelsWithRegistry,
+  getModelsDevProviderIds,
+  type HydratedModel,
+} from '../models/hydration.js';
+import {
+  initializeModelRegistry,
+  getModelRegistry,
+} from '../models/registry.js';
 import { LoggingProviderWrapper } from './LoggingProviderWrapper.js';
+import { RetryOrchestrator } from './RetryOrchestrator.js';
 import {
   logProviderSwitch,
   logProviderCapability,
@@ -34,6 +43,7 @@ import {
 } from './errors.js';
 import { createRuntimeInvocationContext } from '../runtime/RuntimeInvocationContext.js';
 import { DebugLogger } from '../debug/DebugLogger.js';
+import { PROVIDER_CONFIG_KEYS } from './providerConfigKeys.js';
 
 const PROVIDER_CAPABILITY_HINTS: Record<
   string,
@@ -219,6 +229,7 @@ export class ProviderManager implements IProviderManager {
 
   /**
    * @plan PLAN-20251018-STATELESSPROVIDER2.P06
+   * @plan PLAN-20260128issue808
    * @requirement REQ-SP2-001
    * @pseudocode base-provider-call-contract.md lines 3-5
    */
@@ -231,18 +242,28 @@ export class ProviderManager implements IProviderManager {
     const providers = new Map(this.providers);
 
     for (const [name, provider] of providers) {
-      // Unwrap if it's already wrapped
+      // Fully unwrap to get the base provider
       let baseProvider = provider;
-      if ('wrappedProvider' in provider && provider.wrappedProvider) {
-        baseProvider = provider.wrappedProvider as IProvider;
+      while (
+        'wrappedProvider' in baseProvider &&
+        baseProvider.wrappedProvider
+      ) {
+        baseProvider = baseProvider.wrappedProvider as IProvider;
       }
 
       this.syncProviderRuntime(baseProvider);
 
-      // ALWAYS wrap with LoggingProviderWrapper for token tracking
-      let finalProvider = baseProvider;
+      // Apply wrapping order (inner to outer):
+      // 1. RetryOrchestrator (retry, backoff, bucket failover)
+      // 2. LoggingProviderWrapper (token tracking, telemetry)
+      let finalProvider: IProvider = baseProvider;
+
+      // First wrap with RetryOrchestrator
+      finalProvider = new RetryOrchestrator(finalProvider);
+
+      // Then wrap with LoggingProviderWrapper if config is available
       if (this.config) {
-        finalProvider = new LoggingProviderWrapper(baseProvider, this.config);
+        finalProvider = new LoggingProviderWrapper(finalProvider, this.config);
       }
 
       this.syncProviderRuntime(finalProvider);
@@ -548,7 +569,7 @@ export class ProviderManager implements IProviderManager {
       const providerInstance = this.providers.get(targetProvider);
 
       // Check for getAuthToken on the actual provider
-      // (might be wrapped in LoggingProviderWrapper)
+      // (might be wrapped in multiple layers: LoggingProviderWrapper → RetryOrchestrator → BaseProvider)
       interface ProviderWithWrapper {
         wrappedProvider?: IProvider;
       }
@@ -556,9 +577,10 @@ export class ProviderManager implements IProviderManager {
         getAuthToken?: () => Promise<string>;
       }
 
+      // Traverse the full wrapper chain to find the actual provider
       let actualProvider: IProvider | undefined = providerInstance;
-      if (providerInstance && 'wrappedProvider' in providerInstance) {
-        actualProvider = (providerInstance as ProviderWithWrapper)
+      while (actualProvider && 'wrappedProvider' in actualProvider) {
+        actualProvider = (actualProvider as ProviderWithWrapper)
           .wrappedProvider;
       }
 
@@ -646,25 +668,45 @@ export class ProviderManager implements IProviderManager {
     const globalEphemerals = settingsService.getAllGlobalSettings();
     const providerEphemerals =
       settingsService.getProviderSettings(providerName);
-    const snapshot: Record<string, unknown> = {
-      ...globalEphemerals,
-    };
+
+    // @plan PLAN-20260126-SETTINGS-SEPARATION.P09
+    // Filter out provider-config settings from global level
+    // These should only appear in provider-scoped sections
+    const snapshot: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(globalEphemerals)) {
+      if (!PROVIDER_CONFIG_KEYS.has(key)) {
+        snapshot[key] = value;
+      }
+    }
     snapshot[providerName] = { ...providerEphemerals };
     return snapshot;
   }
 
   /**
    * @plan PLAN-20251018-STATELESSPROVIDER2.P06
+   * @plan PLAN-20260128issue808
    * @requirement REQ-SP2-001
    * @pseudocode base-provider-call-contract.md lines 3-5
    */
   registerProvider(provider: IProvider): void {
     this.syncProviderRuntime(provider);
-    // ALWAYS wrap provider to enable token tracking
-    // (LoggingProviderWrapper handles both token tracking AND conversation logging)
-    let finalProvider = provider;
+
+    // Wrapping order (inner to outer):
+    // 1. Raw provider (fast-fail on errors)
+    // 2. RetryOrchestrator (retry, backoff, bucket failover)
+    // 3. LoggingProviderWrapper (token tracking, telemetry)
+
+    let finalProvider: IProvider = provider;
+
+    // First wrap with RetryOrchestrator for centralized retry/failover
+    finalProvider = new RetryOrchestrator(finalProvider, {
+      // Config will be read from ephemeral settings at call time
+      // Default values will be used if not provided
+    });
+
+    // Then wrap with LoggingProviderWrapper for token tracking
     if (this.config) {
-      finalProvider = new LoggingProviderWrapper(provider, this.config);
+      finalProvider = new LoggingProviderWrapper(finalProvider, this.config);
     }
 
     this.syncProviderRuntime(finalProvider);
@@ -812,7 +854,7 @@ export class ProviderManager implements IProviderManager {
     return provider;
   }
 
-  async getAvailableModels(providerName?: string): Promise<IModel[]> {
+  async getAvailableModels(providerName?: string): Promise<HydratedModel[]> {
     let provider: IProvider | undefined;
 
     if (providerName) {
@@ -824,7 +866,77 @@ export class ProviderManager implements IProviderManager {
       provider = this.getActiveProvider();
     }
 
-    return provider.getModels();
+    // Step 1: Get models from provider (live API or fallback)
+    const baseModels = await provider.getModels();
+
+    // Step 2: Initialize registry if needed (non-blocking failure)
+    try {
+      await initializeModelRegistry();
+    } catch {
+      // Registry init failed - return unhydrated
+      logger.debug(
+        () =>
+          `[getAvailableModels] Registry init failed for provider: ${provider!.name}`,
+      );
+      return baseModels.map((m) => ({ ...m, hydrated: false }));
+    }
+
+    // Step 3: Get modelsDevProviderIds for hydration lookup
+    const modelsDevProviderIds = getModelsDevProviderIds(provider.name);
+
+    // Step 4: If provider returned no models, fall back to registry-only models
+    if (baseModels.length === 0 && modelsDevProviderIds.length > 0) {
+      logger.debug(
+        () =>
+          `[getAvailableModels] Provider ${provider!.name} returned 0 models, falling back to registry`,
+      );
+      const registry = getModelRegistry();
+      if (registry.isInitialized()) {
+        // Get models from registry for this provider (only those with tool support)
+        const registryModels: HydratedModel[] = [];
+        for (const providerId of modelsDevProviderIds) {
+          const providerModels = registry.getByProvider(providerId);
+          for (const rm of providerModels) {
+            // Only exclude models that explicitly disable tool support
+            if (rm.capabilities?.toolCalling === false) continue;
+
+            registryModels.push({
+              id: rm.modelId,
+              name: rm.name,
+              provider: provider!.name,
+              supportedToolFormats: [],
+              contextWindow: rm.contextWindow,
+              maxOutputTokens: rm.maxOutputTokens,
+              capabilities: rm.capabilities,
+              pricing: rm.pricing,
+              limits: rm.limits,
+              metadata: rm.metadata,
+              providerId: rm.providerId,
+              modelId: rm.modelId,
+              family: rm.family,
+              hydrated: true,
+            });
+          }
+        }
+        if (registryModels.length > 0) {
+          return registryModels;
+        }
+      }
+    }
+
+    logger.debug(
+      () =>
+        `[getAvailableModels] Hydrating ${baseModels.length} models for provider: ${provider!.name} with modelsDevIds: ${JSON.stringify(modelsDevProviderIds)}`,
+    );
+
+    // Step 5: Hydrate with models.dev data
+    const hydratedModels = await hydrateModelsWithRegistry(
+      baseModels,
+      modelsDevProviderIds,
+    );
+
+    // Step 6: Filter to only models with tool support (required for CLI)
+    return hydratedModels.filter((m) => m.capabilities?.toolCalling !== false);
   }
 
   listProviders(): string[] {

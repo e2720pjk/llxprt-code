@@ -16,7 +16,6 @@ import type {
 } from '../types.js';
 import type {
   IdeContext,
-  IModel,
   ApprovalMode,
   AnyDeclarativeTool,
   ThoughtSummary,
@@ -27,6 +26,8 @@ import type {
 import type { SlashCommand, CommandContext } from '../commands/types.js';
 import type { ShellConfirmationRequest } from '../components/ShellConfirmationDialog.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import type { WelcomeState, ModelInfo } from '../hooks/useWelcomeOnboarding.js';
+import type { SubagentView } from '../components/SubagentManagement/types.js';
 
 /**
  * UI State shape for the AppContainer architecture.
@@ -59,11 +60,13 @@ export interface UIState {
   isThemeDialogOpen: boolean;
   isSettingsDialogOpen: boolean;
   isAuthDialogOpen: boolean;
-  isAuthenticating: boolean;
   isEditorDialogOpen: boolean;
   isProviderDialogOpen: boolean;
-  isProviderModelDialogOpen: boolean;
   isLoadProfileDialogOpen: boolean;
+  isCreateProfileDialogOpen: boolean;
+  isProfileListDialogOpen: boolean;
+  isProfileDetailDialogOpen: boolean;
+  isProfileEditorDialogOpen: boolean;
   isToolsDialogOpen: boolean;
   isFolderTrustDialogOpen: boolean;
   showWorkspaceMigrationDialog: boolean;
@@ -71,11 +74,12 @@ export interface UIState {
   isOAuthCodeDialogOpen: boolean;
   isPermissionsDialogOpen: boolean;
   isLoggingDialogOpen: boolean;
+  isSubagentDialogOpen: boolean;
+  isModelsDialogOpen: boolean;
 
   // Dialog data
   providerOptions: string[];
   selectedProvider: string;
-  providerModels: IModel[];
   currentModel: string;
   profiles: string[];
   toolsDialogAction: 'enable' | 'disable';
@@ -83,6 +87,38 @@ export interface UIState {
   toolsDialogDisabledTools: string[];
   workspaceGeminiCLIExtensions: GeminiCLIExtension[];
   loggingDialogData: { entries: unknown[] };
+  subagentDialogInitialView?: SubagentView;
+  subagentDialogInitialName?: string;
+  modelsDialogData?: {
+    initialSearch?: string;
+    initialFilters?: {
+      tools?: boolean;
+      vision?: boolean;
+      reasoning?: boolean;
+      audio?: boolean;
+    };
+    includeDeprecated?: boolean;
+    /** Override provider filter from --provider arg */
+    providerOverride?: string | null;
+    /** Show all providers (from --all flag) */
+    showAllProviders?: boolean;
+  };
+
+  // Profile management dialog data
+  profileListItems: Array<{
+    name: string;
+    type: 'standard' | 'loadbalancer';
+    provider?: string;
+    model?: string;
+    isDefault?: boolean;
+    isActive?: boolean;
+  }>;
+  selectedProfileName: string | null;
+  selectedProfileData: unknown | null;
+  defaultProfileName: string | null;
+  activeProfileName: string | null;
+  profileDialogError: string | null;
+  profileDialogLoading: boolean;
 
   // Confirmation requests
   shellConfirmationRequest: ShellConfirmationRequest | null;
@@ -103,6 +139,7 @@ export interface UIState {
   constrainHeight: boolean;
   showErrorDetails: boolean;
   showToolDescriptions: boolean;
+  isTodoPanelCollapsed: boolean;
   isNarrow: boolean;
   vimModeEnabled: boolean;
   vimMode: string | undefined;
@@ -156,6 +193,12 @@ export interface UIState {
   isRestarting: boolean;
   isTrustedFolder: boolean;
 
+  // Welcome onboarding
+  isWelcomeDialogOpen: boolean;
+  welcomeState: WelcomeState;
+  welcomeAvailableProviders: string[];
+  welcomeAvailableModels: ModelInfo[];
+
   // Input history
   inputHistory: string[];
 
@@ -166,6 +209,9 @@ export interface UIState {
   debugMessage: string;
   showDebugProfiler: boolean;
 
+  // Copy mode
+  copyModeEnabled: boolean;
+
   // Footer height
   footerHeight: number;
 
@@ -174,6 +220,16 @@ export interface UIState {
 
   // Available terminal height for content (after footer measurement)
   availableTerminalHeight: number;
+
+  // Queue error message (displayed when slash/shell commands cannot be queued)
+  queueErrorMessage: string | null;
+
+  // Markdown rendering toggle (alt+m)
+  renderMarkdown: boolean;
+
+  // Interactive shell focus state
+  activeShellPtyId: number | null;
+  embeddedShellFocused: boolean;
 }
 
 const UIStateContext = createContext<UIState | undefined>(undefined);

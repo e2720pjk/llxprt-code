@@ -7,7 +7,8 @@
 /** @vitest-environment jsdom */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { renderHook, act, waitFor } from '@testing-library/react';
+import { renderHook, waitFor } from '../../test-utils/render.js';
+import { act } from 'react';
 import { useSlashCompletion } from './useSlashCompletion.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -1250,7 +1251,7 @@ describe('useSlashCompletion', () => {
         result.current.handleAutocomplete(1); // index 1 is 'add'
       });
 
-      expect(result.current.textBuffer.text).toBe('/memory add ');
+      expect(result.current.textBuffer.text).toBe('/add ');
     });
 
     it('should complete a command with an alternative name', () => {

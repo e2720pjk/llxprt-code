@@ -7,6 +7,7 @@
 import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
+import { Colors } from '../colors.js';
 import { SuggestionsDisplay } from './SuggestionsDisplay.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import { TextBuffer, logicalPosToOffset } from './shared/text-buffer.js';
@@ -25,6 +26,7 @@ import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { Config, ApprovalMode } from '@vybestack/llxprt-code-core';
 import { StreamingState } from '../types.js';
+import { isSlashCommand } from '../utils/commandUtils.js';
 import {
   parseInputForHighlighting,
   buildSegmentsForVisualSlice,
@@ -76,8 +78,9 @@ export interface InputPromptProps {
   popAllMessages?: (callback: (messages: string) => void) => void;
   vimModeEnabled?: boolean;
   isEmbeddedShellFocused?: boolean;
-  setQueueErrorMessage?: (message: string) => void;
+  setQueueErrorMessage?: (message: string | null) => void;
   streamingState?: StreamingState;
+  queueErrorMessage?: string | null;
 }
 
 // The input content, input container, and input suggestions list may have different widths
@@ -123,9 +126,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   onSuggestionsVisibilityChange,
   suggestionsPosition = 'below',
   vimHandleInput,
+  setQueueErrorMessage,
+  streamingState,
+  isEmbeddedShellFocused,
 }) => {
   const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
-  const [escPressCount, setEscPressCount] = useState(0);
+  const escPressCount = useRef(0);
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -155,6 +161,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     slashCommands,
     commandContext,
     reverseSearchActive,
+    shellModeActive,
     config,
   );
 
@@ -177,14 +184,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     onSuggestionsVisibilityChange,
   ]);
 
-  const keypressRefreshRef = useRef<() => void>(() => {});
-
   const resetEscapeState = useCallback(() => {
     if (escapeTimerRef.current) {
       clearTimeout(escapeTimerRef.current);
       escapeTimerRef.current = null;
     }
-    setEscPressCount(0);
+    escPressCount.current = 0;
     setShowEscapePrompt(false);
   }, []);
 
@@ -239,6 +244,31 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       shellModeActive,
       shellHistory,
       resetReverseSearchCompletionState,
+    ],
+  );
+
+  const handleSubmit = useCallback(
+    (submittedValue: string) => {
+      const trimmedMessage = submittedValue.trim();
+      const isSlash = isSlashCommand(trimmedMessage);
+
+      const isShell = shellModeActive;
+      if (
+        (isSlash || isShell) &&
+        streamingState === StreamingState.Responding
+      ) {
+        setQueueErrorMessage?.(
+          `${isShell ? 'Shell' : 'Slash'} commands cannot be queued`,
+        );
+        return;
+      }
+      handleSubmitAndClear(trimmedMessage);
+    },
+    [
+      handleSubmitAndClear,
+      shellModeActive,
+      streamingState,
+      setQueueErrorMessage,
     ],
   );
 
@@ -343,6 +373,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return;
       }
 
+      if (isEmbeddedShellFocused) {
+        if (keyMatchers[Command.TOGGLE_SHELL_INPUT_FOCUS](key)) {
+          return;
+        }
+        return;
+      }
+
       if (key.paste) {
         const sanitized = key.sequence.replace(/\r\n?/g, '\n');
         const charCount = cpLen(sanitized);
@@ -391,7 +428,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       // Reset ESC count and hide prompt on any non-ESC key
       if (key.name !== 'escape') {
-        if (escPressCount > 0 || showEscapePrompt) {
+        if (escPressCount.current > 0 || showEscapePrompt) {
           resetEscapeState();
         }
       }
@@ -432,11 +469,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         // Handle double ESC for clearing input
-        if (escPressCount === 0) {
+        if (escPressCount.current === 0) {
           if (buffer.text === '') {
             return;
           }
-          setEscPressCount(1);
+          escPressCount.current = 1;
           setShowEscapePrompt(true);
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
@@ -513,7 +550,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       // If the command is a perfect match, pressing enter should execute it.
       if (completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
-        handleSubmitAndClear(buffer.text);
+        handleSubmit(buffer.text);
         return;
       }
 
@@ -602,7 +639,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             buffer.backspace();
             buffer.newline();
           } else {
-            handleSubmitAndClear(buffer.text);
+            handleSubmit(buffer.text);
           }
         }
         return;
@@ -629,12 +666,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           buffer.setText('');
           resetCompletionState();
         }
-        return;
-      }
-
-      // Ctrl+R to refresh keypress handling (for tmux reattach issues)
-      if (keyMatchers[Command.REFRESH_KEYPRESS](key)) {
-        keypressRefreshRef.current();
         return;
       }
 
@@ -688,27 +719,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       onClearScreen,
       inputHistory,
       handleSubmitAndClear,
+      handleSubmit,
       shellHistory,
       reverseSearchCompletion,
       handleClipboardImage,
       resetCompletionState,
-      escPressCount,
       showEscapePrompt,
       resetEscapeState,
       vimHandleInput,
       reverseSearchActive,
       textBeforeReverseSearch,
       cursorPosition,
+      isEmbeddedShellFocused,
     ],
   );
 
-  const { refresh } = useKeypress(handleInput, {
+  useKeypress(handleInput, {
     isActive: true,
   });
-
-  useEffect(() => {
-    keypressRefreshRef.current = refresh;
-  }, [refresh]);
 
   const linesToRender = buffer.viewportVisualLines;
   const [cursorVisualRowAbsolute, cursorVisualColAbsolute] =
@@ -889,12 +917,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         <Box flexGrow={1} flexDirection="column">
           {buffer.text.length === 0 && placeholder ? (
             focus ? (
-              <Text>
+              <Text color={Colors.Foreground}>
                 {chalk.inverse(placeholder.slice(0, 1))}
-                <Text color={theme.text.secondary}>{placeholder.slice(1)}</Text>
+                <Text color={Colors.DimComment}>{placeholder.slice(1)}</Text>
               </Text>
             ) : (
-              <Text color={theme.text.secondary}>{placeholder}</Text>
+              <Text color={Colors.DimComment}>{placeholder}</Text>
             )
           ) : (
             linesToRender
@@ -987,7 +1015,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
                 ) {
                   if (!currentLineGhost) {
                     renderedLine.push(
-                      <Text key="cursor-end">{chalk.inverse(' ')}</Text>,
+                      <Text key="cursor-end" color={Colors.Foreground}>
+                        {chalk.inverse(' ')}
+                      </Text>,
                     );
                   }
                 }
@@ -1003,7 +1033,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
                   !currentLineGhost &&
                   renderedLine.length === 0
                 ) {
-                  renderedLine.push(<Text key="blank-placeholder"> </Text>);
+                  renderedLine.push(
+                    <Text key="blank-placeholder" color={Colors.Foreground}>
+                      {' '}
+                    </Text>,
+                  );
                 }
 
                 return (

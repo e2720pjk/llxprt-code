@@ -30,6 +30,7 @@ import { Help } from './Help.js';
 import { Config } from '@vybestack/llxprt-code-core';
 import type { SlashCommand } from '../commands/types.js';
 import { ChatList } from './views/ChatList.js';
+import { ExtensionsList } from './views/ExtensionsList.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -105,7 +106,11 @@ export const HistoryItemDisplay: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'info' && (
-        <InfoMessage text={itemForDisplay.text} />
+        <InfoMessage
+          text={itemForDisplay.text}
+          icon={itemForDisplay.icon}
+          color={itemForDisplay.color}
+        />
       )}
       {itemForDisplay.type === 'warning' && (
         <WarningMessage text={itemForDisplay.text} />
@@ -122,7 +127,6 @@ export const HistoryItemDisplay: React.FC<HistoryItemDisplayProps> = ({
           osVersion={itemForDisplay.osVersion}
           sandboxEnv={itemForDisplay.sandboxEnv}
           modelVersion={itemForDisplay.modelVersion}
-          selectedAuthType={itemForDisplay.selectedAuthType}
           gcpProject={itemForDisplay.gcpProject}
           ideClient={itemForDisplay.ideClient}
           provider={itemForDisplay.provider}
@@ -152,15 +156,15 @@ export const HistoryItemDisplay: React.FC<HistoryItemDisplayProps> = ({
           config={config}
           isFocused={isFocused}
           showTodoPanel={showTodoPanel}
+          activeShellPtyId={_activeShellPtyId}
+          embeddedShellFocused={_embeddedShellFocused}
         />
       )}
       {itemForDisplay.type === 'compression' && (
         <CompressionMessage compression={itemForDisplay.compression} />
       )}
       {itemForDisplay.type === 'extensions_list' && (
-        <Box>
-          <Text color="yellow">Extensions list view not yet implemented</Text>
-        </Box>
+        <ExtensionsList extensions={itemForDisplay.extensions} />
       )}
       {itemForDisplay.type === 'tools_list' && (
         <Box>

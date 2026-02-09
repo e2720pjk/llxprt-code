@@ -24,11 +24,11 @@ import {
   GeminiEventType,
   DEFAULT_AGENT_ID,
 } from './turn.js';
-import type { ChatCompressionInfo, ToolCallResponseInfo } from './turn.js';
-import { CompressionStatus } from './turn.js';
+import type { ToolCallResponseInfo } from './turn.js';
 import { Config } from '../config/config.js';
 import { UserTierId } from '../code_assist/types.js';
-import { getCoreSystemPromptAsync, getCompressionPrompt } from './prompts.js';
+import { getCoreSystemPromptAsync } from './prompts.js';
+import { shouldIncludeSubagentDelegation } from '../prompt-config/subagent-delegation.js';
 import { reportError } from '../utils/errorReporting.js';
 import { GeminiChat } from './geminiChat.js';
 import { DebugLogger } from '../debug/index.js';
@@ -44,17 +44,12 @@ import { loadAgentRuntime } from '../runtime/AgentRuntimeLoader.js';
 import { retryWithBackoff } from '../utils/retry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
-  AuthType,
   type ContentGenerator,
   type ContentGeneratorConfig,
   createContentGenerator,
 } from './contentGenerator.js';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 import { tokenLimit } from './tokenLimits.js';
-import {
-  COMPRESSION_TOKEN_THRESHOLD,
-  COMPRESSION_PRESERVE_THRESHOLD,
-} from './compression-config.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { ideContext, type IdeContext, type File } from '../ide/ideContext.js';
 import {
@@ -65,11 +60,11 @@ import { TodoReminderService } from '../services/todo-reminder-service.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { TodoStore } from '../tools/todo-store.js';
 import type { Todo } from '../tools/todo-schemas.js';
-import { isFunctionResponse } from '../utils/messageInspectors.js';
 import { estimateTokens as estimateTextTokens } from '../utils/toolOutputLimiter.js';
 import type { AgentRuntimeState } from '../runtime/AgentRuntimeState.js';
 import { subscribeToAgentRuntimeState } from '../runtime/AgentRuntimeState.js';
 import { BaseLLMClient } from './baseLlmClient.js';
+import type { IContent } from '../services/history/IContent.js';
 
 const COMPLEXITY_ESCALATION_TURN_THRESHOLD = 3;
 const TODO_PROMPT_SUFFIX = 'Use TODO List to organize this effort.';
@@ -96,22 +91,53 @@ export function findCompressSplitPoint(
   const targetCharCount = totalCharCount * fraction;
 
   let lastSplitPoint = 0;
+  let lastToolCallSplitPoint = 0;
+  let toolCallSplitPointAfterTarget: number | null = null;
   let cumulativeCharCount = 0;
   for (let i = 0; i < contents.length; i++) {
     const content = contents[i];
     const hasFunctionResponse = content.parts?.some(
       (part) => !!part.functionResponse,
     );
+    const hasFunctionCall = content.parts?.some((part) => !!part.functionCall);
     if (content.role === 'user' && !hasFunctionResponse) {
       if (cumulativeCharCount >= targetCharCount) {
         return i;
       }
       lastSplitPoint = i;
     }
+    if (content.role === 'model' && hasFunctionCall) {
+      if (
+        cumulativeCharCount >= targetCharCount &&
+        toolCallSplitPointAfterTarget === null
+      ) {
+        toolCallSplitPointAfterTarget = i;
+      }
+      lastToolCallSplitPoint = i;
+    }
     cumulativeCharCount += charCounts[i];
   }
 
   const lastContent = contents[contents.length - 1];
+  if (lastSplitPoint > 0) {
+    if (
+      lastContent?.role === 'model' &&
+      !lastContent?.parts?.some((part) => part.functionCall)
+    ) {
+      return contents.length;
+    }
+
+    return lastSplitPoint;
+  }
+
+  if (toolCallSplitPointAfterTarget !== null) {
+    return toolCallSplitPointAfterTarget;
+  }
+
+  if (lastToolCallSplitPoint > 0) {
+    return lastToolCallSplitPoint;
+  }
+
   if (
     lastContent?.role === 'model' &&
     !lastContent?.parts?.some((part) => part.functionCall)
@@ -156,10 +182,6 @@ export class GeminiClient {
 
   /**
    * At any point in this conversation, was compression triggered without
-   * being forced and did it fail?
-   */
-  private hasFailedCompressionAttempt = false;
-
   /**
    * Runtime state for stateless operation (Phase 5)
    * @plan PLAN-20251027-STATELESS5.P10
@@ -195,22 +217,6 @@ export class GeminiClient {
     }
     if (!runtimeState.model || runtimeState.model === '') {
       throw new Error('AgentRuntimeState must have a valid model');
-    }
-    if (
-      runtimeState.authType === AuthType.API_KEY &&
-      !runtimeState.authPayload?.apiKey
-    ) {
-      throw new Error(
-        'AgentRuntimeState must include apiKey when authType is API_KEY',
-      );
-    }
-    if (
-      runtimeState.authType === AuthType.OAUTH &&
-      !runtimeState.authPayload?.token
-    ) {
-      throw new Error(
-        'AgentRuntimeState must include token when authType is OAUTH',
-      );
     }
 
     this.runtimeState = runtimeState;
@@ -452,7 +458,6 @@ export class GeminiClient {
           id: `${todo.id ?? ''}`,
           status: (todo.status ?? 'pending').toLowerCase(),
           content: todo.content ?? '',
-          priority: todo.priority ?? 'medium',
         }))
         .sort((left, right) => left.id.localeCompare(right.id));
     const normalizedA = normalize(a);
@@ -709,6 +714,18 @@ export class GeminiClient {
     }
   }
 
+  /**
+   * Updates the UI telemetry service with the current prompt token count from chat.
+   * This decouples GeminiChat from directly knowing about uiTelemetryService.
+   */
+  private updateTelemetryTokenCount(): void {
+    if (this.chat) {
+      uiTelemetryService.setLastPromptTokenCount(
+        this.chat.getLastPromptTokenCount(),
+      );
+    }
+  }
+
   async resetChat(): Promise<void> {
     // If chat exists, clear its history service
     if (this.chat) {
@@ -726,8 +743,83 @@ export class GeminiClient {
       // No chat exists yet, create one with empty history
       this.chat = await this.startChat([]);
     }
+    this.updateTelemetryTokenCount();
     // Clear the stored history as well
     this._previousHistory = [];
+  }
+
+  /**
+   * Restore history from a session by ensuring chat and content generator are fully initialized,
+   * then adding history items to the HistoryService.
+   *
+   * P0 Fix: Synchronously initializes chat/content generator if needed before attempting history restore.
+   * This ensures the history service is available immediately after the call completes.
+   *
+   * @param historyItems Array of IContent items from persisted session
+   * @returns Promise that resolves when history is fully restored and chat is ready
+   * @throws Error if initialization fails (e.g., auth not ready, config missing)
+   */
+  async restoreHistory(historyItems: IContent[]): Promise<void> {
+    this.logger.debug('restoreHistory called', {
+      itemCount: historyItems.length,
+      hasContentGenerator: !!this.contentGenerator,
+      hasChatInitialized: this.hasChatInitialized(),
+    });
+
+    if (historyItems.length === 0) {
+      this.logger.warn('restoreHistory called with empty history array');
+      return;
+    }
+
+    // P0 Fix Part 1: Ensure content generator is initialized
+    // This will fail fast if auth/config isn't ready
+    if (!this.contentGenerator) {
+      try {
+        await this.lazyInitialize();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `Cannot restore history: Content generator initialization failed. ${message}`,
+        );
+      }
+    }
+
+    // P0 Fix Part 2: Ensure chat is initialized with empty history
+    // We create the chat first, then populate it with restored history
+    if (!this.hasChatInitialized()) {
+      try {
+        this.chat = await this.startChat([]);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `Cannot restore history: Chat initialization failed. ${message}`,
+        );
+      }
+    }
+
+    // P0 Fix Part 3: Get history service and restore items
+    const historyService = this.getHistoryService();
+    if (!historyService) {
+      throw new Error(
+        'Cannot restore history: History service unavailable after chat initialization',
+      );
+    }
+
+    try {
+      // Validate and fix any issues in the history service before adding items
+      historyService.validateAndFix();
+
+      // Add all history items
+      historyService.addAll(historyItems);
+
+      this.logger.debug('History restored successfully', {
+        itemCount: historyItems.length,
+        totalTokens: historyService.getTotalTokens(),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to add history items to service: ${message}`);
+    }
   }
 
   getCurrentSequenceModel(): string | null {
@@ -758,7 +850,6 @@ export class GeminiClient {
 
   async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
-    this.hasFailedCompressionAttempt = false;
 
     // Ensure content generator is initialized before creating chat
     await this.lazyInitialize();
@@ -788,7 +879,11 @@ export class GeminiClient {
       // @requirement REQ-STAT5-003.1
       const currentModel = this.runtimeState.model;
       for (const content of extraHistory) {
-        historyService.add(ContentConverters.toIContent(content), currentModel);
+        const turnKey = historyService.generateTurnKey();
+        historyService.add(
+          ContentConverters.toIContent(content, undefined, undefined, turnKey),
+          currentModel,
+        );
       }
     }
 
@@ -802,11 +897,14 @@ export class GeminiClient {
       logger.debug(
         () => `DEBUG [client.startChat]: Model from config: ${model}`,
       );
-      let systemInstruction = await getCoreSystemPromptAsync(
+      const includeSubagentDelegation =
+        await this.shouldIncludeSubagentDelegation(enabledToolNames);
+      let systemInstruction = await getCoreSystemPromptAsync({
         userMemory,
         model,
-        enabledToolNames,
-      );
+        tools: enabledToolNames,
+        includeSubagentDelegation,
+      });
 
       // Add environment context to system instruction
       const envContextText = envParts
@@ -888,6 +986,27 @@ export class GeminiClient {
           target: null,
         },
         tools: this.getToolGovernanceEphemerals(),
+        'reasoning.enabled': this.config.getEphemeralSetting(
+          'reasoning.enabled',
+        ) as boolean | undefined,
+        'reasoning.includeInContext': this.config.getEphemeralSetting(
+          'reasoning.includeInContext',
+        ) as boolean | undefined,
+        'reasoning.includeInResponse': this.config.getEphemeralSetting(
+          'reasoning.includeInResponse',
+        ) as boolean | undefined,
+        'reasoning.format': this.config.getEphemeralSetting(
+          'reasoning.format',
+        ) as 'native' | 'field' | undefined,
+        'reasoning.stripFromContext': this.config.getEphemeralSetting(
+          'reasoning.stripFromContext',
+        ) as 'all' | 'allButLast' | 'none' | undefined,
+        'reasoning.effort': this.config.getEphemeralSetting(
+          'reasoning.effort',
+        ) as 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | undefined,
+        'reasoning.maxTokens': this.config.getEphemeralSetting(
+          'reasoning.maxTokens',
+        ) as number | undefined,
       };
 
       const providerRuntime = createProviderRuntimeContext({
@@ -1213,8 +1332,7 @@ export class GeminiClient {
     );
 
     const remainingTokenCount =
-      tokenLimit(modelForLimitCheck) -
-      uiTelemetryService.getLastPromptTokenCount();
+      tokenLimit(modelForLimitCheck) - this.getChat().getLastPromptTokenCount();
 
     if (estimatedRequestTokenCount > remainingTokenCount * 0.95) {
       const contentGenConfig = this.config.getContentGeneratorConfig();
@@ -1231,11 +1349,6 @@ export class GeminiClient {
         DEFAULT_AGENT_ID,
         providerName,
       );
-    }
-
-    const compressed = await this.tryCompressChat(prompt_id, false);
-    if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
-      yield { type: GeminiEventType.ChatCompressed, value: compressed };
     }
 
     const history = await this.getHistory();
@@ -1315,8 +1428,19 @@ export class GeminiClient {
           escalate: this.toolCallReminderLevel === 'escalated',
         });
         if (reminderResult.reminder) {
+          // Filter out functionCall/functionResponse before appending reminder.
+          // These tool-related parts were already recorded in history.
+          // Including them again would create duplicate tool_call blocks (Issue #1135).
+          const textOnlyRequest = Array.isArray(request)
+            ? (request as Part[]).filter(
+                (part) =>
+                  typeof part === 'object' &&
+                  !('functionCall' in part) &&
+                  !('functionResponse' in part),
+              )
+            : [];
           request = this.appendSystemReminderToRequest(
-            request,
+            textOnlyRequest,
             reminderResult.reminder,
           );
           this.lastTodoSnapshot = reminderResult.todos;
@@ -1385,7 +1509,6 @@ export class GeminiClient {
               id: `${(todo as Todo).id ?? ''}`,
               content: (todo as Todo).content ?? '',
               status: (todo as Todo).status ?? 'pending',
-              priority: (todo as Todo).priority ?? 'medium',
             }));
           }
         }
@@ -1395,6 +1518,10 @@ export class GeminiClient {
         } else {
           yield event;
         }
+
+        // Update telemetry token count after yielding stream events
+        // This keeps UI in sync with actual token usage
+        this.updateTelemetryTokenCount();
 
         if (event.type === GeminiEventType.Error) {
           for (const deferred of deferredEvents) {
@@ -1515,8 +1642,20 @@ export class GeminiClient {
         }
 
         // Set up retry request with reminder
+        // IMPORTANT: Filter out functionCall/functionResponse from baseRequest before retry.
+        // These tool-related parts were already recorded in history after the first request.
+        // Including them again would create duplicate tool_call blocks, causing Anthropic
+        // to reject with "tool_use ids were found without tool_result blocks" (Issue #1135).
+        const textOnlyBase = Array.isArray(baseRequest)
+          ? (baseRequest as Part[]).filter(
+              (part) =>
+                typeof part === 'object' &&
+                !('functionCall' in part) &&
+                !('functionResponse' in part),
+            )
+          : [];
         baseRequest = this.appendSystemReminderToRequest(
-          baseRequest,
+          textOnlyBase,
           followUpReminder,
         );
       } else {
@@ -1543,11 +1682,15 @@ export class GeminiClient {
 
     try {
       const userMemory = this.config.getUserMemory();
-      const systemInstruction = await getCoreSystemPromptAsync(
+      const enabledToolNames = this.getEnabledToolNamesForPrompt();
+      const includeSubagentDelegation =
+        await this.shouldIncludeSubagentDelegation(enabledToolNames);
+      const systemInstruction = await getCoreSystemPromptAsync({
         userMemory,
-        modelToUse,
-        this.getEnabledToolNamesForPrompt(),
-      );
+        model: modelToUse,
+        tools: enabledToolNames,
+        includeSubagentDelegation,
+      });
 
       // Convert Content[] to a single prompt for BaseLLMClient
       // This preserves the conversation context in the prompt
@@ -1637,12 +1780,16 @@ export class GeminiClient {
 
     try {
       const userMemory = this.config.getUserMemory();
+      const enabledToolNames = this.getEnabledToolNamesForPrompt();
+      const includeSubagentDelegation =
+        await this.shouldIncludeSubagentDelegation(enabledToolNames);
       // Provider name removed from prompt call signature
-      const systemInstruction = await getCoreSystemPromptAsync(
+      const systemInstruction = await getCoreSystemPromptAsync({
         userMemory,
-        modelToUse,
-        this.getEnabledToolNamesForPrompt(),
-      );
+        model: modelToUse,
+        tools: enabledToolNames,
+        includeSubagentDelegation,
+      });
 
       const requestConfig = {
         abortSignal,
@@ -1697,191 +1844,6 @@ export class GeminiClient {
 
     // Result is already validated by BaseLLMClient
     return result as number[][];
-  }
-
-  /**
-   * Manually trigger chat compression
-   * Returns compression info if successful, null if not needed
-   */
-  async tryCompressChat(
-    prompt_id: string,
-    force: boolean = false,
-  ): Promise<ChatCompressionInfo> {
-    await this.lazyInitialize();
-
-    if (!this.hasChatInitialized()) {
-      return {
-        originalTokenCount: 0,
-        newTokenCount: 0,
-        compressionStatus: CompressionStatus.NOOP,
-      };
-    }
-
-    // If the model is 'auto', we will use a placeholder model to check.
-    // Compression occurs before we choose a model, so calling `count_tokens`
-    // before the model is chosen would result in an error.
-    // @plan PLAN-20251027-STATELESS5.P10
-    // @requirement REQ-STAT5-003.1
-    const model = this._getEffectiveModelForCurrentTurn();
-
-    const curatedHistory = this.getChat().getHistory(true);
-
-    // Regardless of `force`, don't do anything if the history is empty.
-    if (
-      curatedHistory.length === 0 ||
-      (this.hasFailedCompressionAttempt && !force)
-    ) {
-      return {
-        originalTokenCount: 0,
-        newTokenCount: 0,
-        compressionStatus: CompressionStatus.NOOP,
-      };
-    }
-
-    // Use lastPromptTokenCount from telemetry service as the source of truth
-    // This is more accurate than estimating from history
-    const originalTokenCount = uiTelemetryService.getLastPromptTokenCount();
-
-    const contextPercentageThreshold =
-      this.config.getChatCompression()?.contextPercentageThreshold;
-
-    // Don't compress if not forced and we are under the limit.
-    if (!force) {
-      const threshold =
-        contextPercentageThreshold ?? COMPRESSION_TOKEN_THRESHOLD;
-      const userContextLimit = this.config.getEphemeralSetting(
-        'context-limit',
-      ) as number | undefined;
-      if (
-        originalTokenCount <
-        threshold * tokenLimit(model, userContextLimit)
-      ) {
-        return {
-          originalTokenCount,
-          newTokenCount: originalTokenCount,
-          compressionStatus: CompressionStatus.NOOP,
-        };
-      }
-    }
-
-    let compressBeforeIndex = findCompressSplitPoint(
-      curatedHistory,
-      1 - COMPRESSION_PRESERVE_THRESHOLD,
-    );
-    // Find the first user message after the index. This is the start of the next turn.
-    while (
-      compressBeforeIndex < curatedHistory.length &&
-      (curatedHistory[compressBeforeIndex]?.role === 'model' ||
-        isFunctionResponse(curatedHistory[compressBeforeIndex]))
-    ) {
-      compressBeforeIndex++;
-    }
-
-    const historyToCompress = curatedHistory.slice(0, compressBeforeIndex);
-    const historyToKeep = curatedHistory.slice(compressBeforeIndex);
-
-    if (historyToCompress.length === 0) {
-      return {
-        originalTokenCount,
-        newTokenCount: originalTokenCount,
-        compressionStatus: CompressionStatus.NOOP,
-      };
-    }
-
-    this.getChat().setHistory(historyToCompress);
-
-    const { text: summary } = await this.getChat().sendMessage(
-      {
-        message: {
-          text: 'First, reason in your scratchpad. Then, generate the <state_snapshot>.',
-        },
-        config: {
-          systemInstruction: { text: getCompressionPrompt() },
-          maxOutputTokens: originalTokenCount,
-        },
-      },
-      prompt_id,
-    );
-
-    // For compression, we don't want to preserve the HistoryService
-    // because we're creating a new compressed conversation state
-    // The UI should reflect that compression happened
-    const compressedChat = await this.startChat([
-      {
-        role: 'user',
-        parts: [{ text: summary }],
-      },
-      {
-        role: 'model',
-        parts: [{ text: 'Got it. Thanks for the additional context!' }],
-      },
-      ...historyToKeep,
-    ]);
-    this.forceFullIdeContext = true;
-
-    // Use HistoryService's token count for consistency with the UI display
-    const compressedHistoryService = compressedChat.getHistoryService();
-    const newTokenCount = compressedHistoryService
-      ? compressedHistoryService.getTotalTokens()
-      : 0;
-    if (newTokenCount === undefined || newTokenCount === 0) {
-      this.logger.warn(
-        () => 'Could not determine compressed history token count.',
-      );
-      this.hasFailedCompressionAttempt = !force && true;
-      return {
-        originalTokenCount,
-        newTokenCount: originalTokenCount,
-        compressionStatus:
-          CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
-      };
-    }
-
-    // TODO: Add proper telemetry logging once available
-    this.logger.debug(
-      () =>
-        `Chat compression: ${originalTokenCount} -> ${newTokenCount} tokens`,
-    );
-
-    if (newTokenCount > originalTokenCount) {
-      this.hasFailedCompressionAttempt = !force && true;
-      return {
-        originalTokenCount,
-        newTokenCount,
-        compressionStatus:
-          CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
-      };
-    } else {
-      this.chat = compressedChat; // Chat compression successful, set new state.
-
-      // Update telemetry service with new token count
-      uiTelemetryService.setLastPromptTokenCount(newTokenCount);
-
-      // Emit token update event for the new compressed chat
-      // This ensures the UI updates with the new token count
-      // Only emit if compression was successful
-      if (typeof compressedChat.getHistoryService === 'function') {
-        const historyService = compressedChat.getHistoryService();
-        if (historyService) {
-          const userContextLimit = this.config.getEphemeralSetting(
-            'context-limit',
-          ) as number | undefined;
-          // @plan PLAN-20251027-STATELESS5.P10
-          // @requirement REQ-STAT5-003.1
-          historyService.emit('tokensUpdated', {
-            totalTokens: newTokenCount,
-            addedTokens: newTokenCount - originalTokenCount,
-            tokenLimit: tokenLimit(this.runtimeState.model, userContextLimit),
-          });
-        }
-      }
-    }
-
-    return {
-      originalTokenCount,
-      newTokenCount,
-      compressionStatus: CompressionStatus.COMPRESSED,
-    };
   }
 
   private getToolGovernanceEphemerals():
@@ -1985,6 +1947,14 @@ export class GeminiClient {
           .map((tool) => tool.name)
           .filter(Boolean),
       ),
+    );
+  }
+
+  private async shouldIncludeSubagentDelegation(
+    enabledToolNames: string[],
+  ): Promise<boolean> {
+    return shouldIncludeSubagentDelegation(enabledToolNames, () =>
+      this.config.getSubagentManager?.(),
     );
   }
 

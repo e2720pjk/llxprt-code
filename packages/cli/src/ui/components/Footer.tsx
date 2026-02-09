@@ -18,11 +18,11 @@ import {
 } from '@vybestack/llxprt-code-core';
 import { ConsoleSummaryDisplay } from './ConsoleSummaryDisplay.js';
 import process from 'node:process';
-import Gradient from 'ink-gradient';
 import { useRuntimeApi } from '../contexts/RuntimeContext.js';
 import { DebugProfiler } from './DebugProfiler.js';
 import { useResponsive } from '../hooks/useResponsive.js';
 import { truncateMiddle } from '../utils/responsive.js';
+import { ThemedGradient } from './ThemedGradient.js';
 
 interface FooterProps {
   model: string;
@@ -276,15 +276,15 @@ export const Footer = React.memo<FooterProps>(
             {branchName && (
               <>
                 {nightly ? (
-                  <Gradient colors={Colors.GradientColors}>
-                    <Text>
+                  <ThemedGradient colors={Colors.GradientColors}>
+                    <Text color={Colors.Foreground}>
                       (
                       {branchName.length > maxBranchLength
                         ? truncateMiddle(branchName, maxBranchLength)
                         : branchName}
                       *)
                     </Text>
-                  </Gradient>
+                  </ThemedGradient>
                 ) : (
                   <Text color={SemanticColors.text.accent}>
                     (
@@ -367,11 +367,11 @@ export const Footer = React.memo<FooterProps>(
           {!hideCWD && (
             <Box flexDirection="row" alignItems="center">
               {nightly ? (
-                <Gradient colors={Colors.GradientColors}>
-                  <Text>
+                <ThemedGradient colors={Colors.GradientColors}>
+                  <Text color={Colors.Foreground}>
                     {shortenPath(tildeifyPath(targetDir), isCompact ? 30 : 70)}
                   </Text>
-                </Gradient>
+                </ThemedGradient>
               ) : (
                 <Text color={SemanticColors.text.secondary}>
                   {shortenPath(tildeifyPath(targetDir), isCompact ? 30 : 70)}

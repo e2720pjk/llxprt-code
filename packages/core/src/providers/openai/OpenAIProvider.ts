@@ -20,7 +20,6 @@
  */
 
 import OpenAI from 'openai';
-import crypto from 'node:crypto';
 import * as http from 'http';
 import * as https from 'https';
 import * as net from 'net';
@@ -56,13 +55,19 @@ import { processToolParameters } from '../../tools/doubleEscapeUtils.js';
 import { type IModel } from '../IModel.js';
 import { type IProvider } from '../IProvider.js';
 import { getCoreSystemPromptAsync } from '../../core/prompts.js';
-import { retryWithBackoff } from '../../utils/retry.js';
+import { shouldIncludeSubagentDelegation } from '../../prompt-config/subagent-delegation.js';
+import {
+  retryWithBackoff,
+  isNetworkTransientError,
+} from '../../utils/retry.js';
 import { resolveUserMemory } from '../utils/userMemory.js';
 import { resolveRuntimeAuthToken } from '../utils/authToken.js';
-import { filterOpenAIRequestParams } from './openaiRequestParams.js';
 import { ensureJsonSafe } from '../../utils/unicodeUtils.js';
 import { ToolCallPipeline } from './ToolCallPipeline.js';
-import { buildToolResponsePayload } from '../utils/toolResponsePayload.js';
+import {
+  buildToolResponsePayload,
+  formatToolResponseText,
+} from '../utils/toolResponsePayload.js';
 import { isLocalEndpoint } from '../utils/localEndpoint.js';
 import {
   filterThinkingForContext,
@@ -280,21 +285,24 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
   private extractModelParamsFromOptions(
     options: NormalizedGenerateChatOptions,
   ): Record<string, unknown> | undefined {
-    const providerSettings =
-      options.settings?.getProviderSettings(this.name) ?? {};
-    const configEphemerals = options.invocation?.ephemerals ?? {};
+    const modelParams = { ...(options.invocation?.modelParams ?? {}) };
 
-    const filteredProviderParams = filterOpenAIRequestParams(providerSettings);
-    const filteredEphemeralParams = filterOpenAIRequestParams(configEphemerals);
-
-    if (!filteredProviderParams && !filteredEphemeralParams) {
-      return undefined;
+    // Translate generic maxOutputTokens ephemeral to OpenAI's max_tokens
+    const rawMaxOutput = options.settings?.get('maxOutputTokens');
+    const genericMaxOutput =
+      typeof rawMaxOutput === 'number' &&
+      Number.isFinite(rawMaxOutput) &&
+      rawMaxOutput > 0
+        ? rawMaxOutput
+        : undefined;
+    if (
+      genericMaxOutput !== undefined &&
+      modelParams['max_tokens'] === undefined
+    ) {
+      modelParams['max_tokens'] = genericMaxOutput;
     }
 
-    return {
-      ...(filteredProviderParams ?? {}),
-      ...(filteredEphemeralParams ?? {}),
-    };
+    return Object.keys(modelParams).length > 0 ? modelParams : undefined;
   }
 
   /**
@@ -817,17 +825,34 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
   }
 
   override async getModels(): Promise<IModel[]> {
+    // HYDRATION NOTE: Registry lookup has been moved to ProviderManager.getAvailableModels()
+    // This method now only fetches from the live API or falls back to hardcoded list.
+    // The ProviderManager will hydrate these results with models.dev data.
+
+    this.getLogger().debug(
+      () => `[getModels] Called for provider: ${this.name}`,
+    );
+
     try {
-      // Always try to fetch models, regardless of auth status
+      // Try to fetch models from the provider's API
       // Local endpoints often work without authentication
       const authToken = await this.getAuthToken();
       const baseURL = this.getBaseURL();
       const agents = this.createHttpAgents();
       const client = this.instantiateClient(authToken, baseURL, agents);
+
+      const modelsEndpoint = `${baseURL ?? 'https://api.openai.com/v1'}/models`;
+      this.getLogger().debug(
+        () =>
+          `[getModels] Fetching models from: ${modelsEndpoint} (provider: ${this.name}, hasAuth: ${!!authToken})`,
+      );
+
       const response = await client.models.list();
       const models: IModel[] = [];
+      const allModelIds: string[] = [];
 
       for await (const model of response) {
+        allModelIds.push(model.id);
         // Filter out non-chat models (embeddings, audio, image, vision, DALL·E, etc.)
         if (
           !/embedding|whisper|audio|tts|image|vision|dall[- ]?e|moderation/i.test(
@@ -837,11 +862,16 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
           models.push({
             id: model.id,
             name: model.id,
-            provider: 'openai',
+            provider: this.name,
             supportedToolFormats: ['openai'],
           });
         }
       }
+
+      this.getLogger().debug(
+        () =>
+          `[getModels] Response from ${modelsEndpoint}: total=${allModelIds.length}, filtered=${models.length}, models=${JSON.stringify(allModelIds)}`,
+      );
 
       return models;
     } catch (error) {
@@ -855,23 +885,24 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
 
   private getFallbackModels(): IModel[] {
     // Return commonly available OpenAI models as fallback
+    // Use this.name so it works for providers that extend OpenAIProvider (e.g., Chutes.ai)
     return [
       {
         id: 'gpt-5',
         name: 'GPT-5',
-        provider: 'openai',
+        provider: this.name,
         supportedToolFormats: ['openai'],
       },
       {
         id: 'gpt-4.2-turbo-preview',
         name: 'GPT-4.2 Turbo Preview',
-        provider: 'openai',
+        provider: this.name,
         supportedToolFormats: ['openai'],
       },
       {
         id: 'gpt-4.2-turbo',
         name: 'GPT-4.2 Turbo',
-        provider: 'openai',
+        provider: this.name,
         supportedToolFormats: ['openai'],
       },
     ];
@@ -992,53 +1023,38 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
    * Handles IDs from OpenAI (call_xxx), Anthropic (toolu_xxx), and history (hist_tool_xxx)
    */
   private normalizeToOpenAIToolId(id: string): string {
-    const sanitize = (value: string) =>
-      value.replace(/[^a-zA-Z0-9_]/g, '') ||
-      'call_' + crypto.randomUUID().replace(/-/g, '');
-    // If already in OpenAI format, return as-is
+    if (!id) {
+      return 'call_';
+    }
+
     if (id.startsWith('call_')) {
-      return sanitize(id);
+      return id;
     }
 
-    // For history format, extract the UUID and add OpenAI prefix
     if (id.startsWith('hist_tool_')) {
-      const uuid = id.substring('hist_tool_'.length);
-      return sanitize('call_' + uuid);
+      return `call_${id.substring('hist_tool_'.length)}`;
     }
 
-    // For Anthropic format, extract the UUID and add OpenAI prefix
-    if (id.startsWith('toolu_')) {
-      const uuid = id.substring('toolu_'.length);
-      return sanitize('call_' + uuid);
-    }
-
-    // Unknown format - assume it's a raw UUID
-    return sanitize('call_' + id);
+    return `call_${id}`;
   }
 
   /**
    * Normalize tool IDs from OpenAI format to history format
    */
   private normalizeToHistoryToolId(id: string): string {
-    // If already in history format, return as-is
+    if (!id) {
+      return 'hist_tool_';
+    }
+
     if (id.startsWith('hist_tool_')) {
       return id;
     }
 
-    // For OpenAI format, extract the UUID and add history prefix
     if (id.startsWith('call_')) {
-      const uuid = id.substring('call_'.length);
-      return 'hist_tool_' + uuid;
+      return `hist_tool_${id.substring('call_'.length)}`;
     }
 
-    // For Anthropic format, extract the UUID and add history prefix
-    if (id.startsWith('toolu_')) {
-      const uuid = id.substring('toolu_'.length);
-      return 'hist_tool_' + uuid;
-    }
-
-    // Unknown format - assume it's a raw UUID
-    return 'hist_tool_' + id;
+    return `hist_tool_${id}`;
   }
 
   /**
@@ -1126,78 +1142,15 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
     block: ToolResponseBlock,
     config?: Config,
   ): string {
-    const payload = buildToolResponsePayload(block, config);
-    return ensureJsonSafe(JSON.stringify(payload));
-  }
-
-  private shouldCompressToolMessages(
-    error: unknown,
-    logger: DebugLogger,
-  ): boolean {
-    if (
-      error &&
-      typeof error === 'object' &&
-      'status' in error &&
-      (error as { status?: number }).status === 400
-    ) {
-      const raw =
-        error &&
-        typeof error === 'object' &&
-        'error' in error &&
-        typeof (error as { error?: { metadata?: { raw?: string } } }).error ===
-          'object'
-          ? ((error as { error?: { metadata?: { raw?: string } } }).error ?? {})
-              .metadata?.raw
-          : undefined;
-      if (raw === 'ERROR') {
-        logger.debug(
-          () =>
-            `[OpenAIProvider] Detected OpenRouter 400 response with raw metadata. Will attempt tool-response compression.`,
-        );
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private compressToolMessages(
-    messages: OpenAI.Chat.ChatCompletionMessageParam[],
-    maxLength: number,
-    logger: DebugLogger,
-  ): boolean {
-    let modified = false;
-    messages.forEach((message, index) => {
-      if (message.role !== 'tool' || typeof message.content !== 'string') {
-        return;
-      }
-      const original = message.content;
-      if (original.length <= maxLength) {
-        return;
-      }
-
-      let nextContent = original;
-      try {
-        const parsed = JSON.parse(original) as {
-          result?: unknown;
-          truncated?: boolean;
-          originalLength?: number;
-        };
-        parsed.result = `[omitted ${original.length} chars due to provider limits]`;
-        parsed.truncated = true;
-        parsed.originalLength = original.length;
-        nextContent = JSON.stringify(parsed);
-      } catch {
-        nextContent = `${original.slice(0, maxLength)}… [truncated ${original.length - maxLength} chars]`;
-      }
-
-      message.content = ensureJsonSafe(nextContent);
-      modified = true;
-      logger.debug(
-        () =>
-          `[OpenAIProvider] Compressed tool message #${index} from ${original.length} chars to ${message.content.length} chars`,
-      );
-    });
-    return modified;
+    const payload = buildToolResponsePayload(block, config, true);
+    return ensureJsonSafe(
+      formatToolResponseText({
+        status: payload.status,
+        toolName: payload.toolName ?? block.toolName,
+        error: payload.error,
+        output: payload.result,
+      }),
+    );
   }
 
   /**
@@ -1640,11 +1593,16 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
       options.userMemory,
       () => options.invocation?.userMemory,
     );
-    const systemPrompt = await getCoreSystemPromptAsync(
+    const includeSubagentDelegation = await shouldIncludeSubagentDelegation(
+      toolNamesArg ?? [],
+      () => options.config?.getSubagentManager?.(),
+    );
+    const systemPrompt = await getCoreSystemPromptAsync({
       userMemory,
       model,
-      toolNamesArg,
-    );
+      tools: toolNamesArg,
+      includeSubagentDelegation,
+    });
 
     // Add system prompt as the first message in the array
     const messagesWithSystem: OpenAI.Chat.ChatCompletionMessageParam[] = [
@@ -1723,6 +1681,23 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
         });
       }
       Object.assign(requestBody, requestOverrides);
+    }
+
+    // Inject thinking parameter for OpenAI-compatible reasoning models (GLM-4.7, Kimi K2, etc.)
+    // when reasoning.enabled is set but no explicit thinking/reasoning param was provided via modelParams.
+    if (!('thinking' in requestBody) && !('reasoning_effort' in requestBody)) {
+      const reasoningEnabled = options.invocation?.modelBehavior?.[
+        'reasoning.enabled'
+      ] as boolean | undefined;
+      if (reasoningEnabled === true) {
+        (requestBody as unknown as Record<string, unknown>)['thinking'] = {
+          type: 'enabled',
+        };
+      } else if (reasoningEnabled === false) {
+        (requestBody as unknown as Record<string, unknown>)['thinking'] = {
+          type: 'disabled',
+        };
+      }
     }
 
     if (typeof maxTokens === 'number' && Number.isFinite(maxTokens)) {
@@ -1865,7 +1840,6 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
         onPersistent429: onPersistent429Callback,
       });
     } else {
-      let compressedOnce = false;
       while (true) {
         try {
           response = (await retryWithBackoff(executeRequest, {
@@ -1910,19 +1884,6 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
               enhancedError as Error & { originalError?: unknown }
             ).originalError = error;
             throw enhancedError;
-          }
-
-          if (
-            !compressedOnce &&
-            this.shouldCompressToolMessages(error, logger) &&
-            this.compressToolMessages(requestBody.messages, 512, logger)
-          ) {
-            compressedOnce = true;
-            logger.warn(
-              () =>
-                `[OpenAIProvider] Retrying request after compressing tool responses due to provider 400`,
-            );
-            continue;
           }
 
           const capturedErrorMessage =
@@ -3015,6 +2976,7 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
         'apiKeyfile',
         'api-keyfile',
         'baseUrl',
+        'baseURL',
         'base-url',
         'model',
         'toolFormat',
@@ -3186,11 +3148,16 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
       options.userMemory,
       () => options.invocation?.userMemory,
     );
-    const systemPrompt = await getCoreSystemPromptAsync(
+    const includeSubagentDelegation = await shouldIncludeSubagentDelegation(
+      toolNamesArg ?? [],
+      () => options.config?.getSubagentManager?.(),
+    );
+    const systemPrompt = await getCoreSystemPromptAsync({
       userMemory,
       model,
-      toolNamesArg,
-    );
+      tools: toolNamesArg,
+      includeSubagentDelegation,
+    });
 
     // Add system prompt as the first message in the array
     const messagesWithSystem: OpenAI.Chat.ChatCompletionMessageParam[] = [
@@ -3229,6 +3196,22 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
         });
       }
       Object.assign(requestBody, requestOverrides);
+    }
+
+    // Inject thinking parameter for OpenAI-compatible reasoning models (pipeline path)
+    if (!('thinking' in requestBody) && !('reasoning_effort' in requestBody)) {
+      const reasoningEnabled = options.invocation?.modelBehavior?.[
+        'reasoning.enabled'
+      ] as boolean | undefined;
+      if (reasoningEnabled === true) {
+        (requestBody as unknown as Record<string, unknown>)['thinking'] = {
+          type: 'enabled',
+        };
+      } else if (reasoningEnabled === false) {
+        (requestBody as unknown as Record<string, unknown>)['thinking'] = {
+          type: 'disabled',
+        };
+      }
     }
 
     if (typeof maxTokens === 'number' && Number.isFinite(maxTokens)) {
@@ -3338,8 +3321,6 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
     };
 
     if (streamingEnabled) {
-      // Streaming mode - use retry loop with compression support
-      let compressedOnce = false;
       while (true) {
         try {
           // Use failover client if bucket failover happened, otherwise use original client
@@ -3402,20 +3383,6 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
             throw enhancedError;
           }
 
-          // Tool message compression logic
-          if (
-            !compressedOnce &&
-            this.shouldCompressToolMessages(error, logger) &&
-            this.compressToolMessages(requestBody.messages, 512, logger)
-          ) {
-            compressedOnce = true;
-            logger.warn(
-              () =>
-                `[OpenAIProvider] Retrying streaming request after compressing tool responses due to provider 400`,
-            );
-            continue;
-          }
-
           // Dump error if enabled
           if (shouldDumpError) {
             const dumpErrorMessage =
@@ -3457,8 +3424,6 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
         }
       }
     } else {
-      // Non-streaming mode - use comprehensive retry loop with compression
-      let compressedOnce = false;
       while (true) {
         try {
           // Use failover client if bucket failover happened, otherwise use original client
@@ -3528,20 +3493,6 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
               enhancedError as Error & { originalError?: unknown }
             ).originalError = error;
             throw enhancedError;
-          }
-
-          // Tool message compression logic
-          if (
-            !compressedOnce &&
-            this.shouldCompressToolMessages(error, logger) &&
-            this.compressToolMessages(requestBody.messages, 512, logger)
-          ) {
-            compressedOnce = true;
-            logger.warn(
-              () =>
-                `[OpenAIProvider] Retrying request after compressing tool responses due to provider 400`,
-            );
-            continue;
           }
 
           // Dump error if enabled
@@ -3717,7 +3668,10 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
 
             for (const toolCall of reasoningToolCalls) {
               // Add complete tool call as fragments to pipeline
+              // For Kimi tool calls extracted from reasoning_content, generate a synthetic ID
+              // since they don't have a real tool_call_id from the API
               this.toolCallPipeline.addFragment(baseIndex, {
+                id: `call_kimi_${Date.now()}_${Math.random().toString(36).substring(7)}`,
                 name: toolCall.name,
                 args: JSON.stringify(toolCall.parameters),
               });
@@ -3957,7 +3911,10 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
               if (deltaToolCall.index === undefined) continue;
 
               // Add fragment to pipeline instead of accumulating strings
+              // IMPORTANT: Capture the tool_call_id to preserve OpenAI API contract
+              // This ensures tool responses can be properly matched in the next turn
               this.toolCallPipeline.addFragment(deltaToolCall.index, {
+                id: deltaToolCall.id,
                 name: deltaToolCall.function?.name,
                 args: deltaToolCall.function?.arguments,
               });
@@ -4223,7 +4180,9 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
 
           blocks.push({
             type: 'tool_call',
-            id: this.normalizeToHistoryToolId(`call_${normalizedCall.index}`),
+            id: this.normalizeToHistoryToolId(
+              normalizedCall.id || `call_${normalizedCall.index}`,
+            ),
             name: normalizedCall.name,
             parameters: processedParameters,
           });
@@ -4723,8 +4682,16 @@ export class OpenAIProvider extends BaseProvider implements IProvider {
 
     // Retry on 429 rate limit errors or 5xx server errors
     const shouldRetry = Boolean(
-      status === 429 || status === 503 || status === 504,
+      status === 429 || (status !== undefined && status >= 500 && status < 600),
     );
+
+    if (!shouldRetry && isNetworkTransientError(error)) {
+      logger.debug(
+        () =>
+          `Will retry request due to network transient error: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return true;
+    }
 
     if (shouldRetry) {
       logger.debug(() => `Will retry request due to status ${status}`);

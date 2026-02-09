@@ -6,6 +6,7 @@
 
 import {
   CompressionStatus,
+  GeminiCLIExtension,
   ToolCallConfirmationDetails,
   ToolResultDisplay,
   type ThinkingBlock,
@@ -53,6 +54,7 @@ export interface IndividualToolCallDisplay {
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
   isFocused?: boolean;
+  ptyId?: number;
 }
 
 export interface CompressionProps {
@@ -94,6 +96,8 @@ export type HistoryItemOAuthURL = HistoryItemBase & {
 export type HistoryItemInfo = HistoryItemBase & {
   type: 'info';
   text: string;
+  icon?: string; // Custom prefix (default: 'ℹ ')
+  color?: string; // Custom color (default: theme.status.warning)
 };
 
 export type HistoryItemError = HistoryItemBase & {
@@ -112,7 +116,6 @@ export type HistoryItemAbout = HistoryItemBase & {
   osVersion: string;
   sandboxEnv: string;
   modelVersion: string;
-  selectedAuthType: string;
   gcpProject: string;
   /**
    * Path to the configured keyfile for the active provider. Empty string if none.
@@ -176,6 +179,7 @@ export type HistoryItemCompression = HistoryItemBase & {
 
 export type HistoryItemExtensionsList = HistoryItemBase & {
   type: 'extensions_list';
+  extensions: GeminiCLIExtension[];
 };
 
 export interface ChatDetail {
@@ -245,6 +249,9 @@ export type HistoryItemWithoutId =
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
+// Constant for "no icon, just indent"
+export const emptyIcon = '  ';
+
 // Message types used by internal command feedback (subset of HistoryItem types)
 export enum MessageType {
   INFO = 'info',
@@ -281,7 +288,6 @@ export type Message =
       osVersion: string;
       sandboxEnv: string;
       modelVersion: string;
-      selectedAuthType: string;
       gcpProject: string;
       keyfile: string;
       key: string;

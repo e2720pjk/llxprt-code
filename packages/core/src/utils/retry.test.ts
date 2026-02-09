@@ -447,11 +447,10 @@ describe('retryWithBackoff', () => {
       const promise = retryWithBackoff(mockFn, {
         maxAttempts: 3,
         initialDelayMs: 100,
-        onPersistent429: async (authType?: string) => {
+        onPersistent429: async () => {
           fallbackOccurred = true;
-          return await fallbackCallback(authType);
+          return await fallbackCallback();
         },
-        authType: 'oauth-personal',
       });
 
       // Advance all timers to complete retries
@@ -461,7 +460,7 @@ describe('retryWithBackoff', () => {
       await expect(promise).resolves.toBe('success');
 
       // Verify callback was called with correct auth type
-      expect(fallbackCallback).toHaveBeenCalledWith('oauth-personal');
+      expect(fallbackCallback).toHaveBeenCalled();
 
       // Should retry again after fallback
       expect(mockFn).toHaveBeenCalledTimes(3); // 2 initial attempts + 1 after fallback
@@ -480,7 +479,6 @@ describe('retryWithBackoff', () => {
         maxAttempts: 3,
         initialDelayMs: 100,
         onPersistent429: fallbackCallback,
-        authType: 'gemini-api-key',
       });
 
       // Handle the promise properly to avoid unhandled rejections
@@ -516,7 +514,6 @@ describe('retryWithBackoff', () => {
         maxAttempts: 3,
         initialDelayMs: 100,
         onPersistent429: fallbackCallback,
-        authType: 'oauth-personal',
       });
 
       await vi.runAllTimersAsync();
@@ -538,7 +535,6 @@ describe('retryWithBackoff', () => {
         maxAttempts: 3,
         initialDelayMs: 100,
         onPersistent429: fallbackCallback,
-        authType: 'oauth-personal',
       });
 
       // Handle the promise properly to avoid unhandled rejections
@@ -549,10 +545,7 @@ describe('retryWithBackoff', () => {
       // Should fail with original error when fallback is rejected
       expect(result).toBeInstanceOf(Error);
       expect(result.message).toBe('Rate limit exceeded');
-      expect(fallbackCallback).toHaveBeenCalledWith(
-        'oauth-personal',
-        expect.any(Error),
-      );
+      expect(fallbackCallback).toHaveBeenCalledWith(expect.any(Error));
     });
 
     it('should handle mixed error types (only count consecutive 429s)', async () => {
@@ -581,11 +574,10 @@ describe('retryWithBackoff', () => {
       const promise = retryWithBackoff(mockFn, {
         maxAttempts: 5,
         initialDelayMs: 100,
-        onPersistent429: async (authType?: string) => {
+        onPersistent429: async () => {
           fallbackOccurred = true;
-          return await fallbackCallback(authType);
+          return await fallbackCallback();
         },
-        authType: 'oauth-personal',
       });
 
       await vi.runAllTimersAsync();
@@ -593,7 +585,7 @@ describe('retryWithBackoff', () => {
       await expect(promise).resolves.toBe('success');
 
       // Should trigger fallback after 2 consecutive 429s (attempts 2-3)
-      expect(fallbackCallback).toHaveBeenCalledWith('oauth-personal');
+      expect(fallbackCallback).toHaveBeenCalled();
     });
   });
 
@@ -605,14 +597,14 @@ describe('retryWithBackoff', () => {
      * @when onPersistent429 callback returns true (switch succeeded)
      * @then Retry should continue with new bucket
      */
-    it('should call onPersistent429 callback on consecutive 429 errors', async () => {
+    it('should call onPersistent429 callback on first 429 error', async () => {
       vi.useFakeTimers();
       let attempt = 0;
       let failoverCalled = false;
 
       const mockFn = vi.fn(async () => {
         attempt++;
-        if (attempt <= 2) {
+        if (attempt <= 1) {
           const error: HttpError = new Error('Rate limit exceeded');
           error.status = 429;
           throw error;
@@ -626,18 +618,138 @@ describe('retryWithBackoff', () => {
       });
 
       const promise = retryWithBackoff(mockFn, {
-        maxAttempts: 5,
+        maxAttempts: 1,
         initialDelayMs: 100,
         onPersistent429: failoverCallback,
-        authType: 'oauth-bucket',
       });
 
       await vi.runAllTimersAsync();
       await expect(promise).resolves.toBe('success after bucket switch');
 
-      // onPersistent429 should be called after consecutive 429 errors
+      // onPersistent429 should be called after the first 429 error
       expect(failoverCallback).toHaveBeenCalled();
       expect(failoverCalled).toBe(true);
+      expect(mockFn).toHaveBeenCalledTimes(2);
+    });
+
+    /**
+     * @requirement issue1081 - Anthropic overloaded_error bucket failover
+     * @scenario Bucket failover on Anthropic overloaded_error
+     * @given A request that returns Anthropic overloaded_error (no HTTP status)
+     * @when onPersistent429 callback returns true (switch succeeded)
+     * @then Retry should continue with new bucket
+     */
+    it('should call onPersistent429 callback on Anthropic overloaded_error', async () => {
+      vi.useFakeTimers();
+      let attempt = 0;
+      let failoverCalled = false;
+
+      const mockFn = vi.fn(async () => {
+        attempt++;
+        if (attempt <= 1) {
+          // Simulate Anthropic's overloaded_error response structure
+          const error: HttpError & {
+            error?: { type?: string; message?: string };
+          } = new Error('Overloaded');
+          error.error = {
+            type: 'overloaded_error',
+            message: 'Overloaded',
+          };
+          throw error;
+        }
+        return 'success after bucket switch';
+      });
+
+      const failoverCallback = vi.fn(async () => {
+        failoverCalled = true;
+        return true; // Indicate bucket switch succeeded
+      });
+
+      const promise = retryWithBackoff(mockFn, {
+        maxAttempts: 1,
+        initialDelayMs: 100,
+        onPersistent429: failoverCallback,
+      });
+
+      await vi.runAllTimersAsync();
+      await expect(promise).resolves.toBe('success after bucket switch');
+
+      // onPersistent429 should be called after the first overloaded_error
+      expect(failoverCallback).toHaveBeenCalled();
+      expect(failoverCalled).toBe(true);
+      expect(mockFn).toHaveBeenCalledTimes(2);
+    });
+
+    /**
+     * @requirement PLAN-20251213issue490 Bucket failover
+     * @scenario Bucket failover on 402 errors
+     * @given A request that returns 402 for first bucket
+     * @when onPersistent429 callback returns true (switch succeeded)
+     * @then Retry should continue with new bucket
+     */
+    it('should call onPersistent429 callback on first 402 error', async () => {
+      vi.useFakeTimers();
+      let attempt = 0;
+
+      const mockFn = vi.fn(async () => {
+        attempt++;
+        if (attempt === 1) {
+          const error: HttpError = new Error('Payment Required');
+          error.status = 402;
+          throw error;
+        }
+        return 'success after bucket switch';
+      });
+
+      const failoverCallback = vi.fn(async () => true);
+
+      const promise = retryWithBackoff(mockFn, {
+        maxAttempts: 1,
+        initialDelayMs: 100,
+        onPersistent429: failoverCallback,
+      });
+
+      await vi.runAllTimersAsync();
+      await expect(promise).resolves.toBe('success after bucket switch');
+      expect(failoverCallback).toHaveBeenCalledWith(expect.any(Error));
+      expect(mockFn).toHaveBeenCalledTimes(2);
+    });
+
+    /**
+     * @requirement PLAN-20251213issue490 Bucket failover
+     * @scenario Bucket failover on 401 errors
+     * @given A request that returns 401 for first bucket
+     * @when onPersistent429 callback returns true (switch succeeded)
+     * @then Retry should continue with new bucket after refresh retry
+     */
+    it('should retry once on 401 before bucket failover', async () => {
+      vi.useFakeTimers();
+      let failoverCalled = false;
+
+      const mockFn = vi.fn(async () => {
+        if (!failoverCalled) {
+          const error: HttpError = new Error('Unauthorized');
+          error.status = 401;
+          throw error;
+        }
+        return 'success after bucket switch';
+      });
+
+      const failoverCallback = vi.fn(async () => {
+        failoverCalled = true;
+        return true;
+      });
+
+      const promise = retryWithBackoff(mockFn, {
+        maxAttempts: 3,
+        initialDelayMs: 100,
+        onPersistent429: failoverCallback,
+      });
+
+      await vi.runAllTimersAsync();
+      await expect(promise).resolves.toBe('success after bucket switch');
+      expect(failoverCallback).toHaveBeenCalledTimes(1);
+      expect(mockFn).toHaveBeenCalledTimes(3);
     });
 
     /**
@@ -662,7 +774,6 @@ describe('retryWithBackoff', () => {
         maxAttempts: 3,
         initialDelayMs: 100,
         onPersistent429: failoverCallback,
-        authType: 'oauth-bucket',
       });
 
       // Properly handle the rejection
@@ -672,7 +783,114 @@ describe('retryWithBackoff', () => {
 
       expect(result).toBeInstanceOf(Error);
       expect(result.message).toBe('Rate limit exceeded');
-      expect(failoverCallback).toHaveBeenCalled();
+      expect(failoverCallback).toHaveBeenCalledTimes(1);
+      expect(mockFn).toHaveBeenCalledTimes(1);
     });
+
+    /**
+     * @requirement issue1081 - Anthropic overloaded_error consecutive tracking
+     * @scenario Consecutive overloaded_error tracking for bucket failover
+     * @given A request that returns multiple Anthropic overloaded_error responses
+     * @when onPersistent429 callback is configured
+     * @then Should track consecutive overloaded_errors like 429s
+     */
+    it('should track consecutive overloaded_errors for bucket failover', async () => {
+      vi.useFakeTimers();
+      let failoverCalled = false;
+
+      const mockFn = vi.fn(async () => {
+        if (!failoverCalled) {
+          // Simulate Anthropic's overloaded_error response structure
+          const error: HttpError & {
+            error?: { type?: string; message?: string };
+          } = new Error('Overloaded');
+          error.error = {
+            type: 'overloaded_error',
+            message: 'Overloaded',
+          };
+          throw error;
+        }
+        return 'success after bucket switch';
+      });
+
+      const failoverCallback = vi.fn(async () => {
+        failoverCalled = true;
+        return true;
+      });
+
+      const promise = retryWithBackoff(mockFn, {
+        maxAttempts: 3,
+        initialDelayMs: 100,
+        onPersistent429: failoverCallback,
+      });
+
+      await vi.runAllTimersAsync();
+      await expect(promise).resolves.toBe('success after bucket switch');
+
+      // onPersistent429 should be called after the first overloaded_error
+      expect(failoverCallback).toHaveBeenCalledTimes(1);
+      expect(mockFn).toHaveBeenCalledTimes(2);
+    });
+    /**
+     * @requirement issue1123 - Handle 403 permission_error (revoked token)
+     * @scenario Bucket failover on 403 OAuth token revoked
+     * @given A request that returns 403 with "OAuth token has been revoked"
+     * @when onPersistent429 callback is configured
+     * @then Should retry once to allow refresh, then failover on second 403
+     */
+    it('should retry once on 403 before bucket failover (OAuth token revoked)', async () => {
+      vi.useFakeTimers();
+      let failoverCalled = false;
+
+      const mockFn = vi.fn(async () => {
+        if (!failoverCalled) {
+          const error: HttpError = new Error(
+            'API Error: 403 {"type":"error","error":{"type":"permission_error","message":"OAuth token has been revoked. Please obtain a new token."}}',
+          );
+          error.status = 403;
+          throw error;
+        }
+        return 'success after bucket switch';
+      });
+
+      const failoverCallback = vi.fn(async () => {
+        failoverCalled = true;
+        return true;
+      });
+
+      const promise = retryWithBackoff(mockFn, {
+        maxAttempts: 3,
+        initialDelayMs: 100,
+        onPersistent429: failoverCallback,
+      });
+
+      await vi.runAllTimersAsync();
+      await expect(promise).resolves.toBe('success after bucket switch');
+      expect(failoverCallback).toHaveBeenCalledTimes(1);
+      // Should retry once for refresh attempt, then failover, then succeed
+      expect(mockFn).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  it('should abort the retry loop when the signal is aborted', async () => {
+    const abortController = new AbortController();
+    const mockFn = vi.fn().mockImplementation(async () => {
+      const error: HttpError = new Error('Server error');
+      error.status = 500;
+      throw error;
+    });
+
+    const promise = retryWithBackoff(mockFn, {
+      maxAttempts: 5,
+      initialDelayMs: 100,
+      signal: abortController.signal,
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    abortController.abort();
+
+    await expect(promise).rejects.toThrow(
+      expect.objectContaining({ name: 'AbortError' }),
+    );
+    expect(mockFn).toHaveBeenCalledTimes(1);
   });
 });

@@ -7,7 +7,6 @@
 import type { Mock } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Text } from 'ink';
-// import { waitFor } from '@testing-library/react';
 import { renderWithProviders } from '../test-utils/render.js';
 import { AppWrapper as App } from './App.js';
 import {
@@ -19,7 +18,6 @@ import {
   SandboxConfig,
   LLxprtClient,
   ideContext,
-  type AuthType,
   DEFAULT_AGENT_ID,
 } from '@vybestack/llxprt-code-core';
 import { LoadedSettings, SettingsFile, Settings } from '../config/settings.js';
@@ -36,7 +34,6 @@ import { Tips } from './components/Tips.js';
 import { checkForUpdates, UpdateObject } from './utils/updateCheck.js';
 import { EventEmitter } from 'events';
 import { updateEventEmitter } from '../utils/updateEventEmitter.js';
-import * as auth from '../config/auth.js';
 import * as useTerminalSize from './hooks/useTerminalSize.js';
 
 // Define a more complete mock server config based on actual Config
@@ -47,7 +44,6 @@ interface MockServerConfig {
   targetDir: string;
   debugMode: boolean;
   question?: string;
-  fullContext: boolean;
   coreTools?: string[];
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
@@ -69,7 +65,6 @@ interface MockServerConfig {
   getToolRegistry: Mock<() => ToolRegistry>; // Use imported ToolRegistry type
   getDebugMode: Mock<() => boolean>;
   getQuestion: Mock<() => string | undefined>;
-  getFullContext: Mock<() => boolean>;
   getCoreTools: Mock<() => string[] | undefined>;
   getToolDiscoveryCommand: Mock<() => string | undefined>;
   getToolCallCommand: Mock<() => string | undefined>;
@@ -116,7 +111,6 @@ vi.mock('@vybestack/llxprt-code-core', async (importOriginal) => {
         targetDir: opts.targetDir || '/test/dir',
         debugMode: opts.debugMode || false,
         question: opts.question,
-        fullContext: opts.fullContext ?? false,
         coreTools: opts.coreTools,
         toolDiscoveryCommand: opts.toolDiscoveryCommand,
         toolCallCommand: opts.toolCallCommand,
@@ -138,7 +132,6 @@ vi.mock('@vybestack/llxprt-code-core', async (importOriginal) => {
         getToolRegistry: vi.fn(() => ({}) as ToolRegistry), // Simple mock
         getDebugMode: vi.fn(() => opts.debugMode || false),
         getQuestion: vi.fn(() => opts.question),
-        getFullContext: vi.fn(() => opts.fullContext ?? false),
         getCoreTools: vi.fn(() => opts.coreTools),
         getToolDiscoveryCommand: vi.fn(() => opts.toolDiscoveryCommand),
         getToolCallCommand: vi.fn(() => opts.toolCallCommand),
@@ -222,8 +215,6 @@ vi.mock('./hooks/useAuthCommand', () => ({
     openAuthDialog: vi.fn(),
     handleAuthSelect: vi.fn(),
     handleAuthHighlight: vi.fn(),
-    isAuthenticating: false,
-    cancelAuthentication: vi.fn(),
   })),
 }));
 
@@ -299,7 +290,9 @@ vi.mock('./components/Tips.js', () => ({
   Tips: vi.fn(() => null),
 }));
 
-const mockTodoPanel = vi.fn(() => <Text>Mock Todo Panel</Text>);
+const mockTodoPanel = vi.fn(() => (
+  <Text color={Colors.Foreground}>Mock Todo Panel</Text>
+));
 vi.mock('./components/TodoPanel.js', () => ({
   TodoPanel: mockTodoPanel,
 }));
@@ -310,10 +303,6 @@ vi.mock('./components/Header.js', () => ({
 
 vi.mock('./utils/updateCheck.js', () => ({
   checkForUpdates: vi.fn(),
-}));
-
-vi.mock('../config/auth.js', () => ({
-  validateAuthMethod: vi.fn(),
 }));
 
 vi.mock('../hooks/useTerminalSize.js', () => ({
@@ -1325,52 +1314,6 @@ describe('App UI', () => {
 
       // Total error count should be 1 + 3 + 1 = 5
       expect(lastFrame()).toContain('5 errors');
-    });
-  });
-
-  describe('auth validation', () => {
-    it('should call validateAuthMethod when useExternalAuth is false', async () => {
-      const validateAuthMethodSpy = vi.spyOn(auth, 'validateAuthMethod');
-      mockSettings = createMockSettings({
-        workspace: {
-          selectedAuthType: 'USE_GEMINI' as AuthType,
-          useExternalAuth: false,
-          theme: 'Default',
-        },
-      });
-
-      const { unmount } = renderWithProviders(
-        <App
-          config={mockConfig as unknown as ServerConfig}
-          settings={mockSettings}
-          version={mockVersion}
-        />,
-      );
-      currentUnmount = unmount;
-
-      expect(validateAuthMethodSpy).toHaveBeenCalledWith('USE_GEMINI');
-    });
-
-    it('should NOT call validateAuthMethod when useExternalAuth is true', async () => {
-      const validateAuthMethodSpy = vi.spyOn(auth, 'validateAuthMethod');
-      mockSettings = createMockSettings({
-        workspace: {
-          selectedAuthType: 'USE_GEMINI' as AuthType,
-          useExternalAuth: true,
-          theme: 'Default',
-        },
-      });
-
-      const { unmount } = renderWithProviders(
-        <App
-          config={mockConfig as unknown as ServerConfig}
-          settings={mockSettings}
-          version={mockVersion}
-        />,
-      );
-      currentUnmount = unmount;
-
-      expect(validateAuthMethodSpy).not.toHaveBeenCalled();
     });
   });
 

@@ -29,7 +29,31 @@ import {
 } from '../utils/toolOutputLimiter.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
 
+/**
+ * Checks if a glob pattern contains brace expansion syntax that git grep doesn't support.
+ * Git grep pathspecs don't support shell-style brace expansion like {ts,tsx,js}.
+ * Uses indexOf for O(n) complexity instead of regex to avoid ReDoS vulnerability.
+ */
+function hasBraceExpansion(pattern: string): boolean {
+  const braceStart = pattern.indexOf('{');
+  if (braceStart === -1) return false;
+  const braceEnd = pattern.indexOf('}', braceStart);
+  if (braceEnd === -1) return false;
+  const commaPos = pattern.indexOf(',', braceStart);
+  return commaPos !== -1 && commaPos < braceEnd;
+}
+
 // --- Interfaces ---
+
+/**
+ * Default timeout for grep operations in milliseconds (1 minute)
+ */
+const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * Maximum allowed timeout for grep operations in milliseconds (5 minutes)
+ */
+const MAX_TIMEOUT_MS = 300_000;
 
 /**
  * Parameters for the GrepTool
@@ -42,6 +66,11 @@ export interface GrepToolParams {
 
   /**
    * The directory to search in (optional, defaults to current directory relative to root)
+   */
+  dir_path?: string;
+
+  /**
+   * Alternative parameter name for dir_path (for backward compatibility)
    */
   path?: string;
 
@@ -64,6 +93,13 @@ export interface GrepToolParams {
    * Maximum number of matches per file to return (optional)
    */
   max_per_file?: number;
+
+  /**
+   * Timeout in milliseconds (default: 60000ms = 1 minute, max: 300000ms = 5 minutes).
+   * If the operation times out, an error is returned with suggestions to use a
+   * longer timeout or a more specific pattern.
+   */
+  timeout_ms?: number;
 }
 
 /**
@@ -87,6 +123,10 @@ class GrepToolInvocation extends BaseToolInvocation<
   ) {
     super(params);
     this.fileExclusions = config.getFileExclusions();
+  }
+
+  private getDirPath(): string | undefined {
+    return this.params.dir_path || this.params.path;
   }
 
   /**
@@ -131,10 +171,43 @@ class GrepToolInvocation extends BaseToolInvocation<
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
+    // Set up timeout handling
+    const timeoutMs = Math.min(
+      this.params.timeout_ms ?? DEFAULT_TIMEOUT_MS,
+      MAX_TIMEOUT_MS,
+    );
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
+
+    // Combine user abort with timeout abort
+    const onUserAbort = () => {
+      clearTimeout(timeoutId);
+      timeoutController.abort();
+    };
+    if (signal.aborted) {
+      clearTimeout(timeoutId);
+      timeoutController.abort();
+      // Early return for already-aborted signal
+      return {
+        llmContent: 'Search operation was cancelled by user.',
+        returnDisplay: 'Cancelled',
+        error: {
+          message: 'Search operation was cancelled by user.',
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      };
+    } else {
+      signal.addEventListener('abort', onUserAbort);
+    }
+
+    // Use the combined signal for all operations
+    const combinedSignal = timeoutController.signal;
+
     try {
       const workspaceContext = this.config.getWorkspaceContext();
-      const searchDirAbs = this.resolveAndValidatePath(this.params.path);
-      const searchDirDisplay = this.params.path || '.';
+      const dirPath = this.getDirPath();
+      const searchDirAbs = this.resolveAndValidatePath(dirPath);
+      const searchDirDisplay = dirPath || '.';
 
       // Get limits from parameters or ephemeral settings
       const ephemeralSettings = this.config.getEphemeralSettings();
@@ -171,7 +244,7 @@ class GrepToolInvocation extends BaseToolInvocation<
           pattern: this.params.pattern,
           path: searchDir,
           include: this.params.include,
-          signal,
+          signal: combinedSignal,
           maxResults: maxResults - allMatches.length,
           maxFiles: maxFiles - filesWithMatches.size,
           maxPerFile,
@@ -297,6 +370,44 @@ class GrepToolInvocation extends BaseToolInvocation<
         returnDisplay: displayCount,
       };
     } catch (error) {
+      // Check if this was a timeout vs user abort
+      const isAbortError =
+        error instanceof Error &&
+        (error.name === 'AbortError' ||
+          error.message.includes('aborted') ||
+          error.message.includes('This operation was aborted'));
+
+      if (isAbortError) {
+        // Check if it was a timeout (our controller aborted but user's didn't)
+        if (timeoutController.signal.aborted && !signal.aborted) {
+          const timeoutMessage =
+            `Search operation timed out after ${timeoutMs}ms. To resolve this, you can either:
+` +
+            `1. Increase the timeout (max ${MAX_TIMEOUT_MS}ms) by adding timeout_ms parameter
+` +
+            `2. Use a more specific pattern to reduce search scope
+` +
+            `3. Use a narrower path or include filter`;
+          return {
+            llmContent: timeoutMessage,
+            returnDisplay: `Timed out after ${timeoutMs}ms`,
+            error: {
+              message: timeoutMessage,
+              type: ToolErrorType.TIMEOUT,
+            },
+          };
+        }
+        // User cancelled - return cancellation result rather than throwing
+        return {
+          llmContent: 'Search operation was cancelled by user.',
+          returnDisplay: 'Cancelled',
+          error: {
+            message: 'Search operation was cancelled by user.',
+            type: ToolErrorType.EXECUTION_FAILED,
+          },
+        };
+      }
+
       console.error(`Error during GrepLogic execution: ${error}`);
       const errorMessage = getErrorMessage(error);
       return {
@@ -307,6 +418,10 @@ class GrepToolInvocation extends BaseToolInvocation<
           type: ToolErrorType.GREP_EXECUTION_ERROR,
         },
       };
+    } finally {
+      // Clean up timeout
+      clearTimeout(timeoutId);
+      signal.removeEventListener('abort', onUserAbort);
     }
   }
 
@@ -323,10 +438,16 @@ class GrepToolInvocation extends BaseToolInvocation<
       try {
         const child = spawn(checkCommand, checkArgs, {
           stdio: 'ignore',
-          shell: process.platform === 'win32',
+          shell: true,
         });
         child.on('close', (code) => resolve(code === 0));
-        child.on('error', () => resolve(false));
+        child.on('error', (err) => {
+          console.debug(
+            `[GrepTool] Failed to start process for '${command}':`,
+            err.message,
+          );
+          resolve(false);
+        });
       } catch {
         resolve(false);
       }
@@ -442,15 +563,10 @@ class GrepToolInvocation extends BaseToolInvocation<
     if (this.params.include) {
       description += ` in ${this.params.include}`;
     }
-    if (this.params.path) {
-      const resolvedPath = path.resolve(
-        this.config.getTargetDir(),
-        this.params.path,
-      );
-      if (
-        resolvedPath === this.config.getTargetDir() ||
-        this.params.path === '.'
-      ) {
+    const dirPath = this.getDirPath();
+    if (dirPath) {
+      const resolvedPath = path.resolve(this.config.getTargetDir(), dirPath);
+      if (resolvedPath === this.config.getTargetDir() || dirPath === '.') {
         description += ` within ./`;
       } else {
         const relativePath = makeRelative(
@@ -500,7 +616,10 @@ class GrepToolInvocation extends BaseToolInvocation<
 
     try {
       // --- Strategy 1: git grep ---
-      const isGit = isGitRepository(absolutePath);
+      // Skip git grep if include pattern has brace expansion (e.g., *.{ts,tsx})
+      // because git grep pathspecs don't support shell-style brace expansion.
+      const hasBracePattern = include && hasBraceExpansion(include);
+      const isGit = !hasBracePattern && isGitRepository(absolutePath);
       const gitAvailable = isGit && (await this.isCommandAvailable('git'));
 
       if (gitAvailable) {
@@ -526,12 +645,23 @@ class GrepToolInvocation extends BaseToolInvocation<
             const stdoutChunks: Buffer[] = [];
             const stderrChunks: Buffer[] = [];
 
+            // Handle abort signal to kill child process
+            const abortHandler = () => {
+              if (!child.killed) {
+                child.kill('SIGTERM');
+              }
+              reject(new Error('git grep aborted'));
+            };
+            options.signal.addEventListener('abort', abortHandler);
+
             child.stdout.on('data', (chunk) => stdoutChunks.push(chunk));
             child.stderr.on('data', (chunk) => stderrChunks.push(chunk));
-            child.on('error', (err) =>
-              reject(new Error(`Failed to start git grep: ${err.message}`)),
-            );
+            child.on('error', (err) => {
+              options.signal.removeEventListener('abort', abortHandler);
+              reject(new Error(`Failed to start git grep: ${err.message}`));
+            });
             child.on('close', (code) => {
+              options.signal.removeEventListener('abort', abortHandler);
               const stdoutData = Buffer.concat(stdoutChunks).toString('utf8');
               const stderrData = Buffer.concat(stderrChunks).toString('utf8');
               if (code === 0) resolve(stdoutData);
@@ -555,10 +685,14 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       // --- Strategy 2: System grep ---
+      console.debug(
+        'GrepLogic: System grep is being considered as fallback strategy.',
+      );
+
       const grepAvailable = await this.isCommandAvailable('grep');
       if (grepAvailable) {
         strategyUsed = 'system grep';
-        const grepArgs = ['-r', '-n', '-H', '-E'];
+        const grepArgs = ['-r', '-n', '-H', '-E', '-I'];
         // Extract directory names from exclusion patterns for grep --exclude-dir
         const globExcludes = this.fileExclusions.getGlobExcludes();
         const commonExcludes = globExcludes
@@ -596,6 +730,16 @@ class GrepToolInvocation extends BaseToolInvocation<
             const stdoutChunks: Buffer[] = [];
             const stderrChunks: Buffer[] = [];
 
+            // Handle abort signal to kill child process
+            const abortHandler = () => {
+              if (!child.killed) {
+                child.kill('SIGTERM');
+              }
+              cleanup();
+              reject(new Error('system grep aborted'));
+            };
+            options.signal.addEventListener('abort', abortHandler);
+
             const onData = (chunk: Buffer) => stdoutChunks.push(chunk);
             const onStderr = (chunk: Buffer) => {
               const stderrStr = chunk.toString();
@@ -632,6 +776,7 @@ class GrepToolInvocation extends BaseToolInvocation<
             };
 
             const cleanup = () => {
+              options.signal.removeEventListener('abort', abortHandler);
               child.stdout.removeListener('data', onData);
               child.stderr.removeListener('data', onStderr);
               child.removeListener('error', onError);
@@ -770,9 +915,14 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
               "The regular expression (regex) pattern to search for within file contents (e.g., 'function\\s+myFunction', 'import\\s+\\{.*\\}\\s+from\\s+.*').",
             type: 'string',
           },
-          path: {
+          dir_path: {
             description:
               'Optional: The absolute path to the directory to search within. If omitted, searches the current working directory.',
+            type: 'string',
+          },
+          path: {
+            description:
+              'Alternative parameter name for dir_path (for backward compatibility).',
             type: 'string',
           },
           include: {
@@ -793,6 +943,11 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
           max_per_file: {
             description:
               'Optional: Maximum number of matches per file to return. Defaults to 50.',
+            type: 'number',
+          },
+          timeout_ms: {
+            description:
+              'Optional: Timeout in milliseconds (default: 60000ms = 1 minute, max: 300000ms = 5 minutes). If the operation times out, an error is returned with suggestions.',
             type: 'number',
           },
         },
@@ -858,9 +1013,10 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
     }
 
     // Only validate path if one is provided
-    if (params.path) {
+    const dirPath = params.dir_path || params.path;
+    if (dirPath) {
       try {
-        this.resolveAndValidatePath(params.path);
+        this.resolveAndValidatePath(dirPath);
       } catch (error) {
         return getErrorMessage(error);
       }
@@ -873,6 +1029,10 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
     params: GrepToolParams,
     _messageBus?: MessageBus,
   ): ToolInvocation<GrepToolParams, ToolResult> {
-    return new GrepToolInvocation(this.config, params);
+    const normalizedParams = { ...params };
+    if (!normalizedParams.dir_path && normalizedParams.path) {
+      normalizedParams.dir_path = normalizedParams.path;
+    }
+    return new GrepToolInvocation(this.config, normalizedParams);
   }
 }

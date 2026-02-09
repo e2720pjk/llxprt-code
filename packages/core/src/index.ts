@@ -8,12 +8,30 @@
 export * from './config/config.js';
 export * from './config/profileManager.js';
 export * from './config/subagentManager.js';
+export * from './config/schedulerSingleton.js';
+export * from './policy/index.js';
+export { PolicyEngine } from './policy/policy-engine.js';
+export {
+  PolicyDecision,
+  ApprovalMode,
+  PolicyRule,
+  type PolicyEngineConfig,
+  type PolicySettings,
+} from './policy/types.js';
+export {
+  createPolicyEngineConfig,
+  createPolicyUpdater,
+  DEFAULT_CORE_POLICIES_DIR,
+  DEFAULT_POLICY_TIER,
+  USER_POLICY_TIER,
+  ADMIN_POLICY_TIER,
+  getPolicyDirectories,
+  getPolicyTier,
+  formatPolicyError,
+} from './policy/config.js';
 
-// Export policy engine
-export * from './policy/types.js';
-export * from './policy/policy-engine.js';
-export * from './policy/stable-stringify.js';
-export * from './policy/config.js';
+// Export hooks system
+export * from './hooks/index.js';
 
 // Export message bus
 export * from './confirmation-bus/types.js';
@@ -24,6 +42,9 @@ export * from './services/git-stats-service.js';
 
 // Export types
 export * from './types/modelParams.js';
+
+// Export Commands logic
+export * from './commands/extensions.js';
 
 // Export Core Logic
 export * from './core/client.js';
@@ -47,6 +68,7 @@ export * from './code_assist/types.js';
 
 // Export utilities
 export * from './utils/paths.js';
+export * from './utils/ripgrepPathResolver.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/errors.js';
 export * from './utils/output-format.js';
@@ -57,6 +79,7 @@ export * from './utils/gitUtils.js';
 export * from './utils/editor.js';
 export * from './utils/quotaErrorDetection.js';
 export * from './utils/fileUtils.js';
+export * from './utils/delay.js';
 export * from './utils/retry.js';
 export * from './utils/shell-utils.js';
 export * from './utils/shell-markers.js';
@@ -73,6 +96,10 @@ export * from './utils/ignorePatterns.js';
 export * from './utils/partUtils.js';
 export * from './utils/ide-trust.js';
 export * from './utils/thoughtUtils.js';
+export * from './utils/events.js';
+export * from './utils/package.js';
+export * from './utils/extensionLoader.js';
+export * from './utils/terminalSerializer.js';
 
 // Export auth system
 export {
@@ -208,6 +235,8 @@ export { ConversationCache } from './providers/openai/ConversationCache.js';
 export { getOpenAIProviderInfo } from './providers/openai/getOpenAIProviderInfo.js';
 export { OpenAIVercelProvider } from './providers/openai-vercel/index.js';
 export { AnthropicProvider } from './providers/anthropic/AnthropicProvider.js';
+export * from './providers/anthropic/usageInfo.js';
+export * from './providers/openai/codexUsageInfo.js';
 export { GeminiProvider } from './providers/gemini/GeminiProvider.js';
 export * from './providers/ProviderManager.js';
 export * from './providers/errors.js';
@@ -280,10 +309,9 @@ export type {
   RuntimeStateChangedEvent,
   RuntimeStateChangeCallback,
   UnsubscribeFunction,
-  AuthPayload,
-  ModelParams,
-  SanitizedAuthPayload,
-  RuntimeStateErrorCode,
+  getBaseUrl,
+  getSessionId,
+  getModelParams,
 } from './runtime/AgentRuntimeState.js';
 export {
   createAgentRuntimeState,
@@ -291,14 +319,6 @@ export {
   updateAgentRuntimeStateBatch,
   getAgentRuntimeStateSnapshot,
   subscribeToAgentRuntimeState,
-  RuntimeStateError,
-  getProvider,
-  getModel,
-  getAuthType,
-  getAuthPayload,
-  getBaseUrl,
-  getSessionId,
-  getModelParams,
 } from './runtime/AgentRuntimeState.js';
 export type { RuntimeStateFromConfigOptions } from './runtime/runtimeStateFactory.js';
 export { createAgentRuntimeStateFromConfig as createRuntimeStateFromConfig } from './runtime/runtimeStateFactory.js';
@@ -341,8 +361,25 @@ export type { LogEntry as DebugLogEntry } from './debug/index.js';
 // Export Storage
 export { Storage } from './config/storage.js';
 
-// Export models
+// Export Extension Loader
+export {
+  ExtensionLoader,
+  SimpleExtensionLoader,
+  type ExtensionEvents,
+  type ExtensionsStartingEvent,
+  type ExtensionsStoppingEvent,
+  type GeminiCLIExtension,
+} from './utils/extensionLoader.js';
+
+// Export MCP Client Manager
+export { McpClientManager } from './tools/mcp-client-manager.js';
+export { McpClient } from './tools/mcp-client.js';
+
+// Export models (legacy constants)
 export * from './config/models.js';
+
+// Export models registry (models.dev integration)
+export * from './models/index.js';
 
 // --- Subagent Feature: PLAN-20250117-SUBAGENTCONFIG ---
 export { SubagentManager } from './config/subagentManager.js';
@@ -353,3 +390,34 @@ export {
   SESSION_FILE_PREFIX,
   type ConversationRecord,
 } from './storage/sessionTypes.js';
+
+export {
+  SessionPersistenceService,
+  type PersistedSession,
+  type PersistedUIHistoryItem,
+  type PersistedToolCall,
+} from './storage/SessionPersistenceService.js';
+
+export {
+  type SettingCategory,
+  type SettingSpec,
+  type ValidationResult,
+  type SeparatedSettings,
+  type DirectSettingSpec,
+  SETTINGS_REGISTRY,
+  separateSettings,
+  getSettingSpec,
+  resolveAlias,
+  validateSetting,
+  normalizeSetting,
+  parseSetting,
+  getProfilePersistableKeys,
+  getSettingHelp,
+  getCompletionOptions,
+  getAllSettingKeys,
+  getValidationHelp,
+  getAutocompleteSuggestions,
+  getProtectedSettingKeys,
+  getProviderConfigKeys,
+  getDirectSettingSpecs,
+} from './settings/index.js';

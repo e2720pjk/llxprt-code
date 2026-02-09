@@ -18,7 +18,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { Storage } from '../config/storage.js';
 import * as Diff from 'diff';
-import { DEFAULT_DIFF_OPTIONS } from './diffOptions.js';
+import { DEFAULT_CREATE_PATCH_OPTIONS } from './diffOptions.js';
 import { tildeifyPath } from '../utils/paths.js';
 import {
   type ModifiableDeclarativeTool,
@@ -45,8 +45,8 @@ const memoryToolSchemaData: FunctionDeclaration = {
         type: 'string',
         enum: ['global', 'project'],
         description:
-          'Where to save the memory: "global" (default, saves to ~/.llxprt) or "project" (saves to project-local .llxprt directory)',
-        default: 'global',
+          'Where to save the memory: "global" or "project" (default, saves to project-local .llxprt directory)',
+        default: 'project',
       },
     },
     required: ['fact'],
@@ -193,7 +193,7 @@ class MemoryToolInvocation extends BaseToolInvocation<
   }
 
   getMemoryFilePath(): string {
-    const scope = this.params.scope || 'global';
+    const scope = this.params.scope || 'project';
     if (scope === 'project' && this.workingDir) {
       return getProjectMemoryFilePath(this.workingDir);
     }
@@ -239,8 +239,8 @@ class MemoryToolInvocation extends BaseToolInvocation<
       newContent,
       'Current',
       'Proposed',
-      DEFAULT_DIFF_OPTIONS,
-    );
+      DEFAULT_CREATE_PATCH_OPTIONS,
+    ) as string;
 
     const confirmationDetails: ToolEditConfirmationDetails = {
       type: 'edit',
@@ -326,7 +326,7 @@ export class MemoryTool
   ) {
     super(
       MemoryTool.Name,
-      'Save Memory',
+      'SaveMemory',
       memoryToolDescription,
       Kind.Think,
       memoryToolSchemaData.parametersJsonSchema as Record<string, unknown>,
@@ -397,7 +397,8 @@ export class MemoryTool
 
   getModifyContext(_abortSignal: AbortSignal): ModifyContext<SaveMemoryParams> {
     const resolvePath = (scope?: 'global' | 'project'): string => {
-      if (scope === 'project' && this.config) {
+      const resolvedScope = scope || 'project';
+      if (resolvedScope === 'project' && this.config) {
         return getProjectMemoryFilePath(this.config.getWorkingDir());
       }
       return getGlobalMemoryFilePath();

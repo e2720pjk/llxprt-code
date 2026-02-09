@@ -85,8 +85,14 @@ export interface EphemeralSettings {
   'max-prompt-tokens'?: number;
   /** List of disabled tool names */
   'disabled-tools'?: string[];
-  /** Allow command substitution ($(), <(), backticks) in shell commands */
-  'shell-replacement'?: boolean;
+  /**
+   * Control command substitution ($(), <(), backticks) in shell commands.
+   * - 'allowlist': Allow substitution, validate inner commands against coreTools (default, matches upstream)
+   * - 'all': Allow all substitution unconditionally (same as legacy `true`)
+   * - 'none': Block all substitution (same as legacy `false`)
+   * - true/false: Legacy boolean values for backward compatibility
+   */
+  'shell-replacement'?: 'allowlist' | 'all' | 'none' | boolean;
   /** Enable todo continuation after stream completion (default: true) */
   'todo-continuation'?: boolean;
   /** Socket timeout in milliseconds for local AI servers */
@@ -113,10 +119,26 @@ export interface EphemeralSettings {
   GOOGLE_CLOUD_LOCATION?: string;
   /** Whether to include folder structure in system prompts (default: false for better cache hit rates) */
   'include-folder-structure'?: boolean;
-  /** Anthropic prompt caching configuration: 'off' | '5m' | '1h' (default: '1h', Anthropic only) */
-  'prompt-caching'?: 'off' | '5m' | '1h';
+  /** Anthropic/OpenAI prompt caching configuration: 'off' | '5m' | '1h' | '24h' (default: '1h') */
+  'prompt-caching'?: 'off' | '5m' | '1h' | '24h';
   /** Load tool-specific prompts from ~/.llxprt/prompts/tools/** (default: false) */
   'enable-tool-prompts'?: boolean;
+
+  /** Proactive rate limit throttling (on/off) */
+  'rate-limit-throttle'?: 'on' | 'off';
+  /** Percentage threshold for rate limit throttling (1-100) */
+  'rate-limit-throttle-threshold'?: number;
+  /** Maximum wait time in milliseconds for rate limit throttling */
+  'rate-limit-max-wait'?: number;
+
+  /** Default timeout in seconds for task tool executions */
+  'task-default-timeout-seconds'?: number;
+  /** Maximum allowed timeout in seconds for task tool executions */
+  'task-max-timeout-seconds'?: number;
+  /** Default timeout in seconds for shell command executions */
+  'shell-default-timeout-seconds'?: number;
+  /** Maximum allowed timeout in seconds for shell command executions */
+  'shell-max-timeout-seconds'?: number;
 
   // Load balancer advanced failover settings (Phase 3, Issue #489)
   /** Minimum tokens per minute before triggering failover */
@@ -131,6 +153,44 @@ export interface EphemeralSettings {
   circuit_breaker_failure_window_ms?: number;
   /** Cooldown period before retrying after circuit opens in milliseconds */
   circuit_breaker_recovery_timeout_ms?: number;
+
+  // Additional settings from registry
+  /** OpenAI stream options */
+  'stream-options'?: Record<string, unknown>;
+  /** Maximum number of turns allowed per prompt before stopping (default: -1 for unlimited) */
+  maxTurnsPerPrompt?: number;
+  /** Enable/disable all loop detection (default: true) */
+  loopDetectionEnabled?: boolean;
+  /** Number of identical tool calls before triggering loop detection (default: 50, -1 = unlimited) */
+  toolCallLoopThreshold?: number;
+  /** Number of content chunk repetitions before triggering loop detection (default: 50, -1 = unlimited) */
+  contentLoopThreshold?: number;
+  /** Control context dumping (now/status/on/error/off) */
+  dumpcontext?: 'now' | 'status' | 'on' | 'error' | 'off';
+  /** Dump API request body to ~/.llxprt/dumps/ on errors (enabled/disabled) */
+  dumponerror?: 'enabled' | 'disabled';
+  /** Emoji filter mode (allowed/auto/warn/error) */
+  emojifilter?: 'allowed' | 'auto' | 'warn' | 'error';
+
+  // Reasoning settings (nested under reasoning.* in registry)
+  /** Enable thinking/reasoning for models that support it */
+  'reasoning.enabled'?: boolean;
+  /** How much the model should think before responding */
+  'reasoning.effort'?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  /** Maximum token budget for reasoning */
+  'reasoning.maxTokens'?: number;
+  /** Token budget for reasoning (Anthropic-specific) */
+  'reasoning.budgetTokens'?: number;
+  /** Enable adaptive thinking for Anthropic Opus 4.6+ */
+  'reasoning.adaptiveThinking'?: boolean;
+  /** Show thinking blocks in UI output */
+  'reasoning.includeInResponse'?: boolean;
+  /** Keep thinking in conversation history */
+  'reasoning.includeInContext'?: boolean;
+  /** Remove thinking blocks from context (all/allButLast/none) */
+  'reasoning.stripFromContext'?: 'all' | 'allButLast' | 'none';
+  /** API format for reasoning (native/field) */
+  'reasoning.format'?: 'native' | 'field';
 }
 
 /**

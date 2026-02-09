@@ -17,6 +17,7 @@ import type {
   Logger,
   ProfileManager,
   SubagentManager,
+  Todo,
 } from '@vybestack/llxprt-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { OAuthManager } from '../../auth/oauth-manager.js';
@@ -27,6 +28,7 @@ import type {
   ExtensionUpdateAction,
 } from '../state/extensions.js';
 import type { CommandArgumentSchema } from './schema/types.js';
+import type { SubagentView } from '../components/SubagentManagement/types.js';
 
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
@@ -93,6 +95,16 @@ export interface CommandContext {
     /** A transient list of shell commands the user has approved for this session. */
     sessionShellAllowlist: Set<string>;
   };
+  // TODO management
+  /**
+   * @plan PLAN-20260129-TODOPERSIST.P07
+   * @requirement REQ-003, REQ-004, REQ-005, REQ-006
+   */
+  todoContext?: {
+    todos: Todo[];
+    updateTodos: (todos: Todo[]) => void;
+    refreshTodos: () => void;
+  };
   // Flag to indicate if an overwrite has been confirmed
   overwriteConfirmed?: boolean;
 }
@@ -123,24 +135,101 @@ export interface MessageActionReturn {
 }
 
 /**
+ * Type-safe dialog data for subagent dialog.
+ * Maps to SubagentManagerDialogProps expected properties.
+ */
+export interface SubagentDialogData {
+  /** Initial view to display in the subagent dialog */
+  initialView?: SubagentView;
+  /** Name of the subagent to pre-select */
+  initialSubagentName?: string;
+}
+
+/**
+ * Type-safe dialog data for logging dialog.
+ */
+export interface LoggingDialogData {
+  entries: unknown[];
+}
+
+/**
+ * Type-safe dialog data for models dialog.
+ */
+export interface ModelsDialogData {
+  /** Pre-fill search term (from positional arg) */
+  initialSearch?: string;
+  /** Pre-set capability filters */
+  initialFilters?: {
+    tools?: boolean;
+    vision?: boolean;
+    reasoning?: boolean;
+    audio?: boolean;
+  };
+  /** Include deprecated models */
+  includeDeprecated?: boolean;
+  /** Override provider filter from --provider arg */
+  providerOverride?: string | null;
+  /** Show all providers (from --all flag) */
+  showAllProviders?: boolean;
+}
+
+/**
+ * Type-safe dialog data for profile dialogs.
+ */
+export interface ProfileDialogData {
+  /** Name of the profile to display/edit */
+  profileName?: string;
+}
+
+/** All supported dialog types */
+export type DialogType =
+  | 'auth'
+  | 'theme'
+  | 'editor'
+  | 'privacy'
+  | 'settings'
+  | 'logging'
+  | 'permissions'
+  | 'provider'
+  | 'loadProfile'
+  | 'createProfile'
+  | 'saveProfile'
+  | 'subagent'
+  | 'models'
+  | 'profileList'
+  | 'profileDetail'
+  | 'profileEditor'
+  | 'welcome';
+
+/** Map dialog types to their associated data types for type-safe access */
+export interface DialogDataMap {
+  subagent: SubagentDialogData;
+  logging: LoggingDialogData;
+  models: ModelsDialogData;
+  profileDetail: ProfileDialogData;
+  profileEditor: ProfileDialogData;
+}
+
+/**
  * The return type for a command action that needs to open a dialog.
+ * Use SubagentDialogData for type-safe subagent dialog data.
  */
 export interface OpenDialogActionReturn {
   type: 'dialog';
-
-  dialog:
-    | 'auth'
-    | 'theme'
-    | 'editor'
-    | 'privacy'
-    | 'settings'
-    | 'logging'
-    | 'providerModel'
-    | 'permissions'
-    | 'provider'
-    | 'loadProfile'
-    | 'saveProfile';
-  dialogData?: unknown;
+  dialog: DialogType;
+  /**
+   * Dialog-specific data. Type depends on dialog:
+   * - 'subagent': SubagentDialogData
+   * - 'logging': LoggingDialogData
+   * - 'models': ModelsDialogData
+   * - 'profileDetail'/'profileEditor': ProfileDialogData
+   * - others: undefined
+   */
+  dialogData?:
+    | SubagentDialogData
+    | LoggingDialogData
+    | ModelsDialogData
+    | ProfileDialogData;
 }
 
 /**
@@ -200,6 +289,7 @@ export enum CommandKind {
   BUILT_IN = 'built-in',
   FILE = 'file',
   MCP_PROMPT = 'mcp-prompt',
+  EXTENSION = 'extension',
 }
 
 // The standardized contract for any command in the system.

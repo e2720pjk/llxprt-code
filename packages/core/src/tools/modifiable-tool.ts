@@ -9,20 +9,22 @@ import os from 'os';
 import path from 'path';
 import fs from 'fs';
 import * as Diff from 'diff';
-import { DEFAULT_DIFF_OPTIONS } from './diffOptions.js';
+import { DEFAULT_CREATE_PATCH_OPTIONS } from './diffOptions.js';
 import { isNodeError } from '../utils/errors.js';
 import {
   type AnyDeclarativeTool,
   DeclarativeTool,
   type ToolResult,
 } from './tools.js';
+import { DebugLogger } from '../debug/DebugLogger.js';
+
+const debugLogger = DebugLogger.getLogger('llxprt:tools:modifiable-tool');
 
 /**
  * A declarative tool that supports a modify operation.
  */
-export interface ModifiableDeclarativeTool<
-  TParams extends object,
-> extends DeclarativeTool<TParams, ToolResult> {
+export interface ModifiableDeclarativeTool<TParams extends object>
+  extends DeclarativeTool<TParams, ToolResult> {
   getModifyContext(abortSignal: AbortSignal): ModifyContext<TParams>;
 }
 
@@ -45,6 +47,11 @@ export interface ModifyResult<ToolParams> {
   updatedDiff: string;
 }
 
+export interface ModifyContentOverrides {
+  currentContent?: string | null;
+  proposedContent?: string;
+}
+
 /**
  * Type guard to check if a declarative tool is modifiable.
  */
@@ -58,12 +65,19 @@ function createTempFilesForModify(
   currentContent: string,
   proposedContent: string,
   file_path: string,
-): { oldPath: string; newPath: string } {
-  const tempDir = os.tmpdir();
-  const diffDir = path.join(tempDir, 'gemini-cli-tool-modify-diffs');
+): { oldPath: string; newPath: string; dirPath: string } {
+  const diffDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'gemini-cli-tool-modify-'),
+  );
 
-  if (!fs.existsSync(diffDir)) {
-    fs.mkdirSync(diffDir, { recursive: true });
+  try {
+    fs.chmodSync(diffDir, 0o700);
+  } catch (e) {
+    debugLogger.error(
+      `Error setting permissions on temp diff directory: ${diffDir}`,
+      e,
+    );
+    throw e;
   }
 
   const ext = path.extname(file_path);
@@ -78,10 +92,16 @@ function createTempFilesForModify(
     `gemini-cli-modify-${fileName}-new-${timestamp}${ext}`,
   );
 
-  fs.writeFileSync(tempOldPath, currentContent, 'utf8');
-  fs.writeFileSync(tempNewPath, proposedContent, 'utf8');
+  fs.writeFileSync(tempOldPath, currentContent, {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+  fs.writeFileSync(tempNewPath, proposedContent, {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
 
-  return { oldPath: tempOldPath, newPath: tempNewPath };
+  return { oldPath: tempOldPath, newPath: tempNewPath, dirPath: diffDir };
 }
 
 function getUpdatedParams<ToolParams>(
@@ -118,13 +138,17 @@ function getUpdatedParams<ToolParams>(
     newContent,
     'Current',
     'Proposed',
-    DEFAULT_DIFF_OPTIONS,
-  );
+    DEFAULT_CREATE_PATCH_OPTIONS,
+  ) as string;
 
   return { updatedParams, updatedDiff };
 }
 
-function deleteTempFiles(oldPath: string, newPath: string): void {
+function deleteTempFiles(
+  oldPath: string,
+  newPath: string,
+  dirPath: string,
+): void {
   try {
     fs.unlinkSync(oldPath);
   } catch {
@@ -135,6 +159,12 @@ function deleteTempFiles(oldPath: string, newPath: string): void {
     fs.unlinkSync(newPath);
   } catch {
     console.error(`Error deleting temp diff file: ${newPath}`);
+  }
+
+  try {
+    fs.rmdirSync(dirPath);
+  } catch {
+    console.error(`Error deleting temp diff directory: ${dirPath}`);
   }
 }
 
@@ -149,14 +179,24 @@ export async function modifyWithEditor<ToolParams>(
   _abortSignal: AbortSignal,
   onEditorClose: () => void,
   onEditorOpen?: () => void,
+  overrides?: ModifyContentOverrides,
 ): Promise<ModifyResult<ToolParams>> {
-  const currentContent = await modifyContext.getCurrentContent(originalParams);
-  const proposedContent =
-    await modifyContext.getProposedContent(originalParams);
+  const hasCurrentOverride =
+    overrides !== undefined && 'currentContent' in overrides;
+  const hasProposedOverride =
+    overrides !== undefined && 'proposedContent' in overrides;
 
-  const { oldPath, newPath } = createTempFilesForModify(
-    currentContent,
-    proposedContent,
+  const currentContent = hasCurrentOverride
+    ? (overrides!.currentContent ?? '')
+    : await modifyContext.getCurrentContent(originalParams);
+
+  const proposedContent = hasProposedOverride
+    ? (overrides!.proposedContent ?? '')
+    : await modifyContext.getProposedContent(originalParams);
+
+  const { oldPath, newPath, dirPath } = createTempFilesForModify(
+    currentContent ?? '',
+    proposedContent ?? '',
     modifyContext.getFilePath(originalParams),
   );
 
@@ -179,6 +219,6 @@ export async function modifyWithEditor<ToolParams>(
 
     return result;
   } finally {
-    deleteTempFiles(oldPath, newPath);
+    deleteTempFiles(oldPath, newPath, dirPath);
   }
 }

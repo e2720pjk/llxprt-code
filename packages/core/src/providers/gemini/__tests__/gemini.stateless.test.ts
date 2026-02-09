@@ -134,7 +134,6 @@ class TestGeminiProvider extends GeminiProvider {
   ) {
     return (await createCodeAssistContentGenerator(
       httpOptions,
-      'login-with-google' as never,
       config as never,
       baseURL,
     )) as Awaited<ReturnType<typeof createCodeAssistContentGenerator>>;
@@ -320,12 +319,14 @@ describe('Gemini provider stateless contract tests', () => {
     );
 
     // @plan:PLAN-20251023-STATELESS-HARDENING.P08 @requirement:REQ-SP4-003
-    // In stateless implementation, parameters are resolved from options.resolved.params
+    // @plan PLAN-20260126-SETTINGS-SEPARATION.P09
+    // In stateless implementation, parameters are resolved from invocation.modelParams
+    // 'max-output-tokens' is normalized to 'max_output_tokens' by alias rules
     const firstRequest = googleGenAIState.streamCalls.at(-1)?.request as
       | { config?: Record<string, unknown> }
       | undefined;
     expect(firstRequest?.config?.temperature).toBe(0.21);
-    expect(firstRequest?.config?.['max-output-tokens']).toBe(1024);
+    expect(firstRequest?.config?.max_output_tokens).toBe(1024);
 
     queueGoogleStream([
       {
@@ -369,12 +370,14 @@ describe('Gemini provider stateless contract tests', () => {
     );
 
     // @plan:PLAN-20251023-STATELESS-HARDENING.P08 @requirement:REQ-SP4-003
-    // In stateless implementation, parameters are resolved from options.resolved.params
+    // @plan PLAN-20260126-SETTINGS-SEPARATION.P09
+    // In stateless implementation, parameters are resolved from invocation.modelParams
+    // 'max-output-tokens' is normalized to 'max_output_tokens' by alias rules
     const secondRequest = googleGenAIState.streamCalls.at(-1)?.request as
       | { config?: Record<string, unknown> }
       | undefined;
     expect(secondRequest?.config?.temperature).toBe(0.78);
-    expect(secondRequest?.config?.['max-output-tokens']).toBe(256);
+    expect(secondRequest?.config?.max_output_tokens).toBe(256);
 
     authMock.restore();
   });
@@ -557,6 +560,57 @@ describe('Gemini provider stateless contract tests', () => {
     expect(firstSession).toContain('runtime-oauth-a');
     expect(secondSession).toContain('runtime-oauth-b');
     expect(firstSession).not.toBe(secondSession);
+  });
+
+  it('ignores provider base URL for OAuth Code Assist requests', async () => {
+    queueCodeAssistStream([
+      {
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'oauth-chunk' }],
+            },
+          },
+        ],
+      },
+    ]);
+
+    const authMock = mockDetermineBestAuth([
+      { authMode: 'oauth', token: 'oauth-token' },
+    ]);
+    authMock.useMode(0);
+
+    const provider = new TestGeminiProvider(
+      undefined,
+      'https://generativelanguage.googleapis.com/v1beta',
+    );
+    const settings = new SettingsService();
+    settings.set('call-id', 'runtime-oauth-base-url');
+    const config = createRuntimeConfigStub(settings) as Config;
+    provider.setConfig(config);
+    const runtime = createProviderRuntimeContext({
+      runtimeId: 'runtime-oauth-base-url',
+      settingsService: settings,
+      config,
+    });
+
+    const oauthIterator = provider.generateChatCompletion(
+      buildCallOptions(provider, {
+        contents: [createHumanContent('oauth-base-url')],
+        settings,
+        config,
+        runtime,
+      }),
+    );
+    await oauthIterator.next();
+
+    authMock.restore();
+
+    expect(createCodeAssistContentGenerator).toHaveBeenCalled();
+    const lastCall = vi
+      .mocked(createCodeAssistContentGenerator)
+      .mock.calls.at(-1);
+    expect(lastCall?.[2]).toBeUndefined();
   });
 
   it('honors invocation overrides without touching config ephemerals', async () => {

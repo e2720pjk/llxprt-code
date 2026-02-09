@@ -14,6 +14,7 @@ import {
   FatalConfigError,
   getErrorMessage,
   Storage,
+  coreEvents,
 } from '@vybestack/llxprt-code-core';
 import stripJsonComments from 'strip-json-comments';
 import * as commentJson from 'comment-json';
@@ -93,6 +94,7 @@ export enum SettingScope {
   Workspace = 'Workspace',
   System = 'System',
   SystemDefaults = 'SystemDefaults',
+  Session = 'Session',
 }
 
 export interface CheckpointingSettings {
@@ -834,6 +836,10 @@ export function saveSettings(settingsFile: SettingsFile): void {
 
     fs.writeFileSync(settingsFile.path, outputContent, 'utf-8');
   } catch (error) {
-    console.error('Error saving user settings file:', error);
+    coreEvents.emitFeedback(
+      'error',
+      'There was an error saving your latest settings changes.',
+      error,
+    );
   }
 }

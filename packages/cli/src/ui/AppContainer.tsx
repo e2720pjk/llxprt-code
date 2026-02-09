@@ -19,7 +19,9 @@ import {
   ToolCallStatus,
   type HistoryItemWithoutId,
   type HistoryItem,
+  type IndividualToolCallDisplay,
 } from './types.js';
+import { type ModelsDialogData } from './commands/types.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { useResponsive } from './hooks/useResponsive.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
@@ -27,6 +29,7 @@ import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useAuthCommand } from './hooks/useAuthCommand.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
+import { useWelcomeOnboarding } from './hooks/useWelcomeOnboarding.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
@@ -34,12 +37,19 @@ import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useConsoleMessages } from './hooks/useConsoleMessages.js';
 import { useExtensionAutoUpdate } from './hooks/useExtensionAutoUpdate.js';
 import { useExtensionUpdates } from './hooks/useExtensionUpdates.js';
-import { isMouseEventsActive, setMouseEventsActive } from './utils/mouse.js';
+import { useTodoContinuation } from './hooks/useTodoContinuation.js';
+import {
+  isMouseEventsActive,
+  setMouseEventsActive,
+  disableMouseEvents,
+  enableMouseEvents,
+} from './utils/mouse.js';
 import { loadHierarchicalLlxprtMemory } from '../config/config.js';
 import {
   DEFAULT_HISTORY_MAX_BYTES,
   DEFAULT_HISTORY_MAX_ITEMS,
 } from '../constants/historyLimits.js';
+import { SHELL_COMMAND_NAME, SHELL_NAME } from './constants.js';
 import { LoadedSettings, SettingScope } from '../config/settings.js';
 import { ConsolePatcher } from './utils/ConsolePatcher.js';
 import { registerCleanup } from '../utils/cleanup.js';
@@ -59,20 +69,28 @@ import {
   EditorType,
   type IdeContext,
   ideContext,
-  type IModel,
   // type IdeInfo, // TODO: Fix IDE integration
   getSettingsService,
   DebugLogger,
   uiTelemetryService,
+  SessionPersistenceService,
+  type PersistedSession,
+  type IContent,
+  type ToolCallBlock,
+  type ToolResponseBlock,
+  coreEvents,
+  CoreEvent,
+  type UserFeedbackPayload,
+  ShellExecutionService,
 } from '@vybestack/llxprt-code-core';
 import { IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
-import { validateAuthMethod } from '../config/auth.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
 import { useFocus } from './hooks/useFocus.js';
 import { useBracketedPaste } from './hooks/useBracketedPaste.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
+import { SubagentView } from './components/SubagentManagement/types.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { useVim } from './hooks/vim.js';
 import { useKeypress, Key } from './hooks/useKeypress.js';
@@ -86,9 +104,10 @@ import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import { useRuntimeApi } from './contexts/RuntimeContext.js';
 import { submitOAuthCode } from './oauth-submission.js';
-import { useProviderModelDialog } from './hooks/useProviderModelDialog.js';
 import { useProviderDialog } from './hooks/useProviderDialog.js';
 import { useLoadProfileDialog } from './hooks/useLoadProfileDialog.js';
+import { useCreateProfileDialog } from './hooks/useCreateProfileDialog.js';
+import { useProfileManagement } from './hooks/useProfileManagement.js';
 import { useToolsDialog } from './hooks/useToolsDialog.js';
 import {
   shouldUpdateTokenMetrics,
@@ -121,6 +140,7 @@ import {
 import { calculateMainAreaWidth } from './utils/ui-sizing.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
+const QUEUE_ERROR_DISPLAY_DURATION_MS = 3000;
 const debug = new DebugLogger('llxprt:ui:appcontainer');
 const selectionLogger = new DebugLogger('llxprt:ui:selection');
 
@@ -131,6 +151,7 @@ interface AppContainerProps {
   version: string;
   appState: AppState;
   appDispatch: React.Dispatch<AppAction>;
+  restoredSession?: PersistedSession;
 }
 
 function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
@@ -144,6 +165,32 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
   });
 }
 
+// Valid history item types for session restore validation (must be module-level for stable reference)
+const VALID_HISTORY_TYPES = new Set([
+  'user',
+  'gemini',
+  'gemini_content',
+  'oauth_url',
+  'info',
+  'error',
+  'warning',
+  'about',
+  'help',
+  'stats',
+  'model_stats',
+  'tool_stats',
+  'cache_stats',
+  'lb_stats',
+  'quit',
+  'tool_group',
+  'user_shell',
+  'compression',
+  'extensions_list',
+  'tools_list',
+  'mcp_status',
+  'chat_list',
+]);
+
 export const AppContainer = (props: AppContainerProps) => {
   debug.log('AppContainer architecture active (v2)');
   const {
@@ -152,6 +199,7 @@ export const AppContainer = (props: AppContainerProps) => {
     startupWarnings = [],
     appState,
     appDispatch,
+    restoredSession,
   } = props;
   const runtime = useRuntimeApi();
   const isFocused = useFocus();
@@ -177,7 +225,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const { history, addItem, clearItems, loadHistory } =
     useHistory(historyLimits);
   useMemoryMonitor({ addItem });
-  const { updateTodos } = useTodoContext();
+  const { todos, updateTodos } = useTodoContext();
   const todoPauseController = useMemo(() => new TodoPausePreserver(), []);
   const registerTodoPause = useCallback(() => {
     todoPauseController.registerTodoPause();
@@ -243,6 +291,30 @@ export const AppContainer = (props: AppContainerProps) => {
     onConsoleMessage: handleNewMessage,
   });
 
+  // Handle core event system for surfacing internal errors
+  useEffect(() => {
+    const handleUserFeedback = (payload: UserFeedbackPayload) => {
+      const messageType =
+        payload.severity === 'error'
+          ? 'error'
+          : payload.severity === 'warning'
+            ? 'warn'
+            : 'info';
+      handleNewMessage({
+        type: messageType,
+        content: payload.message,
+        count: 1,
+      });
+    };
+
+    coreEvents.on(CoreEvent.UserFeedback, handleUserFeedback);
+    coreEvents.drainFeedbackBacklog();
+
+    return () => {
+      coreEvents.off(CoreEvent.UserFeedback, handleUserFeedback);
+    };
+  }, [handleNewMessage]);
+
   useEffect(() => {
     const consolePatcher = new ConsolePatcher({
       onNewMessage: handleNewMessage,
@@ -277,16 +349,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
         if (!historyService && lastHistoryServiceRef.current === null) {
           tokenLogger.debug(() => 'No history service available yet');
-        } else if (historyService) {
-          // Always get the current token count even if not a new instance
-          const currentTokens = historyService.getTotalTokens();
-          if (
-            currentTokens > 0 &&
-            currentTokens !== lastPublishedHistoryTokensRef.current
-          ) {
-            lastPublishedHistoryTokensRef.current = currentTokens;
-            updateHistoryTokenCount(currentTokens);
-          }
         }
 
         // Check if we have a new history service instance (happens after compression)
@@ -346,13 +408,350 @@ export const AppContainer = (props: AppContainerProps) => {
       lastPublishedHistoryTokensRef.current = null;
     };
   }, [config, updateHistoryTokenCount, tokenLogger]);
+
+  // Convert IContent[] to UI HistoryItem[] for display
+  const convertToUIHistory = useCallback(
+    (history: IContent[]): HistoryItem[] => {
+      const items: HistoryItem[] = [];
+      let id = 1;
+
+      // First pass: collect all tool responses by callId for lookup
+      const toolResponseMap = new Map<string, ToolResponseBlock>();
+      for (const content of history) {
+        if (content.speaker === 'tool') {
+          const responseBlocks = content.blocks.filter(
+            (b): b is ToolResponseBlock => b.type === 'tool_response',
+          );
+          for (const resp of responseBlocks) {
+            toolResponseMap.set(resp.callId, resp);
+          }
+        }
+      }
+
+      for (const content of history) {
+        // Extract text blocks
+        const textBlocks = content.blocks.filter(
+          (b): b is { type: 'text'; text: string } => b.type === 'text',
+        );
+        const text = textBlocks.map((b) => b.text).join('\n');
+
+        // Extract tool call blocks for AI
+        const toolCallBlocks = content.blocks.filter(
+          (b): b is ToolCallBlock => b.type === 'tool_call',
+        );
+
+        if (content.speaker === 'human' && text) {
+          items.push({
+            id: id++,
+            type: 'user',
+            text,
+          } as HistoryItem);
+        } else if (content.speaker === 'ai') {
+          // Add text response if present
+          if (text) {
+            items.push({
+              id: id++,
+              type: 'gemini',
+              text,
+              model: content.metadata?.model,
+            } as HistoryItem);
+          }
+          // Add tool calls as proper tool_group items
+          if (toolCallBlocks.length > 0) {
+            const tools: IndividualToolCallDisplay[] = toolCallBlocks.map(
+              (tc) => {
+                const response = toolResponseMap.get(tc.id);
+                // Format result display from tool response
+                let resultDisplay: string | undefined;
+                if (response) {
+                  if (response.error) {
+                    resultDisplay = `Error: ${response.error}`;
+                  } else if (response.result !== undefined) {
+                    // Convert result to string for display
+                    const result = response.result as Record<string, unknown>;
+                    if (typeof result === 'string') {
+                      resultDisplay = result;
+                    } else if (result && typeof result === 'object') {
+                      // Handle common result formats
+                      if (
+                        'output' in result &&
+                        typeof result.output === 'string'
+                      ) {
+                        resultDisplay = result.output;
+                      } else {
+                        resultDisplay = JSON.stringify(result, null, 2);
+                      }
+                    }
+                  }
+                }
+                return {
+                  callId: tc.id,
+                  name: tc.name,
+                  description: tc.description || '',
+                  resultDisplay,
+                  status: response
+                    ? ToolCallStatus.Success
+                    : ToolCallStatus.Pending,
+                  confirmationDetails: undefined,
+                };
+              },
+            );
+            items.push({
+              id: id++,
+              type: 'tool_group',
+              agentId: 'primary',
+              tools,
+            } as HistoryItem);
+          }
+        }
+        // Skip tool speaker entries - already processed via map
+      }
+
+      return items;
+    },
+    [],
+  );
+
+  // Session restoration for --continue functionality
+  // Split into two parts: UI restoration (immediate) and core history (when available)
+  const sessionRestoredRef = useRef(false);
+  const coreHistoryRestoredRef = useRef(false);
+
+  /**
+   * Validates that an item matches the HistoryItem schema.
+   * Uses duck typing for flexibility with minor schema changes.
+   */
+  const isValidHistoryItem = useCallback(
+    (item: unknown): item is HistoryItem => {
+      if (typeof item !== 'object' || item === null) {
+        return false;
+      }
+
+      const obj = item as Record<string, unknown>;
+
+      // Required fields
+      if (typeof obj.id !== 'number') return false;
+      if (typeof obj.type !== 'string') return false;
+
+      // Check if type is valid (allow unknown types from newer versions)
+      if (!VALID_HISTORY_TYPES.has(obj.type)) {
+        debug.warn(`Unknown history item type: ${obj.type}`);
+        // Allow unknown types to pass - might be from newer version
+      }
+
+      // Type-specific validation
+      switch (obj.type) {
+        case 'user':
+        case 'gemini':
+        case 'gemini_content':
+        case 'info':
+        case 'warning':
+        case 'error':
+        case 'user_shell':
+          // Text types should have text (but might be empty)
+          return typeof obj.text === 'string' || obj.text === undefined;
+
+        case 'tool_group':
+          // Tool groups must have tools array
+          if (!Array.isArray(obj.tools)) return false;
+          return obj.tools.every(
+            (tool) =>
+              typeof tool === 'object' &&
+              tool !== null &&
+              typeof (tool as Record<string, unknown>).callId === 'string' &&
+              typeof (tool as Record<string, unknown>).name === 'string',
+          );
+
+        default:
+          // For other types, just having id and type is enough
+          return true;
+      }
+    },
+    [],
+  );
+
+  /**
+   * Validates all items in a history array.
+   * Returns valid items, filters invalid ones.
+   */
+  const validateUIHistory = useCallback(
+    (items: unknown[]): { valid: HistoryItem[]; invalidCount: number } => {
+      const valid: HistoryItem[] = [];
+      let invalidCount = 0;
+
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (isValidHistoryItem(item)) {
+          valid.push(item);
+        } else {
+          debug.warn(`Invalid history item at index ${i}:`, item);
+          invalidCount++;
+        }
+      }
+
+      return { valid, invalidCount };
+    },
+    [isValidHistoryItem],
+  );
+
+  // Part 1: Restore UI history immediately on mount
+  useEffect(() => {
+    if (!restoredSession || sessionRestoredRef.current) {
+      return;
+    }
+    sessionRestoredRef.current = true;
+
+    try {
+      // Use saved UI history if available (preserves exact display), otherwise convert from core history
+      let uiHistoryItems: HistoryItem[];
+      let usedFallback = false;
+      let invalidCount = 0;
+
+      if (
+        restoredSession.uiHistory &&
+        Array.isArray(restoredSession.uiHistory)
+      ) {
+        // Validate UI history items before loading
+        const validation = validateUIHistory(restoredSession.uiHistory);
+        invalidCount = validation.invalidCount;
+
+        if (invalidCount > 0) {
+          debug.warn(`${invalidCount} invalid UI history items found`);
+
+          if (validation.valid.length === 0) {
+            // All items invalid - fall back to conversion
+            debug.warn('All UI history invalid, falling back to conversion');
+            uiHistoryItems = convertToUIHistory(restoredSession.history);
+            usedFallback = true;
+          } else {
+            // Some items valid - use them
+            uiHistoryItems = validation.valid;
+          }
+        } else {
+          uiHistoryItems = validation.valid;
+        }
+
+        if (!usedFallback) {
+          debug.log(`Using saved UI history (${uiHistoryItems.length} items)`);
+        }
+      } else {
+        uiHistoryItems = convertToUIHistory(restoredSession.history);
+        usedFallback = true;
+        debug.log(
+          `Converted core history to UI (${uiHistoryItems.length} items)`,
+        );
+      }
+      loadHistory(uiHistoryItems);
+
+      debug.log(
+        `Restored ${restoredSession.history.length} messages (${uiHistoryItems.length} UI items) for display`,
+      );
+
+      // Add info message about restoration
+      const sessionTime = new Date(
+        restoredSession.updatedAt || restoredSession.createdAt,
+      ).toLocaleString();
+      const source = usedFallback
+        ? 'converted from core'
+        : 'restored from UI cache';
+      addItem(
+        {
+          type: 'info',
+          text: `Session restored (${uiHistoryItems.length} messages ${source} from ${sessionTime})`,
+        },
+        Date.now(),
+      );
+
+      // Warn if some items were corrupted
+      if (invalidCount > 0 && !usedFallback) {
+        addItem(
+          {
+            type: 'warning',
+            text: `${invalidCount} corrupted message(s) could not be displayed.`,
+          },
+          Date.now(),
+        );
+      }
+    } catch (err) {
+      debug.error('Failed to restore UI history:', err);
+      addItem(
+        {
+          type: 'warning',
+          text: 'Failed to restore previous session display.',
+        },
+        Date.now(),
+      );
+    }
+  }, [
+    restoredSession,
+    convertToUIHistory,
+    loadHistory,
+    addItem,
+    validateUIHistory,
+  ]);
+
+  // Part 2: Restore core history using the new restoreHistory API (for AI context)
+  // P0 Fix: Use synchronous API that ensures chat is initialized before returning
+  useEffect(() => {
+    if (!restoredSession || coreHistoryRestoredRef.current) {
+      return;
+    }
+
+    coreHistoryRestoredRef.current = true;
+
+    const geminiClient = config.getGeminiClient();
+    if (!geminiClient) {
+      debug.error('GeminiClient not available for session restore');
+      addItem(
+        {
+          type: 'error',
+          text: 'Could not restore AI context - client not initialized.',
+        },
+        Date.now(),
+      );
+      return;
+    }
+
+    // Use the new restoreHistory API that ensures chat/content generator are ready
+    geminiClient
+      .restoreHistory(restoredSession.history)
+      .then(() => {
+        debug.log(
+          `Restored ${restoredSession.history.length} items to core history for AI context`,
+        );
+      })
+      .catch((err: unknown) => {
+        debug.error('Failed to restore core history:', err);
+        const errorMessage = err instanceof Error ? err.message : String(err);
+
+        // Surface specific error details to help diagnose the issue
+        let userMessage =
+          'Previous session display restored, but AI context could not be loaded. The AI will not remember the previous conversation.';
+        if (
+          errorMessage.includes('Content generator') ||
+          errorMessage.includes('auth')
+        ) {
+          userMessage += ' (Authentication may be required)';
+        } else if (errorMessage.includes('Chat initialization')) {
+          userMessage += ' (Chat service unavailable)';
+        }
+
+        addItem(
+          {
+            type: 'warning',
+            text: userMessage,
+          },
+          Date.now(),
+        );
+      });
+  }, [restoredSession, config, addItem]);
+
   const [_staticNeedsRefresh, setStaticNeedsRefresh] = useState(false);
   const [staticKey, setStaticKey] = useState(0);
   const externalEditorStateRef = useRef<{
     paused: boolean;
     rawModeManaged: boolean;
   } | null>(null);
-  const keypressRefreshRef = useRef<() => void>(() => {});
 
   const useAlternateBuffer =
     settings.merged.ui?.useAlternateBuffer === true &&
@@ -378,13 +777,6 @@ export const AppContainer = (props: AppContainerProps) => {
       }
     }
 
-    if (keypressRefreshRef.current) {
-      keypressRefreshRef.current();
-      debug.debug(
-        () => 'Keypress refresh requested after external editor closed',
-      );
-    }
-
     externalEditorStateRef.current = null;
   }, [setRawMode, stdin]);
 
@@ -399,7 +791,9 @@ export const AppContainer = (props: AppContainerProps) => {
       return;
     }
 
-    stdout.write(ansiEscapes.clearTerminal);
+    if (settings.merged.ui?.useAlternateBuffer === false) {
+      stdout.write(ansiEscapes.clearTerminal);
+    }
     setStaticKey((prev) => prev + 1);
 
     restoreTerminalStateAfterEditor();
@@ -414,6 +808,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setStaticKey,
     stdout,
     useAlternateBuffer,
+    settings,
   ]);
 
   const handleExternalEditorOpen = useCallback(() => {
@@ -472,6 +867,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
   const [showDebugProfiler, setShowDebugProfiler] = useState(false);
+  const [copyModeEnabled, setCopyModeEnabled] = useState(false);
+  const [renderMarkdown, setRenderMarkdown] = useState<boolean>(true);
+  const [isTodoPanelCollapsed, setIsTodoPanelCollapsed] = useState(false);
 
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const [quittingMessages, setQuittingMessages] = useState<
@@ -488,8 +886,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
-  const [providerModels, setProviderModels] = useState<IModel[]>([]);
   const [isPermissionsDialogOpen, setIsPermissionsDialogOpen] = useState(false);
+  const [embeddedShellFocused, setEmbeddedShellFocused] = useState(false);
 
   const openPermissionsDialog = useCallback(() => {
     setIsPermissionsDialogOpen(true);
@@ -504,6 +902,26 @@ export const AppContainer = (props: AppContainerProps) => {
     entries: unknown[];
   }>({ entries: [] });
 
+  // Subagent dialog state
+  const [isSubagentDialogOpen, setIsSubagentDialogOpen] = useState(false);
+  const [subagentDialogInitialView, setSubagentDialogInitialView] = useState<
+    SubagentView | undefined
+  >(undefined);
+  const [subagentDialogInitialName, setSubagentDialogInitialName] = useState<
+    string | undefined
+  >(undefined);
+
+  // Models dialog state
+  const [isModelsDialogOpen, setIsModelsDialogOpen] = useState(false);
+  const [modelsDialogData, setModelsDialogData] = useState<
+    ModelsDialogData | undefined
+  >(undefined);
+
+  // Queue error message state (for preventing slash/shell commands from being queued)
+  const [queueErrorMessage, setQueueErrorMessage] = useState<string | null>(
+    null,
+  );
+
   const openLoggingDialog = useCallback((data?: { entries: unknown[] }) => {
     setLoggingDialogData(data || { entries: [] });
     setIsLoggingDialogOpen(true);
@@ -511,6 +929,31 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const closeLoggingDialog = useCallback(() => {
     setIsLoggingDialogOpen(false);
+  }, []);
+
+  const openSubagentDialog = useCallback(
+    (initialView?: SubagentView, initialName?: string) => {
+      setSubagentDialogInitialView(initialView);
+      setSubagentDialogInitialName(initialName);
+      setIsSubagentDialogOpen(true);
+    },
+    [],
+  );
+
+  const closeSubagentDialog = useCallback(() => {
+    setIsSubagentDialogOpen(false);
+    setSubagentDialogInitialView(undefined);
+    setSubagentDialogInitialName(undefined);
+  }, []);
+
+  const openModelsDialog = useCallback((data?: ModelsDialogData) => {
+    setModelsDialogData(data);
+    setIsModelsDialogOpen(true);
+  }, []);
+
+  const closeModelsDialog = useCallback(() => {
+    setIsModelsDialogOpen(false);
+    setModelsDialogData(undefined);
   }, []);
 
   const {
@@ -625,6 +1068,19 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
     useFolderTrust(settings, config, addItem);
 
+  // Welcome onboarding - shown after folder trust, before other dialogs
+  const {
+    showWelcome: isWelcomeDialogOpen,
+    state: welcomeState,
+    actions: welcomeActions,
+    availableProviders: welcomeAvailableProviders,
+    availableModels: welcomeAvailableModels,
+    triggerAuth: triggerWelcomeAuth,
+  } = useWelcomeOnboarding({
+    settings,
+    isFolderTrustComplete: !isFolderTrustDialogOpen && !isRestarting,
+  });
+
   const { needsRestart: ideNeedsRestart } = useIdeTrustListener(config);
   useEffect(() => {
     if (ideNeedsRestart) {
@@ -632,6 +1088,18 @@ export const AppContainer = (props: AppContainerProps) => {
       setShowIdeRestartPrompt(true);
     }
   }, [ideNeedsRestart]);
+
+  // Effect to clear queue error message after timeout
+  useEffect(() => {
+    if (queueErrorMessage) {
+      const timer = setTimeout(() => {
+        setQueueErrorMessage(null);
+      }, QUEUE_ERROR_DISPLAY_DURATION_MS);
+
+      return () => clearTimeout(timer);
+    }
+    return undefined;
+  }, [queueErrorMessage, setQueueErrorMessage]);
 
   useKeypress(
     (key) => {
@@ -642,27 +1110,10 @@ export const AppContainer = (props: AppContainerProps) => {
     { isActive: showIdeRestartPrompt },
   );
 
-  const {
-    isAuthDialogOpen,
-    openAuthDialog,
-    handleAuthSelect,
-    isAuthenticating,
-    cancelAuthentication,
-  } = useAuthCommand(settings, appState, config);
-
-  useEffect(() => {
-    if (settings.merged.selectedAuthType && !settings.merged.useExternalAuth) {
-      const error = validateAuthMethod(settings.merged.selectedAuthType);
-      if (error) {
-        setAuthError(error);
-        // Don't automatically open auth dialog - user must use /auth command
-      }
-    }
-  }, [
-    settings.merged.selectedAuthType,
-    settings.merged.useExternalAuth,
-    setAuthError,
-  ]);
+  const { isAuthDialogOpen, openAuthDialog, handleAuthSelect } = useAuthCommand(
+    settings,
+    appState,
+  );
 
   // Check for OAuth code needed flag
   useEffect(() => {
@@ -701,31 +1152,6 @@ export const AppContainer = (props: AppContainerProps) => {
     appState,
     config,
   });
-
-  const {
-    showDialog: isProviderModelDialogOpen,
-    openDialog: openProviderModelDialogRaw,
-    handleSelect: handleProviderModelChange,
-    closeDialog: exitProviderModelDialog,
-  } = useProviderModelDialog({
-    addMessage: (msg) =>
-      addItem(
-        { type: msg.type as MessageType, text: msg.content },
-        msg.timestamp.getTime(),
-      ),
-    appState,
-  });
-
-  const openProviderModelDialog = useCallback(async () => {
-    try {
-      const models = await runtime.listAvailableModels();
-      setProviderModels(models);
-    } catch (e) {
-      console.error('Failed to load models:', e);
-      setProviderModels([]);
-    }
-    await openProviderModelDialogRaw();
-  }, [openProviderModelDialogRaw, runtime]);
 
   // Watch for model changes from config
   useEffect(() => {
@@ -780,6 +1206,45 @@ export const AppContainer = (props: AppContainerProps) => {
   });
 
   const {
+    showDialog: isCreateProfileDialogOpen,
+    openDialog: openCreateProfileDialog,
+    closeDialog: exitCreateProfileDialog,
+    providers: createProfileProviders,
+  } = useCreateProfileDialog({
+    appState,
+  });
+
+  const {
+    showListDialog: isProfileListDialogOpen,
+    showDetailDialog: isProfileDetailDialogOpen,
+    showEditorDialog: isProfileEditorDialogOpen,
+    profiles: profileListItems,
+    isLoading: profileDialogLoading,
+    selectedProfileName,
+    selectedProfile: selectedProfileData,
+    defaultProfileName,
+    activeProfileName,
+    profileError: profileDialogError,
+    openListDialog: openProfileListDialog,
+    closeListDialog: closeProfileListDialog,
+    viewProfileDetail,
+    closeDetailDialog: closeProfileDetailDialog,
+    loadProfile: loadProfileFromDetail,
+    deleteProfile: deleteProfileFromDetail,
+    setDefault: setProfileAsDefault,
+    openEditor: openProfileEditor,
+    closeEditor: closeProfileEditor,
+    saveProfile: saveProfileFromEditor,
+  } = useProfileManagement({
+    addMessage: (msg) =>
+      addItem(
+        { type: msg.type as MessageType, text: msg.content },
+        msg.timestamp.getTime(),
+      ),
+    appState,
+  });
+
+  const {
     showDialog: isToolsDialogOpen,
     openDialog: openToolsDialogRaw,
     closeDialog: exitToolsDialog,
@@ -814,16 +1279,16 @@ export const AppContainer = (props: AppContainerProps) => {
     );
     try {
       const { memoryContent, fileCount } = await loadHierarchicalLlxprtMemory(
-        process.cwd(),
+        config.getWorkingDir(),
         settings.merged.loadMemoryFromIncludeDirectories
           ? config.getWorkspaceContext().getDirectories()
           : [],
         config.getDebugMode(),
         config.getFileService(),
         settings.merged,
-        config.getExtensionContextFilePaths(),
+        config.getExtensions(),
         config.getFolderTrust(),
-        settings.merged.ui?.memoryImportFormat || 'tree', // Use setting or default to 'tree'
+        settings.merged.ui?.memoryImportFormat || 'tree',
         config.getFileFilteringOptions(),
       );
 
@@ -939,9 +1404,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleAuthTimeout = useCallback(() => {
     setAuthError('Authentication timed out. Please try again.');
-    cancelAuthentication();
     // NEVER automatically open auth dialog - user must use /auth
-  }, [setAuthError, cancelAuthentication]);
+  }, [setAuthError]);
 
   const handlePrivacyNoticeExit = useCallback(() => {
     setShowPrivacyNotice(false);
@@ -962,16 +1426,22 @@ export const AppContainer = (props: AppContainerProps) => {
       openPrivacyNotice,
       openSettingsDialog,
       openLoggingDialog,
-      openProviderModelDialog,
+      openSubagentDialog,
+      openModelsDialog,
       openPermissionsDialog,
       openProviderDialog,
       openLoadProfileDialog,
+      openCreateProfileDialog,
+      openProfileListDialog,
+      viewProfileDetail,
+      openProfileEditor,
       quit: setQuittingMessages,
       setDebugMessage,
       toggleCorgiMode,
       toggleDebugProfiler,
       dispatchExtensionStateUpdate,
       addConfirmUpdateExtensionRequest,
+      openWelcomeDialog: welcomeActions.resetAndReopen,
     }),
     [
       openAuthDialog,
@@ -980,17 +1450,38 @@ export const AppContainer = (props: AppContainerProps) => {
       openPrivacyNotice,
       openSettingsDialog,
       openLoggingDialog,
-      openProviderModelDialog,
+      openSubagentDialog,
+      openModelsDialog,
       openPermissionsDialog,
       openProviderDialog,
       openLoadProfileDialog,
+      openCreateProfileDialog,
+      openProfileListDialog,
+      viewProfileDetail,
+      openProfileEditor,
       setQuittingMessages,
       setDebugMessage,
       toggleCorgiMode,
       toggleDebugProfiler,
       dispatchExtensionStateUpdate,
       addConfirmUpdateExtensionRequest,
+      welcomeActions.resetAndReopen,
     ],
+  );
+
+  /**
+   * @plan PLAN-20260129-TODOPERSIST.P07
+   * Get TodoContext for /todo command integration
+   */
+  const todoContextForCommands = useMemo(
+    () => ({
+      todos,
+      updateTodos,
+      refreshTodos: () => {
+        /* refreshTodos is available but not needed in commands */
+      },
+    }),
+    [todos, updateTodos],
   );
 
   const {
@@ -1013,6 +1504,7 @@ export const AppContainer = (props: AppContainerProps) => {
     slashCommandProcessorActions,
     extensionsUpdateState,
     true, // isConfigInitialized
+    todoContextForCommands, // @plan PLAN-20260129-TODOPERSIST.P07
   );
 
   // Memoize viewport to ensure it updates when inputWidth changes
@@ -1066,6 +1558,7 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingHistoryItems: pendingGeminiHistoryItems,
     thought,
     cancelOngoingRequest,
+    activeShellPtyId: geminiActiveShellPtyId,
   } = useGeminiStream(
     config.getGeminiClient(),
     history,
@@ -1080,6 +1573,9 @@ export const AppContainer = (props: AppContainerProps) => {
     performMemoryRefresh,
     refreshStatic,
     handleUserCancel,
+    setEmbeddedShellFocused,
+    stdout?.columns,
+    stdout?.rows,
     registerTodoPause,
     handleExternalEditorOpen,
   );
@@ -1088,6 +1584,33 @@ export const AppContainer = (props: AppContainerProps) => {
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
+
+  // Use the activeShellPtyId from useGeminiStream (which gets it from useShellCommandProcessor)
+  const activeShellPtyId = geminiActiveShellPtyId;
+
+  // Auto-reset embeddedShellFocused when no shell tool is executing.
+  // Without this, cancelling a shell while focused (embeddedShellFocused=true)
+  // leaves the input prompt permanently disabled.
+  const anyShellExecuting = useMemo(
+    () =>
+      pendingHistoryItems.some(
+        (item) =>
+          item?.type === 'tool_group' &&
+          item.tools.some(
+            (tool) =>
+              (tool.name === SHELL_COMMAND_NAME || tool.name === SHELL_NAME) &&
+              tool.status === ToolCallStatus.Executing,
+          ),
+      ),
+    [pendingHistoryItems],
+  );
+
+  useEffect(() => {
+    if (embeddedShellFocused && !anyShellExecuting) {
+      debug.log('Auto-resetting embeddedShellFocused: no shell executing');
+      setEmbeddedShellFocused(false);
+    }
+  }, [embeddedShellFocused, anyShellExecuting]);
 
   // Update the cancel handler with message queue support
   const cancelHandlerRef = useRef<(() => void) | null>(null);
@@ -1110,6 +1633,14 @@ export const AppContainer = (props: AppContainerProps) => {
     (submittedValue: string) => {
       const trimmedValue = submittedValue.trim();
       if (trimmedValue.length > 0) {
+        /**
+         * @plan PLAN-20260129-TODOPERSIST.P12
+         * Reset continuation attempt counter when user submits a new prompt.
+         * This prevents the continuation limit from blocking future continuations
+         * after user interaction.
+         */
+        hadToolCallsRef.current = false;
+
         // Add to independent input history
         inputHistoryStore.addInput(trimmedValue);
         submitQuery(trimmedValue);
@@ -1122,6 +1653,7 @@ export const AppContainer = (props: AppContainerProps) => {
     controller: todoPauseController,
     updateTodos,
     handleFinalSubmit,
+    todos,
   });
 
   const handleIdePromptComplete = useCallback(
@@ -1190,17 +1722,29 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleGlobalKeypress = useCallback(
     (key: Key) => {
+      if (copyModeEnabled) {
+        setCopyModeEnabled(false);
+        enableMouseEvents();
+        // We don't want to process any other keys if we're in copy mode.
+        return;
+      }
+
       // Debug log keystrokes if enabled
       if (settings.merged.debugKeystrokeLogging) {
         console.log('[DEBUG] Keystroke:', JSON.stringify(key));
       }
 
+      if (
+        settings.merged.ui?.useAlternateBuffer &&
+        keyMatchers[Command.TOGGLE_COPY_MODE](key)
+      ) {
+        setCopyModeEnabled(true);
+        disableMouseEvents();
+        return;
+      }
+
       // Handle exit keys BEFORE dialog visibility check so exit prompts work even when dialogs are open
       if (keyMatchers[Command.QUIT](key)) {
-        // When authenticating, let AuthInProgress component handle Ctrl+C.
-        if (isAuthenticating) {
-          return;
-        }
         if (!ctrlCPressedOnce) {
           cancelOngoingRequest?.();
         }
@@ -1252,6 +1796,13 @@ export const AppContainer = (props: AppContainerProps) => {
         if (Object.keys(mcpServers || {}).length > 0) {
           handleSlashCommand(newValue ? '/mcp desc' : '/mcp nodesc');
         }
+      } else if (keyMatchers[Command.TOGGLE_MARKDOWN](key)) {
+        setRenderMarkdown((prev) => {
+          const newValue = !prev;
+          // Force re-render of static content
+          refreshStatic();
+          return newValue;
+        });
       } else if (
         keyMatchers[Command.TOGGLE_IDE_CONTEXT_DETAIL](key) &&
         config.getIdeMode() &&
@@ -1259,11 +1810,32 @@ export const AppContainer = (props: AppContainerProps) => {
       ) {
         // Show IDE status when in IDE mode and context is available.
         handleSlashCommand('/ide status');
+      } else if (keyMatchers[Command.TOGGLE_TODO_DIALOG](key)) {
+        // Toggle todo panel collapsed/expanded state
+        setIsTodoPanelCollapsed((prev) => !prev);
       } else if (
         keyMatchers[Command.SHOW_MORE_LINES](key) &&
         !enteringConstrainHeightMode
       ) {
         setConstrainHeight(false);
+      } else if (
+        keyMatchers[Command.TOGGLE_SHELL_INPUT_FOCUS](key) &&
+        config.getEnableInteractiveShell()
+      ) {
+        const lastPtyId = ShellExecutionService.getLastActivePtyId();
+        debug.log(
+          'Ctrl+F: activeShellPtyId=%s, lastActivePtyId=%s, will toggle=%s',
+          activeShellPtyId,
+          lastPtyId,
+          !!(activeShellPtyId || lastPtyId),
+        );
+        if (activeShellPtyId || lastPtyId) {
+          // Toggle focus between shell and LLxprt input.
+          setEmbeddedShellFocused((prev) => {
+            debug.log('Ctrl+F: embeddedShellFocused %s -> %s', prev, !prev);
+            return !prev;
+          });
+        }
       }
     },
     [
@@ -1283,20 +1855,20 @@ export const AppContainer = (props: AppContainerProps) => {
       setCtrlDPressedOnce,
       ctrlDTimerRef,
       handleSlashCommand,
-      isAuthenticating,
       cancelOngoingRequest,
       addItem,
       settings.merged.debugKeystrokeLogging,
+      refreshStatic,
+      setCopyModeEnabled,
+      copyModeEnabled,
+      settings.merged.ui?.useAlternateBuffer,
+      activeShellPtyId,
     ],
   );
 
-  const { refresh: globalKeypressRefresh } = useKeypress(handleGlobalKeypress, {
+  useKeypress(handleGlobalKeypress, {
     isActive: true,
   });
-
-  useEffect(() => {
-    keypressRefreshRef.current = globalKeypressRefresh;
-  }, [globalKeypressRefresh]);
 
   useEffect(() => {
     if (config) {
@@ -1316,6 +1888,11 @@ export const AppContainer = (props: AppContainerProps) => {
     if (quittingMessages) {
       // Allow UI to render the quit message briefly before exiting
       const timer = setTimeout(() => {
+        // Note: We don't call runExitCleanup() here because it includes
+        // instance.waitUntilExit() which would deadlock. The cleanup is
+        // triggered by process.exit() which fires SIGTERM/exit handlers.
+        // The mouse events cleanup is registered in gemini.tsx and will
+        // run via the process exit handlers. (fixes #959)
         process.exit(0);
       }, 100); // 100ms delay to show quit screen
 
@@ -1376,7 +1953,27 @@ export const AppContainer = (props: AppContainerProps) => {
   const pendingHistoryItemRef = useRef<DOMElement>(null);
   const rootUiRef = useRef<DOMElement>(null);
 
-  useMouseSelection({ enabled: true, rootRef: rootUiRef });
+  const { copySelectionToClipboard } = useMouseSelection({
+    enabled: true,
+    rootRef: rootUiRef,
+    onCopiedText: (text) => {
+      if (selectionLogger.enabled) {
+        selectionLogger.debug(
+          () => `Copied ${text.length} characters to clipboard`,
+        );
+      }
+    },
+  });
+
+  // Fix for issue #1284: Add keyboard shortcut for Cmd+C/Ctrl+C to copy selection
+  useKeypress(
+    (key) => {
+      if (key.name === 'c' && (key.ctrl || key.meta)) {
+        void copySelectionToClipboard();
+      }
+    },
+    { isActive: true },
+  );
 
   useLayoutEffect(() => {
     if (mainControlsRef.current) {
@@ -1446,6 +2043,106 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [streamingState, refreshStatic, _staticNeedsRefresh]);
 
+  // Session persistence - always save so sessions can be resumed with --continue
+  // Use stable dependencies to avoid recreating service (and new file path) on config changes
+  const storage = config.storage;
+  const sessionId = config.getSessionId();
+  const sessionPersistence = useMemo(
+    () => new SessionPersistenceService(storage, sessionId),
+    [storage, sessionId],
+  );
+
+  /**
+   * @plan PLAN-20260129-TODOPERSIST.P12
+   * Wire up todo continuation detection to trigger continuation prompts
+   * when streams complete without tool calls and active TODOs exist.
+   */
+  const geminiClientForContinuation = config.getGeminiClient();
+  const todoContinuation = useTodoContinuation(
+    geminiClientForContinuation,
+    config,
+    streamingState === StreamingState.Responding ||
+      streamingState === StreamingState.WaitingForConfirmation,
+    setDebugMessage,
+  );
+
+  // Track previous streaming state to detect turn completion
+  const prevStreamingStateRef = useRef<StreamingState>(streamingState);
+
+  /**
+   * @plan PLAN-20260129-TODOPERSIST.P12
+   * Track whether tool calls were made during the turn for continuation decision.
+   * Tool calls signal the AI made progress, so we don't need continuation.
+   */
+  const hadToolCallsRef = useRef<boolean>(false);
+
+  /**
+   * @plan PLAN-20260129-TODOPERSIST.P12
+   * Track tool calls by detecting tool_group items in history and pending items.
+   */
+  useEffect(() => {
+    const hasToolCalls =
+      history.some((item) => item.type === 'tool_group') ||
+      pendingHistoryItems.some((item) => item.type === 'tool_group');
+
+    if (
+      hasToolCalls &&
+      (streamingState === StreamingState.Responding ||
+        streamingState === StreamingState.WaitingForConfirmation)
+    ) {
+      hadToolCallsRef.current = true;
+    }
+  }, [history, pendingHistoryItems, streamingState]);
+
+  // Save session when turn completes (streaming goes idle)
+  useEffect(() => {
+    const wasActive =
+      prevStreamingStateRef.current === StreamingState.Responding ||
+      prevStreamingStateRef.current === StreamingState.WaitingForConfirmation;
+    const isNowIdle = streamingState === StreamingState.Idle;
+    prevStreamingStateRef.current = streamingState;
+
+    if (!wasActive || !isNowIdle) {
+      return;
+    }
+
+    /**
+     * @plan PLAN-20260129-TODOPERSIST.P12
+     * Notify continuation logic that stream completed.
+     * Pass hadToolCalls to determine if continuation is needed.
+     */
+    todoContinuation.handleStreamCompleted(hadToolCallsRef.current);
+
+    // Reset for next turn
+    hadToolCallsRef.current = false;
+
+    // Get history from gemini client and save
+    const geminiClient = config.getGeminiClient();
+    const historyService = geminiClient?.getHistoryService?.();
+    if (!historyService) {
+      return;
+    }
+
+    const historyToSave = historyService.getComprehensive();
+    if (historyToSave.length === 0) {
+      return;
+    }
+
+    sessionPersistence
+      .save(
+        historyToSave,
+        {
+          provider: config.getProvider?.() ?? undefined,
+          model: config.getModel(),
+          tokenCount: historyService.getTotalTokens(),
+        },
+        history, // Save UI history for exact display restoration
+      )
+      .catch((err: unknown) => {
+        debug.error('Failed to save session:', err);
+      });
+  }, [streamingState, sessionPersistence, config, history, todoContinuation]);
+
   const filteredConsoleMessages = useMemo(() => {
     if (config.getDebugMode()) {
       return consoleMessages;
@@ -1470,14 +2167,14 @@ export const AppContainer = (props: AppContainerProps) => {
     if (
       initialPrompt &&
       !initialPromptSubmitted.current &&
-      !isAuthenticating &&
       !isAuthDialogOpen &&
       !isThemeDialogOpen &&
       !isEditorDialogOpen &&
       !isProviderDialogOpen &&
-      !isProviderModelDialogOpen &&
       !isToolsDialogOpen &&
+      !isCreateProfileDialogOpen &&
       !showPrivacyNotice &&
+      !isWelcomeDialogOpen &&
       geminiClient
     ) {
       submitQuery(initialPrompt);
@@ -1486,14 +2183,15 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [
     initialPrompt,
     submitQuery,
-    isAuthenticating,
     isAuthDialogOpen,
     isThemeDialogOpen,
     isEditorDialogOpen,
     isProviderDialogOpen,
-    isProviderModelDialogOpen,
+
     isToolsDialogOpen,
+    isCreateProfileDialogOpen,
     showPrivacyNotice,
+    isWelcomeDialogOpen,
     geminiClient,
   ]);
 
@@ -1509,6 +2207,10 @@ export const AppContainer = (props: AppContainerProps) => {
     : isPowerShell
       ? '  Type your message, @path/to/file or +path/to/file'
       : '  Type your message or @path/to/file';
+
+  useEffect(() => {
+    config.setPtyTerminalSize(mainAreaWidth, terminalHeight);
+  }, [config, mainAreaWidth, terminalHeight]);
 
   // Build UIState object
   const uiState: UIState = {
@@ -1537,11 +2239,13 @@ export const AppContainer = (props: AppContainerProps) => {
     isThemeDialogOpen,
     isSettingsDialogOpen,
     isAuthDialogOpen,
-    isAuthenticating,
     isEditorDialogOpen,
     isProviderDialogOpen,
-    isProviderModelDialogOpen,
     isLoadProfileDialogOpen,
+    isCreateProfileDialogOpen,
+    isProfileListDialogOpen,
+    isProfileDetailDialogOpen,
+    isProfileEditorDialogOpen,
     isToolsDialogOpen,
     isFolderTrustDialogOpen,
     showWorkspaceMigrationDialog,
@@ -1549,11 +2253,14 @@ export const AppContainer = (props: AppContainerProps) => {
     isOAuthCodeDialogOpen: appState.openDialogs.oauthCode,
     isPermissionsDialogOpen,
     isLoggingDialogOpen,
+    isSubagentDialogOpen,
+    isModelsDialogOpen,
 
     // Dialog data
-    providerOptions,
+    providerOptions: isCreateProfileDialogOpen
+      ? createProfileProviders
+      : providerOptions,
     selectedProvider,
-    providerModels,
     currentModel,
     profiles,
     toolsDialogAction,
@@ -1561,6 +2268,18 @@ export const AppContainer = (props: AppContainerProps) => {
     toolsDialogDisabledTools,
     workspaceGeminiCLIExtensions,
     loggingDialogData,
+    subagentDialogInitialView,
+    subagentDialogInitialName,
+    modelsDialogData,
+
+    // Profile management dialog data
+    profileListItems,
+    selectedProfileName,
+    selectedProfileData,
+    defaultProfileName,
+    activeProfileName,
+    profileDialogError,
+    profileDialogLoading,
 
     // Confirmation requests
     shellConfirmationRequest,
@@ -1578,6 +2297,7 @@ export const AppContainer = (props: AppContainerProps) => {
     constrainHeight,
     showErrorDetails,
     showToolDescriptions,
+    isTodoPanelCollapsed,
     isNarrow,
     vimModeEnabled,
     vimMode,
@@ -1627,6 +2347,12 @@ export const AppContainer = (props: AppContainerProps) => {
     isRestarting,
     isTrustedFolder: config.isTrustedFolder(),
 
+    // Welcome onboarding
+    isWelcomeDialogOpen,
+    welcomeState,
+    welcomeAvailableProviders,
+    welcomeAvailableModels,
+
     // Input history
     inputHistory: inputHistoryStore.inputHistory,
 
@@ -1637,6 +2363,9 @@ export const AppContainer = (props: AppContainerProps) => {
     debugMessage,
     showDebugProfiler,
 
+    // Copy mode
+    copyModeEnabled,
+
     // Footer height
     footerHeight,
 
@@ -1645,6 +2374,16 @@ export const AppContainer = (props: AppContainerProps) => {
 
     // Available terminal height for content (after footer measurement)
     availableTerminalHeight,
+
+    // Queue error message
+    queueErrorMessage,
+
+    // Markdown rendering toggle
+    renderMarkdown,
+
+    // Interactive shell focus state
+    activeShellPtyId,
+    embeddedShellFocused,
   };
 
   // Build UIActions object - memoized to avoid unnecessary re-renders (upstream optimization)
@@ -1673,7 +2412,6 @@ export const AppContainer = (props: AppContainerProps) => {
       // Auth dialog
       openAuthDialog,
       handleAuthSelect,
-      cancelAuthentication,
       handleAuthTimeout,
 
       // Editor dialog
@@ -1686,15 +2424,26 @@ export const AppContainer = (props: AppContainerProps) => {
       handleProviderSelect,
       exitProviderDialog,
 
-      // Provider model dialog
-      openProviderModelDialog,
-      handleProviderModelChange,
-      exitProviderModelDialog,
-
       // Load profile dialog
       openLoadProfileDialog,
       handleProfileSelect,
       exitLoadProfileDialog,
+
+      // Create profile dialog
+      openCreateProfileDialog,
+      exitCreateProfileDialog,
+
+      // Profile management dialogs
+      openProfileListDialog,
+      closeProfileListDialog,
+      viewProfileDetail,
+      closeProfileDetailDialog,
+      loadProfileFromDetail,
+      deleteProfileFromDetail,
+      setProfileAsDefault,
+      openProfileEditor,
+      closeProfileEditor,
+      saveProfileFromEditor,
 
       // Tools dialog
       openToolsDialog,
@@ -1704,6 +2453,10 @@ export const AppContainer = (props: AppContainerProps) => {
       // Folder trust dialog
       handleFolderTrustSelect,
 
+      // Welcome onboarding
+      welcomeActions,
+      triggerWelcomeAuth,
+
       // Permissions dialog
       openPermissionsDialog,
       closePermissionsDialog,
@@ -1711,6 +2464,14 @@ export const AppContainer = (props: AppContainerProps) => {
       // Logging dialog
       openLoggingDialog,
       closeLoggingDialog,
+
+      // Subagent dialog
+      openSubagentDialog,
+      closeSubagentDialog,
+
+      // Models dialog
+      openModelsDialog,
+      closeModelsDialog,
 
       // Workspace migration dialog
       onWorkspaceMigrationDialogOpen,
@@ -1753,6 +2514,9 @@ export const AppContainer = (props: AppContainerProps) => {
 
       // Cancel ongoing request
       cancelOngoingRequest,
+
+      // Queue error message
+      setQueueErrorMessage,
     }),
     [
       addItem,
@@ -1769,7 +2533,6 @@ export const AppContainer = (props: AppContainerProps) => {
       handleSettingsRestart,
       openAuthDialog,
       handleAuthSelect,
-      cancelAuthentication,
       handleAuthTimeout,
       openEditorDialog,
       handleEditorSelect,
@@ -1777,20 +2540,35 @@ export const AppContainer = (props: AppContainerProps) => {
       openProviderDialog,
       handleProviderSelect,
       exitProviderDialog,
-      openProviderModelDialog,
-      handleProviderModelChange,
-      exitProviderModelDialog,
       openLoadProfileDialog,
       handleProfileSelect,
       exitLoadProfileDialog,
+      openCreateProfileDialog,
+      exitCreateProfileDialog,
+      openProfileListDialog,
+      closeProfileListDialog,
+      viewProfileDetail,
+      closeProfileDetailDialog,
+      loadProfileFromDetail,
+      deleteProfileFromDetail,
+      setProfileAsDefault,
+      openProfileEditor,
+      closeProfileEditor,
+      saveProfileFromEditor,
       openToolsDialog,
       handleToolsSelect,
       exitToolsDialog,
       handleFolderTrustSelect,
+      welcomeActions,
+      triggerWelcomeAuth,
       openPermissionsDialog,
       closePermissionsDialog,
       openLoggingDialog,
       closeLoggingDialog,
+      openSubagentDialog,
+      closeSubagentDialog,
+      openModelsDialog,
+      closeModelsDialog,
       onWorkspaceMigrationDialogOpen,
       onWorkspaceMigrationDialogClose,
       openPrivacyNotice,
@@ -1809,6 +2587,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setShellModeActive,
       handleEscapePromptChange,
       cancelOngoingRequest,
+      setQueueErrorMessage,
     ],
   );
 

@@ -12,6 +12,7 @@ import { SCREEN_READER_MODEL_PREFIX } from '../../textConstants.js';
 import { ThinkingBlockDisplay } from './ThinkingBlockDisplay.js';
 import type { ThinkingBlock } from '@vybestack/llxprt-code-core';
 import { useRuntimeApi } from '../../contexts/RuntimeContext.js';
+import { useUIState } from '../../contexts/UIStateContext.js';
 
 interface GeminiMessageProps {
   text: string;
@@ -38,20 +39,24 @@ export const GeminiMessage: React.FC<GeminiMessageProps> = ({
   const { getEphemeralSetting } = useRuntimeApi();
   const showThinking = (getEphemeralSetting('reasoning.includeInResponse') ??
     true) as boolean;
+  const { renderMarkdown } = useUIState();
 
-  const prefix = '✦ ';
+  const prefix = ' ';
   const prefixWidth = prefix.length;
+
+  // Don't show thinkingBlocks in pending items - LoadingIndicator shows the
+  // thought subject/description as spinner text during streaming. Only show
+  // thinkingBlocks in committed history items to avoid duplication (fixes #922).
+  const shouldShowThinkingBlocks = showThinking && !isPending;
 
   return (
     <Box flexDirection="column">
       {model && (
         <Box marginBottom={0}>
-          <Text color={Colors.Gray} dimColor>
-            {model}
-          </Text>
+          <Text color={Colors.DimComment}>{model}</Text>
         </Box>
       )}
-      {showThinking &&
+      {shouldShowThinkingBlocks &&
         thinkingBlocks?.map((block, index) => (
           <ThinkingBlockDisplay
             key={`thinking-${index}`}
@@ -74,6 +79,7 @@ export const GeminiMessage: React.FC<GeminiMessageProps> = ({
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
             terminalWidth={terminalWidth}
+            renderMarkdown={renderMarkdown}
           />
         </Box>
       </Box>

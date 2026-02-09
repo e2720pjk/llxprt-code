@@ -84,15 +84,31 @@ export function getInstallationInfo(
         childProcess.execSync('brew list -1 | grep -q "^llxprt-code$"', {
           stdio: 'ignore',
         });
+        const updateCommand = 'brew upgrade llxprt-code';
         return {
           packageManager: PackageManager.HOMEBREW,
           isGlobal: true,
-          updateMessage:
-            'Installed via Homebrew. Please update with "brew upgrade".',
+          updateCommand,
+          updateMessage: isAutoUpdateDisabled
+            ? `Please run "${updateCommand}" to update`
+            : `Installed via Homebrew. Attempting to automatically update via "${updateCommand}"...`,
         };
       } catch (_error) {
-        // Brew is not installed or gemini-cli is not installed via brew.
+        // Brew is not installed or llxprt-code is not installed via brew.
         // Continue to the next check.
+      }
+
+      // Check for Homebrew-managed npm global install
+      if (
+        realPath.includes('/opt/homebrew/lib/node_modules/') ||
+        realPath.includes('/usr/local/lib/node_modules/')
+      ) {
+        return {
+          packageManager: PackageManager.NPM,
+          isGlobal: true,
+          updateMessage:
+            'Installed in Homebrew-managed npm global directory. Auto-update disabled. Please update Node.js via "brew upgrade node" or manually reinstall with "npm install -g @vybestack/llxprt-code@latest".',
+        };
       }
     }
 

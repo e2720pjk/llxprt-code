@@ -62,6 +62,11 @@ export interface GlobToolParams {
   /**
    * The directory to search in (optional, defaults to current directory)
    */
+  dir_path?: string;
+
+  /**
+   * Alternative parameter name for dir_path (for backward compatibility)
+   */
   path?: string;
 
   /**
@@ -86,12 +91,17 @@ class GlobToolInvocation extends BaseToolInvocation<
     super(params);
   }
 
+  private getDirPath(): string | undefined {
+    return this.params.dir_path || this.params.path;
+  }
+
   getDescription(): string {
     let description = `'${this.params.pattern}'`;
-    if (this.params.path) {
+    const dirPath = this.getDirPath();
+    if (dirPath) {
       const searchDir = path.resolve(
         this.config.getTargetDir(),
-        this.params.path || '.',
+        dirPath || '.',
       );
       const relativePath = makeRelative(searchDir, this.config.getTargetDir());
       description += ` within ${shortenPath(relativePath)}`;
@@ -112,13 +122,14 @@ class GlobToolInvocation extends BaseToolInvocation<
 
       // If a specific path is provided, resolve it and check if it's within workspace
       let searchDirectories: readonly string[];
-      if (this.params.path) {
+      const dirPath = this.getDirPath();
+      if (dirPath) {
         const searchDirAbsolute = path.resolve(
           this.config.getTargetDir(),
-          this.params.path,
+          dirPath,
         );
         if (!workspaceContext.isPathWithinWorkspace(searchDirAbsolute)) {
-          const rawError = `Error: Path "${this.params.path}" is not within any workspace directory`;
+          const rawError = `Error: Path "${dirPath}" is not within any workspace directory`;
           return {
             llmContent: rawError,
             returnDisplay: `Path is not within workspace`,
@@ -169,7 +180,7 @@ class GlobToolInvocation extends BaseToolInvocation<
 
       // Apply git-aware filtering if enabled and in git repository
       let filteredEntries = entries;
-      let gitIgnoredCount = 0;
+      let ignoredCount = 0;
 
       if (respectGitIgnore) {
         const toCanonicalPath = (filePath: string): string => {
@@ -195,7 +206,7 @@ class GlobToolInvocation extends BaseToolInvocation<
         filteredEntries = entries.filter((entry) =>
           filteredCanonicalPaths.has(toCanonicalPath(entry.fullpath())),
         );
-        gitIgnoredCount = entries.length - filteredEntries.length;
+        ignoredCount = entries.length - filteredEntries.length;
       }
 
       if (!filteredEntries || filteredEntries.length === 0) {
@@ -205,8 +216,8 @@ class GlobToolInvocation extends BaseToolInvocation<
         } else {
           message += ` within ${searchDirectories.length} workspace directories`;
         }
-        if (gitIgnoredCount > 0) {
-          message += ` (${gitIgnoredCount} files were git-ignored)`;
+        if (ignoredCount > 0) {
+          message += ` (${ignoredCount} files were ignored)`;
         }
         return {
           llmContent: message,
@@ -247,8 +258,8 @@ class GlobToolInvocation extends BaseToolInvocation<
       } else {
         resultMessage += ` across ${searchDirectories.length} workspace directories`;
       }
-      if (gitIgnoredCount > 0) {
-        resultMessage += ` (${gitIgnoredCount} additional files were git-ignored)`;
+      if (ignoredCount > 0) {
+        resultMessage += ` (${ignoredCount} additional files were ignored)`;
       }
 
       if (totalFileCount > 0) {
@@ -300,9 +311,14 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
               "The glob pattern to match against (e.g., '**/*.py', 'docs/*.md').",
             type: 'string',
           },
+          dir_path: {
+            description:
+              'Optional: The absolute path to the directory to search within. If omitted, searches the root directory. Relative paths are resolved against the working directory.',
+            type: 'string',
+          },
           path: {
             description:
-              'Optional: The absolute path to the directory to search within. If omitted, searches the root directory.',
+              'Alternative parameter name for dir_path (for backward compatibility).',
             type: 'string',
           },
           case_sensitive: {
@@ -328,9 +344,10 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
   protected override validateToolParamValues(
     params: GlobToolParams,
   ): string | null {
+    const dirPath = params.dir_path || params.path;
     const searchDirAbsolute = path.resolve(
       this.config.getTargetDir(),
-      params.path || '.',
+      dirPath || '.',
     );
 
     const workspaceContext = this.config.getWorkspaceContext();
@@ -366,6 +383,10 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
     params: GlobToolParams,
     _messageBus?: MessageBus,
   ): ToolInvocation<GlobToolParams, ToolResult> {
-    return new GlobToolInvocation(this.config, params);
+    const normalizedParams = { ...params };
+    if (!normalizedParams.dir_path && normalizedParams.path) {
+      normalizedParams.dir_path = normalizedParams.path;
+    }
+    return new GlobToolInvocation(this.config, normalizedParams);
   }
 }

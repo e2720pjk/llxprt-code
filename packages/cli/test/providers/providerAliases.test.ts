@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
+
+// This integration test needs real config files, not the global mock
+vi.unmock('../../src/providers/providerAliases.js');
 import {
   getProviderManager,
   resetProviderManager,
@@ -87,15 +90,24 @@ describe('Provider alias integration', () => {
     expect(providerManager.listProviders()).toContain('myotherprovider');
 
     const aliasProvider = providerManager.getProviderByName('myotherprovider');
-    expect(aliasProvider?.constructor.name).toBe('OpenAIProvider');
+    // Provider is wrapped - check the innermost provider via wrappedProvider chain
+    let innerProvider = aliasProvider;
+    while (
+      innerProvider &&
+      'wrappedProvider' in innerProvider &&
+      innerProvider.wrappedProvider
+    ) {
+      innerProvider = innerProvider.wrappedProvider as typeof innerProvider;
+    }
+    expect(innerProvider?.constructor.name).toBe('OpenAIProvider');
     expect(
       Object.prototype.hasOwnProperty.call(
-        aliasProvider ?? {},
+        innerProvider ?? {},
         'providerConfig',
       ),
     ).toBe(true);
     const providerConfig = (
-      aliasProvider as unknown as { providerConfig?: { defaultModel?: string } }
+      innerProvider as unknown as { providerConfig?: { defaultModel?: string } }
     ).providerConfig;
     expect(providerConfig?.defaultModel).toBe('my-test-model');
     expect(aliasProvider?.getDefaultModel()).toBe('my-test-model');

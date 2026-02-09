@@ -19,7 +19,11 @@ const mockOsHomedir = vi.hoisted(() => vi.fn(() => '/home/user'));
 const mockOsTmpdir = vi.hoisted(() => vi.fn(() => '/tmp'));
 const mockOsPlatform = vi.hoisted(() => vi.fn(() => 'linux'));
 vi.mock('../services/shellExecutionService.js', () => ({
-  ShellExecutionService: { execute: mockShellExecutionService },
+  ShellExecutionService: {
+    execute: mockShellExecutionService,
+    isActivePty: vi.fn().mockReturnValue(true),
+    getLastActivePtyId: vi.fn().mockReturnValue(null),
+  },
 }));
 vi.mock('fs');
 vi.mock('os', () => ({
@@ -63,6 +67,9 @@ vi.mock('../utils/summarizer.js', () => ({
 
 import * as summarizer from '../utils/summarizer.js';
 
+const originalComSpec = process.env['ComSpec'];
+const itWindowsOnly = process.platform === 'win32' ? it : it.skip;
+
 describe('ShellTool', () => {
   let shellTool: ShellTool;
   let mockConfig: Config;
@@ -78,10 +85,13 @@ describe('ShellTool', () => {
       getDebugMode: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
       getSummarizeToolOutputConfig: vi.fn().mockReturnValue(undefined),
-      getWorkspaceContext: () => createMockWorkspaceContext('.'),
+      getWorkspaceContext: vi
+        .fn()
+        .mockReturnValue(createMockWorkspaceContext('.')),
       getGeminiClient: vi.fn(),
       getEphemeralSettings: vi.fn().mockReturnValue({}),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
+      getAllowPtyThemeOverride: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         providerManager: {
           getServerToolsProvider: vi.fn().mockReturnValue({
@@ -92,6 +102,12 @@ describe('ShellTool', () => {
         },
       }),
       isInteractive: vi.fn().mockReturnValue(true),
+      getShellExecutionConfig: vi.fn().mockReturnValue({
+        showColor: false,
+        scrollback: 600000,
+      }),
+      getPtyTerminalWidth: vi.fn().mockReturnValue(80),
+      getPtyTerminalHeight: vi.fn().mockReturnValue(24),
     } as unknown as Config;
 
     shellTool = new ShellTool(mockConfig);
@@ -114,6 +130,14 @@ describe('ShellTool', () => {
     });
   });
 
+  afterEach(() => {
+    if (originalComSpec === undefined) {
+      delete process.env['ComSpec'];
+    } else {
+      process.env['ComSpec'] = originalComSpec;
+    }
+  });
+
   describe('isCommandAllowed', () => {
     it('should allow a command if no restrictions are provided', () => {
       (mockConfig.getCoreTools as Mock).mockReturnValue(undefined);
@@ -121,7 +145,11 @@ describe('ShellTool', () => {
       expect(isCommandAllowed('ls -l', mockConfig).allowed).toBe(true);
     });
 
-    it('should block a command with command substitution using $()', () => {
+    it('should block a command with command substitution using $() when shell-replacement is none', () => {
+      // Configure to block all substitution
+      (mockConfig.getShellReplacement as Mock) = vi
+        .fn()
+        .mockReturnValue('none');
       expect(isCommandAllowed('echo $(rm -rf /)', mockConfig).allowed).toBe(
         false,
       );
@@ -147,6 +175,19 @@ describe('ShellTool', () => {
       ).toThrow(
         "Directory 'rel/path' is not a registered workspace directory.",
       );
+    });
+
+    it('should allow absolute directory within workspace', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      const workspaceContext = createMockWorkspaceContext('/test/dir');
+      vi.mocked(workspaceContext.isPathWithinWorkspace).mockReturnValue(true);
+      (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
+        workspaceContext,
+      );
+
+      expect(() =>
+        shellTool.build({ command: 'ls', directory: '/test/dir/subdir' }),
+      ).not.toThrow();
     });
   });
 
@@ -193,10 +234,12 @@ describe('ShellTool', () => {
         wrappedCommand,
         expect.any(String),
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
-        undefined,
-        undefined,
+        expect.objectContaining({
+          terminalWidth: 80,
+          terminalHeight: 24,
+        }),
       );
       // Check that it contains background PIDs but not the service PID
       const backgroundLine = result.llmContent
@@ -209,31 +252,68 @@ describe('ShellTool', () => {
       expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith(tmpFile);
     });
 
-    it('should not wrap command on windows', async () => {
-      mockOsPlatform.mockReturnValue('win32');
-      const invocation = shellTool.build({ command: 'dir' });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
-        rawOutput: Buffer.from(''),
-        output: '',
-        exitCode: 0,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
+    it('should use the provided directory as cwd', async () => {
+      (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
+        createMockWorkspaceContext('/test/dir'),
+      );
+      const invocation = shellTool.build({
+        command: 'ls',
+        directory: '/test/dir/subdir',
       });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution();
       await promise;
+
+      const tmpFile = path.join(os.tmpdir(), 'shell_pgrep_abcdef.tmp');
+      const isWindows = os.platform() === 'win32';
+      const expectedCommand = isWindows
+        ? 'ls'
+        : `{ ls; }; __code=$?; pgrep -g 0 >${tmpFile} 2>&1; exit $__code;`;
+      const expectedCwd = path.resolve('/test/dir', '/test/dir/subdir');
       expect(mockShellExecutionService).toHaveBeenCalledWith(
-        'dir',
-        expect.any(String),
+        expectedCommand,
+        expectedCwd,
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
-        undefined,
-        undefined,
+        expect.objectContaining({
+          terminalWidth: 80,
+          terminalHeight: 24,
+        }),
       );
     });
+
+    itWindowsOnly(
+      'should not wrap command on windows',
+      async () => {
+        vi.mocked(os.platform).mockReturnValue('win32');
+        const invocation = shellTool.build({ command: 'dir' });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+        const expectedCwd = path.resolve('/test/dir', '');
+        // eslint-disable-next-line vitest/no-standalone-expect -- platform-conditional test
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          'dir',
+          expectedCwd,
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          undefined,
+          undefined,
+        );
+      },
+      20000,
+    );
 
     it('should format error messages correctly', async () => {
       const error = new Error('original command error');
@@ -340,6 +420,168 @@ describe('ShellTool', () => {
       expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith(tmpFile);
     });
 
+    describe('timeout_seconds handling', () => {
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it('uses default timeout when timeout_seconds is omitted', async () => {
+        vi.useFakeTimers();
+        const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+        mockConfig.getEphemeralSettings.mockReturnValue({
+          'shell-default-timeout-seconds': 2,
+          'shell-max-timeout-seconds': 5,
+        });
+
+        const invocation = shellTool.build({ command: 'ls' });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          stdout: '',
+          stderr: '',
+          rawOutput: Buffer.from(''),
+        });
+        await promise;
+
+        // 2 seconds = 2000ms
+        expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 2000);
+        setTimeoutSpy.mockRestore();
+      });
+
+      it('clamps timeout_seconds to the maximum setting', async () => {
+        vi.useFakeTimers();
+        const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+        mockConfig.getEphemeralSettings.mockReturnValue({
+          'shell-default-timeout-seconds': 1,
+          'shell-max-timeout-seconds': 2,
+        });
+
+        const invocation = shellTool.build({
+          command: 'ls',
+          timeout_seconds: 5,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          stdout: '',
+          stderr: '',
+          rawOutput: Buffer.from(''),
+        });
+        await promise;
+
+        // Clamped to 2 seconds = 2000ms
+        expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 2000);
+        setTimeoutSpy.mockRestore();
+      });
+
+      it('skips the timeout when timeout_seconds is -1', async () => {
+        vi.useFakeTimers();
+        const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+        mockConfig.getEphemeralSettings.mockReturnValue({
+          'shell-default-timeout-seconds': 1,
+          'shell-max-timeout-seconds': 2,
+        });
+
+        const invocation = shellTool.build({
+          command: 'ls',
+          timeout_seconds: -1,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          stdout: '',
+          stderr: '',
+          rawOutput: Buffer.from(''),
+        });
+        await promise;
+
+        expect(setTimeoutSpy).not.toHaveBeenCalled();
+        setTimeoutSpy.mockRestore();
+      });
+
+      it('returns a TIMEOUT error with partial output', async () => {
+        vi.useFakeTimers();
+        const invocation = shellTool.build({
+          command: 'long-running',
+          timeout_seconds: 0.05, // 50ms
+        });
+        const promise = invocation.execute(mockAbortSignal);
+
+        await vi.advanceTimersByTimeAsync(60);
+        resolveShellExecution({
+          aborted: true,
+          output: 'partial output',
+          stdout: 'partial output',
+          stderr: '',
+          rawOutput: Buffer.from('partial output'),
+          exitCode: null,
+          signal: null,
+          error: null,
+        });
+
+        const result = await promise;
+
+        expect(result.error?.type).toBe(ToolErrorType.TIMEOUT);
+        expect(result.llmContent).toContain('timeout_seconds');
+        expect(result.llmContent).toContain('partial output');
+      });
+
+      it('returns EXECUTION_FAILED for user aborts', async () => {
+        const abortController = new AbortController();
+        abortController.abort();
+        const invocation = shellTool.build({
+          command: 'ls',
+          timeout_seconds: 1,
+        });
+
+        const result = await invocation.execute(abortController.signal);
+
+        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+        expect(result.error?.type).not.toBe(ToolErrorType.TIMEOUT);
+      });
+
+      it('timeout does not start until execute() is called (approval time not counted)', async () => {
+        vi.useFakeTimers();
+        const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+        mockConfig.getEphemeralSettings.mockReturnValue({
+          'shell-default-timeout-seconds': 1,
+          'shell-max-timeout-seconds': 5,
+        });
+
+        const invocation = shellTool.build({
+          command: 'some-command',
+          timeout_seconds: 1,
+        });
+
+        const setTimeoutCountBefore = setTimeoutSpy.mock.calls.length;
+        await invocation.shouldConfirmExecute(new AbortController().signal);
+
+        expect(setTimeoutSpy.mock.calls.length).toBe(setTimeoutCountBefore);
+
+        const promise = invocation.execute(mockAbortSignal);
+
+        expect(setTimeoutSpy.mock.calls.length).toBeGreaterThan(
+          setTimeoutCountBefore,
+        );
+
+        const lastCall =
+          setTimeoutSpy.mock.calls[setTimeoutSpy.mock.calls.length - 1];
+        expect(lastCall[1]).toBe(1000);
+
+        resolveShellExecution({
+          output: 'success',
+          stdout: 'success',
+          stderr: '',
+          rawOutput: Buffer.from('success'),
+        });
+
+        const result = await promise;
+        expect(result.error).toBeUndefined();
+
+        setTimeoutSpy.mockRestore();
+      });
+    });
+
     describe('Streaming to `updateOutput`', () => {
       let updateOutputMock: Mock;
       beforeEach(() => {
@@ -350,28 +592,35 @@ describe('ShellTool', () => {
         vi.useRealTimers();
       });
 
-      it('should throttle text output updates', async () => {
+      it('should update immediately on every data event', async () => {
+        // Data events represent full screen state (AnsiOutput in PTY mode or
+        // cumulative string in child_process mode), so each one is displayed
+        // immediately without throttling.
         const invocation = shellTool.build({ command: 'stream' });
         const promise = invocation.execute(mockAbortSignal, updateOutputMock);
 
-        // First chunk, should be throttled.
         mockShellOutputCallback({
           type: 'data',
           chunk: 'hello ',
         });
-        expect(updateOutputMock).not.toHaveBeenCalled();
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+        expect(updateOutputMock).toHaveBeenCalledWith('hello ');
 
-        // Advance time past the throttle interval.
-        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
-
-        // Send a second chunk. THIS event triggers the update with the CUMULATIVE content.
+        // Second chunk also updates immediately (no throttle for data events).
         mockShellOutputCallback({
           type: 'data',
           chunk: 'world',
         });
+        expect(updateOutputMock).toHaveBeenCalledTimes(2);
+        expect(updateOutputMock).toHaveBeenLastCalledWith('world');
 
-        // It should have been called once now with the combined output.
-        expect(updateOutputMock).toHaveBeenCalledExactlyOnceWith('hello world');
+        // Third chunk also updates immediately.
+        mockShellOutputCallback({
+          type: 'data',
+          chunk: '!',
+        });
+        expect(updateOutputMock).toHaveBeenCalledTimes(3);
+        expect(updateOutputMock).toHaveBeenLastCalledWith('!');
 
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
@@ -465,6 +714,72 @@ describe('ShellTool', () => {
     it('should throw an error if validation fails', () => {
       expect(() => shellTool.build({ command: '' })).toThrow();
     });
+
+    describe('in non-interactive mode', () => {
+      beforeEach(() => {
+        (mockConfig.isInteractive as Mock).mockReturnValue(false);
+        (mockConfig as Record<string, unknown>).getAllowedTools = vi
+          .fn()
+          .mockReturnValue([]);
+        (mockConfig as Record<string, unknown>).getApprovalMode = vi
+          .fn()
+          .mockReturnValue('strict');
+      });
+
+      it('should not throw an error or block for an allowed command', async () => {
+        (
+          (mockConfig as Record<string, unknown>).getAllowedTools as Mock
+        ).mockReturnValue(['ShellTool(wc)']);
+        const invocation = shellTool.build({ command: 'wc -l foo.txt' });
+        const confirmation = await invocation.shouldConfirmExecute(
+          new AbortController().signal,
+        );
+        expect(confirmation).toBe(false);
+      });
+
+      it('should not throw an error or block for an allowed command with arguments', async () => {
+        (
+          (mockConfig as Record<string, unknown>).getAllowedTools as Mock
+        ).mockReturnValue(['ShellTool(wc -l)']);
+        const invocation = shellTool.build({ command: 'wc -l foo.txt' });
+        const confirmation = await invocation.shouldConfirmExecute(
+          new AbortController().signal,
+        );
+        expect(confirmation).toBe(false);
+      });
+
+      it('should throw an error for command that is not allowed', async () => {
+        (
+          (mockConfig as Record<string, unknown>).getAllowedTools as Mock
+        ).mockReturnValue(['ShellTool(wc -l)']);
+        const invocation = shellTool.build({ command: 'madeupcommand' });
+        await expect(
+          invocation.shouldConfirmExecute(new AbortController().signal),
+        ).rejects.toThrow('madeupcommand');
+      });
+
+      it('should throw an error for a command that is a prefix of an allowed command', async () => {
+        (
+          (mockConfig as Record<string, unknown>).getAllowedTools as Mock
+        ).mockReturnValue(['ShellTool(wc -l)']);
+        const invocation = shellTool.build({ command: 'wc' });
+        await expect(
+          invocation.shouldConfirmExecute(new AbortController().signal),
+        ).rejects.toThrow('wc');
+      });
+
+      it('should require all segments of a chained command to be allowlisted', async () => {
+        (mockConfig.getAllowedTools as Mock).mockReturnValue([
+          'ShellTool(echo)',
+        ]);
+        const invocation = shellTool.build({ command: 'echo "foo" && ls -l' });
+        await expect(
+          invocation.shouldConfirmExecute(new AbortController().signal),
+        ).rejects.toThrow(
+          'Command "echo "foo" && ls -l" is not in the list of allowed tools for non-interactive mode.',
+        );
+      });
+    });
   });
 
   describe('getDescription', () => {
@@ -536,6 +851,7 @@ describe('Shell Tool Filtering Behavior', () => {
       getExcludeTools: vi.fn().mockReturnValue([]),
       getCoreTools: vi.fn().mockReturnValue([]),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
+      getAllowPtyThemeOverride: vi.fn().mockReturnValue(false),
       getDebugMode: vi.fn().mockReturnValue(false),
       getSummarizeToolOutputConfig: vi.fn().mockReturnValue(null),
       getContentGeneratorConfig: vi.fn().mockReturnValue(null),
@@ -543,6 +859,12 @@ describe('Shell Tool Filtering Behavior', () => {
       getWorkspaceContext: vi.fn().mockReturnValue({
         getWorkspaceDirectories: () => ['/test/dir'],
       }),
+      getShellExecutionConfig: vi.fn().mockReturnValue({
+        showColor: false,
+        scrollback: 600000,
+      }),
+      getPtyTerminalWidth: vi.fn().mockReturnValue(80),
+      getPtyTerminalHeight: vi.fn().mockReturnValue(24),
     } as unknown as Config;
 
     shellTool = new ShellTool(mockConfig as unknown as Config);

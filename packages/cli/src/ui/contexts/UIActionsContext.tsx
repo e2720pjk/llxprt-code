@@ -9,8 +9,9 @@ import type { IdeIntegrationNudgeResult } from '../IdeIntegrationNudge.js';
 import type { HistoryItem } from '../types.js';
 import type { FolderTrustChoice } from '../components/FolderTrustDialog.js';
 import type { Key } from '../hooks/useKeypress.js';
-import type { AuthType, EditorType } from '@vybestack/llxprt-code-core';
+import type { EditorType } from '@vybestack/llxprt-code-core';
 import type { SettingScope } from '../../config/settings.js';
+import type { SubagentView } from '../components/SubagentManagement/types.js';
 
 /**
  * UI Actions shape for the AppContainer architecture.
@@ -44,10 +45,9 @@ export interface UIActions {
   // Auth dialog
   openAuthDialog: () => void;
   handleAuthSelect: (
-    authType: AuthType | undefined,
+    method: string | undefined,
     scope: SettingScope,
   ) => Promise<void>;
-  cancelAuthentication: () => void;
   handleAuthTimeout: () => void;
 
   // Editor dialog
@@ -63,15 +63,29 @@ export interface UIActions {
   handleProviderSelect: (provider: string) => Promise<void>;
   exitProviderDialog: () => void;
 
-  // Provider model dialog
-  openProviderModelDialog: () => Promise<void>;
-  handleProviderModelChange: (model: string) => void;
-  exitProviderModelDialog: () => void;
-
   // Load profile dialog
   openLoadProfileDialog: () => void;
   handleProfileSelect: (profile: string) => void;
   exitLoadProfileDialog: () => void;
+
+  // Create profile dialog
+  openCreateProfileDialog: () => void;
+  exitCreateProfileDialog: () => void;
+
+  // Profile management dialogs
+  openProfileListDialog: () => void;
+  closeProfileListDialog: () => void;
+  viewProfileDetail: (profileName: string, openedDirectly?: boolean) => void;
+  closeProfileDetailDialog: () => void;
+  loadProfileFromDetail: (profileName: string) => void;
+  deleteProfileFromDetail: (profileName: string) => void;
+  setProfileAsDefault: (profileName: string) => void;
+  openProfileEditor: (profileName: string, openedDirectly?: boolean) => void;
+  closeProfileEditor: () => void;
+  saveProfileFromEditor: (
+    profileName: string,
+    updatedProfile: unknown,
+  ) => Promise<void>;
 
   // Tools dialog
   openToolsDialog: (action: 'enable' | 'disable') => void;
@@ -81,6 +95,26 @@ export interface UIActions {
   // Folder trust dialog
   handleFolderTrustSelect: (choice: FolderTrustChoice) => void;
 
+  // Welcome onboarding
+  welcomeActions: {
+    startSetup: () => void;
+    selectProvider: (providerId: string) => void;
+    selectModel: (modelId: string) => void;
+    selectAuthMethod: (method: 'oauth' | 'api_key') => void;
+    onAuthComplete: () => void;
+    onAuthError: (error: string) => void;
+    skipSetup: () => void;
+    goBack: () => void;
+    saveProfile: (name: string) => Promise<void>;
+    dismiss: () => void;
+    resetAndReopen: () => void;
+  };
+  triggerWelcomeAuth: (
+    provider: string,
+    method: 'oauth' | 'api_key',
+    apiKey?: string,
+  ) => Promise<void>;
+
   // Permissions dialog
   openPermissionsDialog: () => void;
   closePermissionsDialog: () => void;
@@ -88,6 +122,26 @@ export interface UIActions {
   // Logging dialog
   openLoggingDialog: (data?: { entries: unknown[] }) => void;
   closeLoggingDialog: () => void;
+
+  // Subagent dialog
+  openSubagentDialog: (
+    initialView?: SubagentView,
+    initialName?: string,
+  ) => void;
+  closeSubagentDialog: () => void;
+
+  // Models dialog
+  openModelsDialog: (data?: {
+    initialSearch?: string;
+    initialFilters?: {
+      tools?: boolean;
+      vision?: boolean;
+      reasoning?: boolean;
+      audio?: boolean;
+    };
+    includeDeprecated?: boolean;
+  }) => void;
+  closeModelsDialog: () => void;
 
   // Workspace migration dialog
   onWorkspaceMigrationDialogOpen: () => void;
@@ -130,6 +184,9 @@ export interface UIActions {
 
   // Cancel ongoing request
   cancelOngoingRequest?: () => void;
+
+  // Queue error message
+  setQueueErrorMessage: (message: string | null) => void;
 }
 
 const UIActionsContext = createContext<UIActions | undefined>(undefined);

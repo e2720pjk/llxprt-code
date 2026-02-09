@@ -7,7 +7,6 @@
 import { WritableStream, ReadableStream } from 'node:stream/web';
 
 import {
-  AuthType,
   Config,
   ContentGeneratorConfig,
   GeminiChat,
@@ -33,12 +32,13 @@ import {
   type TodoUpdateEvent,
   type Todo,
   DEFAULT_AGENT_ID,
+  type FilterFilesOptions,
 } from '@vybestack/llxprt-code-core';
 import * as acp from './acp.js';
 import { AcpFileSystemService } from './fileSystemService.js';
 import { Readable, Writable } from 'node:stream';
 import { Content, Part, FunctionCall, PartListUnion } from '@google/genai';
-import { LoadedSettings, SettingScope } from '../config/settings.js';
+import { LoadedSettings } from '../config/settings.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { z } from 'zod';
@@ -55,12 +55,23 @@ import {
   setActiveModelParam,
   clearActiveModelParam,
   getActiveModelParams,
+  loadProfileByName,
 } from '../runtime/runtimeSettings.js';
 
 type ToolRunResult = {
   parts: Part[];
   message?: string | null;
 };
+
+export function parseZedAuthMethodId(
+  methodId: string,
+  availableProfiles: string[],
+): string {
+  if (availableProfiles.length === 0) {
+    throw new Error('No profiles available for selection');
+  }
+  return z.enum(availableProfiles as [string, ...string[]]).parse(methodId);
+}
 
 export async function runZedIntegration(
   config: Config,
@@ -116,7 +127,7 @@ class GeminiAgent {
 
   constructor(
     private config: Config,
-    private settings: LoadedSettings,
+    _settings: LoadedSettings,
     private client: acp.Client,
   ) {
     this.logger = new DebugLogger('llxprt:zed-integration');
@@ -170,24 +181,15 @@ class GeminiAgent {
     args: acp.InitializeRequest,
   ): Promise<acp.InitializeResponse> {
     this.clientCapabilities = args.clientCapabilities;
-    const authMethods = [
-      {
-        id: AuthType.LOGIN_WITH_GOOGLE,
-        name: 'Log in with Google',
-        description: null,
-      },
-      {
-        id: AuthType.USE_GEMINI,
-        name: 'Use Gemini API key',
-        description:
-          'Requires setting the `GEMINI_API_KEY` environment variable',
-      },
-      {
-        id: AuthType.USE_VERTEX_AI,
-        name: 'Vertex AI',
-        description: null,
-      },
-    ];
+    const profileManager = this.config.getProfileManager();
+    const profileNames = profileManager
+      ? await profileManager.listProfiles()
+      : [];
+    const authMethods = profileNames.map((name) => ({
+      id: name,
+      name,
+      description: null,
+    }));
 
     return {
       protocolVersion: acp.PROTOCOL_VERSION,
@@ -204,11 +206,14 @@ class GeminiAgent {
   }
 
   async authenticate({ methodId }: acp.AuthenticateRequest): Promise<void> {
-    const method = z.nativeEnum(AuthType).parse(methodId);
-
+    const profileManager = this.config.getProfileManager();
+    const availableProfiles = profileManager
+      ? await profileManager.listProfiles()
+      : [];
+    const profileName = parseZedAuthMethodId(methodId, availableProfiles);
     await clearCachedCredentialFile();
-    await this.config.refreshAuth(method);
-    this.settings.setValue(SettingScope.User, 'selectedAuthType', method);
+    await loadProfileByName(profileName);
+    await this.applyRuntimeProviderOverrides();
   }
 
   async newSession({
@@ -393,7 +398,7 @@ class GeminiAgent {
             }
           }
 
-          await sessionConfig.refreshAuth(AuthType.USE_PROVIDER);
+          await sessionConfig.refreshAuth('provider');
 
           // After refreshAuth, verify ContentGeneratorConfig was created with provider manager
           const contentGenConfig = sessionConfig.getContentGeneratorConfig();
@@ -403,14 +408,10 @@ class GeminiAgent {
             );
             contentGenConfig.providerManager = providerManager;
           }
-        } else if (process.env.GEMINI_API_KEY) {
-          // Use API key if available
-          this.logger.debug(() => 'Auto-authenticating with GEMINI_API_KEY');
-          await sessionConfig.refreshAuth(AuthType.USE_GEMINI);
         } else {
           // Try OAuth as last resort (this might open a browser)
           this.logger.debug(() => 'Auto-authenticating with OAuth');
-          await sessionConfig.refreshAuth(AuthType.LOGIN_WITH_GOOGLE);
+          await sessionConfig.refreshAuth('oauth');
         }
 
         geminiClient = sessionConfig.getGeminiClient();
@@ -434,10 +435,6 @@ class GeminiAgent {
           this.logger.debug(
             () =>
               `ContentGeneratorConfig has providerManager: ${!!(contentGenConfig as Record<string, unknown>).providerManager}`,
-          );
-          this.logger.debug(
-            () =>
-              `ContentGeneratorConfig authType: ${(contentGenConfig as Record<string, unknown>).authType}`,
           );
         }
       } catch (error) {
@@ -472,11 +469,9 @@ class GeminiAgent {
 
           const providerManager = sessionConfig.getProviderManager();
           if (providerManager && providerManager.hasActiveProvider()) {
-            await sessionConfig.refreshAuth(AuthType.USE_PROVIDER);
-          } else if (process.env.GEMINI_API_KEY) {
-            await sessionConfig.refreshAuth(AuthType.USE_GEMINI);
+            await sessionConfig.refreshAuth('provider');
           } else {
-            await sessionConfig.refreshAuth(AuthType.LOGIN_WITH_GOOGLE);
+            await sessionConfig.refreshAuth('oauth');
           }
 
           // Try again after auth
@@ -1112,7 +1107,8 @@ class Session {
 
     // Get centralized file discovery service
     const fileDiscovery = this.config.getFileService();
-    const respectGitIgnore = this.config.getFileFilteringRespectGitIgnore();
+    const fileFilteringOptions: FilterFilesOptions =
+      this.config.getFileFilteringOptions();
 
     const pathSpecsToRead: string[] = [];
     const contentLabelsForDisplay: string[] = [];
@@ -1128,13 +1124,10 @@ class Session {
 
     for (const atPathPart of atPathCommandParts) {
       const pathName = atPathPart.fileData!.fileUri;
-      // Check if path should be ignored by git
-      if (fileDiscovery.shouldGitIgnoreFile(pathName)) {
+      // Check if path should be ignored
+      if (fileDiscovery.shouldIgnoreFile(pathName, fileFilteringOptions)) {
         ignoredPaths.push(pathName);
-        const reason = respectGitIgnore
-          ? 'git-ignored and will be skipped'
-          : 'ignored by custom patterns';
-        console.warn(`Path ${pathName} is ${reason}.`);
+        this.debug(`Path ${pathName} is ignored and will be skipped.`);
         continue;
       }
       let currentPathSpec = pathName;
@@ -1271,9 +1264,8 @@ class Session {
     initialQueryText = initialQueryText.trim();
     // Inform user about ignored paths
     if (ignoredPaths.length > 0) {
-      const ignoreType = respectGitIgnore ? 'git-ignored' : 'custom-ignored';
       this.debug(
-        `Ignored ${ignoredPaths.length} ${ignoreType} files: ${ignoredPaths.join(', ')}`,
+        `Ignored ${ignoredPaths.length} files: ${ignoredPaths.join(', ')}`,
       );
     }
 
@@ -1288,7 +1280,6 @@ class Session {
     if (pathSpecsToRead.length > 0) {
       const toolArgs = {
         paths: pathSpecsToRead,
-        respectGitIgnore, // Use configuration setting
       };
 
       const callId = `${readManyFilesTool.name}-${Date.now()}`;
@@ -1406,7 +1397,6 @@ class Session {
     const entries: acp.PlanEntry[] = todos.map((todo) => ({
       content: todo.content,
       status: todo.status,
-      priority: todo.priority,
     }));
 
     // Send plan update to Zed via ACP protocol
@@ -1428,12 +1418,23 @@ function toToolCallContent(toolResult: ToolResult): acp.ToolCallContent | null {
         type: 'content',
         content: { type: 'text', text: toolResult.returnDisplay },
       };
-    } else {
+    } else if ('fileDiff' in toolResult.returnDisplay) {
       return {
         type: 'diff',
         path: toolResult.returnDisplay.fileName,
         oldText: toolResult.returnDisplay.originalContent,
         newText: toolResult.returnDisplay.newContent,
+      };
+    } else {
+      const content =
+        typeof toolResult.returnDisplay === 'object' &&
+        'content' in toolResult.returnDisplay &&
+        typeof toolResult.returnDisplay.content === 'string'
+          ? toolResult.returnDisplay.content
+          : '';
+      return {
+        type: 'content',
+        content: { type: 'text', text: content },
       };
     }
   } else {

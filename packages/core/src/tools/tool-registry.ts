@@ -16,16 +16,16 @@ import { type ToolContext } from './tool-context.js';
 import { Config } from '../config/config.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
-import { connectAndDiscover } from './mcp-client.js';
-import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { DebugLogger } from '../debug/index.js';
 import { normalizeToolName } from './toolNameUtils.js';
-import type { EventEmitter } from 'node:events';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
+
+export const DISCOVERED_TOOL_PREFIX = 'discovered_tool_';
+
 type ToolParams = Record<string, unknown>;
 
 export class DiscoveredTool extends BaseTool<ToolParams, ToolResult> {
@@ -70,7 +70,7 @@ Signal: Signal number or \`(none)\` if no signal was received.
 
   async execute(
     params: ToolParams,
-    _signal: AbortSignal,
+    signal: AbortSignal,
     _updateOutput?: (output: string) => void,
   ): Promise<ToolResult> {
     const callCommand = this.config.getToolCallCommand()!;
@@ -82,55 +82,67 @@ Signal: Signal number or \`(none)\` if no signal was received.
     let stderr = '';
     let error: Error | null = null;
     let code: number | null = null;
-    let signal: NodeJS.Signals | null = null;
+    let exitSignal: NodeJS.Signals | null = null;
 
-    await new Promise<void>((resolve) => {
-      const onStdout = (data: Buffer) => {
-        stdout += data?.toString();
-      };
+    // Handle abort signal to kill the child process
+    const abortHandler = () => {
+      if (!child.killed) {
+        child.kill('SIGTERM');
+      }
+    };
+    signal.addEventListener('abort', abortHandler);
 
-      const onStderr = (data: Buffer) => {
-        stderr += data?.toString();
-      };
+    try {
+      await new Promise<void>((resolve) => {
+        const onStdout = (data: Buffer) => {
+          stdout += data?.toString();
+        };
 
-      const onError = (err: Error) => {
-        error = err;
-      };
+        const onStderr = (data: Buffer) => {
+          stderr += data?.toString();
+        };
 
-      const onClose = (
-        _code: number | null,
-        _signal: NodeJS.Signals | null,
-      ) => {
-        code = _code;
-        signal = _signal;
-        cleanup();
-        resolve();
-      };
+        const onError = (err: Error) => {
+          error = err;
+        };
 
-      const cleanup = () => {
-        child.stdout.removeListener('data', onStdout);
-        child.stderr.removeListener('data', onStderr);
-        child.removeListener('error', onError);
-        child.removeListener('close', onClose);
-        if (child.connected) {
-          child.disconnect();
-        }
-      };
+        const onClose = (
+          _code: number | null,
+          _signal: NodeJS.Signals | null,
+        ) => {
+          code = _code;
+          exitSignal = _signal;
+          cleanup();
+          resolve();
+        };
 
-      child.stdout.on('data', onStdout);
-      child.stderr.on('data', onStderr);
-      child.on('error', onError);
-      child.on('close', onClose);
-    });
+        const cleanup = () => {
+          child.stdout.removeListener('data', onStdout);
+          child.stderr.removeListener('data', onStderr);
+          child.removeListener('error', onError);
+          child.removeListener('close', onClose);
+          if (child.connected) {
+            child.disconnect();
+          }
+        };
+
+        child.stdout.on('data', onStdout);
+        child.stderr.on('data', onStderr);
+        child.on('error', onError);
+        child.on('close', onClose);
+      });
+    } finally {
+      signal.removeEventListener('abort', abortHandler);
+    }
 
     // if there is any error, non-zero exit code, signal, or stderr, return error details instead of stdout
-    if (error || code !== 0 || signal || stderr) {
+    if (error || code !== 0 || exitSignal || stderr) {
       const llmContent = [
         `Stdout: ${stdout || '(empty)'}`,
         `Stderr: ${stderr || '(empty)'}`,
         `Error: ${error ?? '(none)'}`,
         `Exit Code: ${code ?? '(none)'}`,
-        `Signal: ${signal ?? '(none)'}`,
+        `Signal: ${exitSignal ?? '(none)'}`,
       ].join('\n');
       return {
         llmContent,
@@ -176,21 +188,11 @@ class DiscoveredToolInvocation extends BaseToolInvocation<
 export class ToolRegistry {
   private tools: Map<string, AnyDeclarativeTool> = new Map();
   private config: Config;
-  private mcpClientManager: McpClientManager;
   private logger = new DebugLogger('llxprt:tool-registry');
   private discoveryLock: Promise<void> | null = null;
 
-  constructor(config: Config, eventEmitter?: EventEmitter) {
+  constructor(config: Config) {
     this.config = config;
-    this.mcpClientManager = new McpClientManager(
-      this.config.getMcpServers() ?? {},
-      this.config.getMcpServerCommand(),
-      this,
-      this.config.getPromptRegistry(),
-      this.config.getDebugMode(),
-      this.config.getWorkspaceContext(),
-      eventEmitter,
-    );
   }
 
   /**
@@ -263,6 +265,43 @@ export class ToolRegistry {
   }
 
   /**
+   * Sorts tools as:
+   * 1. Built in tools.
+   * 2. Discovered tools.
+   * 3. MCP tools ordered by server name.
+   *
+   * This is a stable sort in that ties preserve existing order.
+   */
+  sortTools(): void {
+    const getPriority = (tool: AnyDeclarativeTool): number => {
+      if (tool instanceof DiscoveredMCPTool) return 2;
+      if (tool instanceof DiscoveredTool) return 1;
+      return 0; // Built-in
+    };
+
+    this.tools = new Map(
+      Array.from(this.tools.entries()).sort((a, b) => {
+        const toolA = a[1];
+        const toolB = b[1];
+        const priorityA = getPriority(toolA);
+        const priorityB = getPriority(toolB);
+
+        if (priorityA !== priorityB) {
+          return priorityA - priorityB;
+        }
+
+        if (priorityA === 2) {
+          const serverA = (toolA as DiscoveredMCPTool).serverName;
+          const serverB = (toolB as DiscoveredMCPTool).serverName;
+          return serverA.localeCompare(serverB);
+        }
+
+        return 0;
+      }),
+    );
+  }
+
+  /**
    * Builds a new tool map with only non-discovered tools (core tools).
    * This is used for atomic updates to avoid race conditions.
    */
@@ -293,7 +332,7 @@ export class ToolRegistry {
   /**
    * Discovers tools from project (if available and configured).
    * Can be called multiple times to update discovered tools.
-   * This will discover tools from the command line and from MCP servers.
+   * This will ONLY discover tools from the command line, NOT from MCP servers.
    * Uses truly atomic updates to prevent race conditions.
    */
   async discoverAllTools(): Promise<void> {
@@ -301,100 +340,10 @@ export class ToolRegistry {
       const newTools = this.buildCoreToolsMap();
 
       await this.config.getPromptRegistry().clear();
+
       await this.discoverAndRegisterToolsFromCommand(newTools);
 
-      const previousTools = this.tools;
-      try {
-        this.tools = newTools;
-        await this.mcpClientManager.discoverAllMcpTools(this.config);
-      } catch (error) {
-        this.tools = previousTools;
-        throw error;
-      }
-    });
-  }
-
-  /**
-   * Discovers tools from project (if available and configured).
-   * Can be called multiple times to update discovered tools.
-   * This will NOT discover tools from the command line, only from MCP servers.
-   * Uses truly atomic updates to prevent race conditions.
-   */
-  async discoverMcpTools(): Promise<void> {
-    await this.withDiscoveryLock(async () => {
-      const newTools = this.buildCoreToolsMap();
-
-      for (const tool of this.tools.values()) {
-        if (
-          tool instanceof DiscoveredTool &&
-          !(tool instanceof DiscoveredMCPTool)
-        ) {
-          this.registerToolIntoMap(tool, newTools);
-        }
-      }
-
-      await this.config.getPromptRegistry().clear();
-
-      const previousTools = this.tools;
-      try {
-        this.tools = newTools;
-        await this.mcpClientManager.discoverAllMcpTools(this.config);
-      } catch (error) {
-        this.tools = previousTools;
-        throw error;
-      }
-    });
-  }
-
-  /**
-   * Restarts all MCP servers and re-discovers tools.
-   */
-  async restartMcpServers(): Promise<void> {
-    await this.discoverMcpTools();
-  }
-
-  /**
-   * Discover or re-discover tools for a single MCP server.
-   * Uses truly atomic updates to prevent race conditions.
-   * @param serverName - The name of the server to discover tools from.
-   */
-  async discoverToolsForServer(serverName: string): Promise<void> {
-    await this.withDiscoveryLock(async () => {
-      const newTools = new Map<string, AnyDeclarativeTool>();
-      for (const tool of this.tools.values()) {
-        if (
-          !(tool instanceof DiscoveredMCPTool && tool.serverName === serverName)
-        ) {
-          this.registerToolIntoMap(tool, newTools);
-        }
-      }
-
-      await this.config.getPromptRegistry().removePromptsByServer(serverName);
-      const mcpServers = this.config.getMcpServers() ?? {};
-      const serverConfig = mcpServers[serverName];
-
-      const previousTools = this.tools;
-      try {
-        this.tools = newTools;
-        if (serverConfig) {
-          const tempRegistry = Object.create(this) as ToolRegistry;
-          tempRegistry.registerTool = (tool: AnyDeclarativeTool) => {
-            this.registerToolIntoMap(tool, newTools);
-          };
-          await connectAndDiscover(
-            serverName,
-            serverConfig,
-            tempRegistry,
-            this.config.getPromptRegistry(),
-            this.config.getDebugMode(),
-            this.config.getWorkspaceContext(),
-            this.config,
-          );
-        }
-      } catch (error) {
-        this.tools = previousTools;
-        throw error;
-      }
+      this.tools = newTools;
     });
   }
 

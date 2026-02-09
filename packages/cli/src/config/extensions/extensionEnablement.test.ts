@@ -9,7 +9,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExtensionEnablementManager, Override } from './extensionEnablement.js';
-import type { GeminiCLIExtension } from '@vybestack/llxprt-code-core';
+import {
+  coreEvents,
+  type GeminiCLIExtension,
+} from '@vybestack/llxprt-code-core';
+import { SettingScope } from '../settings.js';
 
 // Helper to create a temporary directory for testing
 function createTestDir() {
@@ -264,20 +268,20 @@ describe('ExtensionEnablementManager', () => {
   });
 
   describe('validateExtensionOverrides', () => {
-    let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+    let coreEventsEmitSpy: ReturnType<typeof vi.spyOn>;
 
     beforeEach(() => {
-      consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      coreEventsEmitSpy = vi.spyOn(coreEvents, 'emitFeedback');
     });
 
     afterEach(() => {
-      consoleErrorSpy.mockRestore();
+      coreEventsEmitSpy.mockRestore();
     });
 
     it('should not log an error if enabledExtensionNamesOverride is empty', () => {
       const manager = new ExtensionEnablementManager(configDir, []);
       manager.validateExtensionOverrides([]);
-      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(coreEventsEmitSpy).not.toHaveBeenCalled();
     });
 
     it('should not log an error if all enabledExtensionNamesOverride are valid', () => {
@@ -290,7 +294,7 @@ describe('ExtensionEnablementManager', () => {
         { name: 'ext-two' },
       ] as GeminiCLIExtension[];
       manager.validateExtensionOverrides(extensions);
-      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(coreEventsEmitSpy).not.toHaveBeenCalled();
     });
 
     it('should log an error for each invalid extension name in enabledExtensionNamesOverride', () => {
@@ -304,11 +308,13 @@ describe('ExtensionEnablementManager', () => {
         { name: 'ext-two' },
       ] as GeminiCLIExtension[];
       manager.validateExtensionOverrides(extensions);
-      expect(consoleErrorSpy).toHaveBeenCalledTimes(2);
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect(coreEventsEmitSpy).toHaveBeenCalledTimes(2);
+      expect(coreEventsEmitSpy).toHaveBeenCalledWith(
+        'error',
         'Extension not found: ext-invalid',
       );
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect(coreEventsEmitSpy).toHaveBeenCalledWith(
+        'error',
         'Extension not found: ext-another-invalid',
       );
     });
@@ -316,7 +322,108 @@ describe('ExtensionEnablementManager', () => {
     it('should not log an error if "none" is in enabledExtensionNamesOverride', () => {
       const manager = new ExtensionEnablementManager(configDir, ['none']);
       manager.validateExtensionOverrides([]);
-      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(coreEventsEmitSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('SettingScope.Session', () => {
+    it('should enable extension in session without persisting to disk', () => {
+      // Create manager with temp directory
+      const manager = new ExtensionEnablementManager(configDir);
+
+      // Call enable with Session scope
+      manager.enable('my-ext', true, SettingScope.Session);
+
+      // Assert: isEnabled('my-ext') returns true
+      expect(manager.isEnabled('my-ext', '/any/path')).toBe(true);
+
+      // Assert: NO file written to disk (check fs.existsSync)
+      const configFilePath = path.join(configDir, 'extension-enablement.json');
+      expect(fs.existsSync(configFilePath)).toBe(false);
+    });
+
+    it('should disable extension in session without persisting to disk', () => {
+      const manager = new ExtensionEnablementManager(configDir);
+
+      // Pre-enable extension at User scope (will persist)
+      manager.enable('my-ext', true, '/');
+      const configFilePath = path.join(configDir, 'extension-enablement.json');
+      expect(fs.existsSync(configFilePath)).toBe(true);
+
+      // Read the persisted state before session override
+      const persistedConfigBefore = JSON.parse(
+        fs.readFileSync(configFilePath, 'utf-8'),
+      );
+      expect(persistedConfigBefore['my-ext'].overrides).toContain('/*');
+
+      // Call enable with Session scope to disable
+      manager.enable('my-ext', false, SettingScope.Session);
+
+      // Assert: isEnabled('my-ext') returns false (session overrides)
+      expect(manager.isEnabled('my-ext', '/any/path')).toBe(false);
+
+      // Assert: persisted state still shows enabled (read file from disk)
+      const persistedConfigAfter = JSON.parse(
+        fs.readFileSync(configFilePath, 'utf-8'),
+      );
+      expect(persistedConfigAfter['my-ext'].overrides).toContain('/*');
+    });
+
+    it('should have session scope override persisted state', () => {
+      const manager = new ExtensionEnablementManager(configDir);
+
+      // Enable at User scope
+      manager.enable('my-ext', true, '/');
+      expect(manager.isEnabled('my-ext', '/any/path')).toBe(true);
+
+      // Disable at Session scope
+      manager.enable('my-ext', false, SettingScope.Session);
+
+      // Assert: isEnabled returns false (session wins)
+      expect(manager.isEnabled('my-ext', '/any/path')).toBe(false);
+
+      // Clear session state
+      manager.resetSessionState();
+
+      // Assert: isEnabled returns true (falls back to User)
+      expect(manager.isEnabled('my-ext', '/any/path')).toBe(true);
+    });
+
+    it('should support resetSessionState to clear all session overrides', () => {
+      const manager = new ExtensionEnablementManager(configDir);
+
+      // Enable some extensions at User scope
+      manager.enable('ext-a', true, '/');
+      manager.enable('ext-b', true, '/');
+
+      // Disable some extensions at Session scope
+      manager.enable('ext-a', false, SettingScope.Session);
+      manager.enable('ext-b', false, SettingScope.Session);
+
+      // Verify session overrides are active
+      expect(manager.isEnabled('ext-a', '/any/path')).toBe(false);
+      expect(manager.isEnabled('ext-b', '/any/path')).toBe(false);
+
+      // Call resetSessionState()
+      manager.resetSessionState();
+
+      // Assert: extensions revert to persisted state
+      expect(manager.isEnabled('ext-a', '/any/path')).toBe(true);
+      expect(manager.isEnabled('ext-b', '/any/path')).toBe(true);
+    });
+
+    it('should track multiple extensions independently in session', () => {
+      const manager = new ExtensionEnablementManager(configDir);
+
+      // Enable ext-a at Session
+      manager.enable('ext-a', true, SettingScope.Session);
+
+      // Disable ext-b at Session (using disable helper)
+      manager.disable('ext-b', true, SettingScope.Session);
+
+      // Assert: both states are tracked correctly
+      expect(manager.isEnabled('ext-a', '/any/path')).toBe(true);
+      expect(manager.isEnabled('ext-b', '/any/path')).toBe(false);
     });
   });
 });

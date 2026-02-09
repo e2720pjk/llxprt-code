@@ -8,7 +8,6 @@ import * as path from 'node:path';
 import os from 'node:os';
 import process from 'node:process';
 import {
-  AuthType,
   type ContentGeneratorConfig,
   createContentGeneratorConfig,
 } from '../core/contentGenerator.js';
@@ -22,6 +21,8 @@ import { GlobTool } from '../tools/glob.js';
 import { DebugLogger } from '../debug/DebugLogger.js';
 import { EditTool } from '../tools/edit.js';
 import { ShellTool } from '../tools/shell.js';
+import { ASTEditTool } from '../tools/ast-edit.js';
+import { ASTReadFileTool } from '../tools/ast-edit.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { GoogleWebFetchTool } from '../tools/google-web-fetch.js';
 import { ReadManyFilesTool } from '../tools/read-many-files.js';
@@ -47,6 +48,7 @@ import { ListSubagentsTool } from '../tools/list-subagents.js';
 import { GeminiClient } from '../core/client.js';
 import { createAgentRuntimeStateFromConfig } from '../runtime/runtimeStateFactory.js';
 import type { AgentRuntimeState } from '../runtime/AgentRuntimeState.js';
+import type { HookDefinition, HookEventName } from '../hooks/types.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { GitService } from '../services/gitService.js';
 import { HistoryService } from '../services/history/HistoryService.js';
@@ -82,6 +84,11 @@ import {
 } from '../services/fileSystemService.js';
 import { ProfileManager } from './profileManager.js';
 import { SubagentManager } from './subagentManager.js';
+import {
+  getOrCreateScheduler as _getOrCreateScheduler,
+  disposeScheduler as _disposeScheduler,
+  type SchedulerCallbacks,
+} from './schedulerSingleton.js';
 
 // Re-export OAuth config type
 export type { MCPOAuthConfig, AnyToolInvocation };
@@ -93,6 +100,15 @@ import type { EventEmitter } from 'node:events';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
 import { PolicyEngine } from '../policy/policy-engine.js';
 import type { PolicyEngineConfig } from '../policy/types.js';
+import { setGlobalProxy } from '../utils/fetch.js';
+import { coreEvents, CoreEvent } from '../utils/events.js';
+import {
+  type ExtensionLoader,
+  SimpleExtensionLoader,
+} from '../utils/extensionLoader.js';
+import { McpClientManager } from '../tools/mcp-client-manager.js';
+
+import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 
 // Import privacy-related types
 export interface RedactionConfig {
@@ -185,6 +201,7 @@ export interface GeminiCLIExtension {
   mcpServers?: Record<string, MCPServerConfig>;
   contextFiles: string[];
   excludeTools?: string[];
+  hooks?: { [K in HookEventName]?: HookDefinition[] };
 }
 
 export interface ExtensionInstallMetadata {
@@ -206,6 +223,32 @@ export {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 };
+
+/** Shell replacement mode type */
+export type ShellReplacementMode = 'allowlist' | 'all' | 'none';
+
+/**
+ * Normalize shell-replacement setting to canonical mode.
+ * Handles legacy boolean values for backward compatibility.
+ */
+export function normalizeShellReplacement(
+  value: ShellReplacementMode | boolean | undefined,
+): ShellReplacementMode {
+  if (value === undefined) {
+    return 'allowlist'; // Default to upstream behavior
+  }
+  if (value === true || value === 'all') {
+    return 'all';
+  }
+  if (value === false || value === 'none') {
+    return 'none';
+  }
+  if (value === 'allowlist') {
+    return 'allowlist';
+  }
+  // Fallback for any unexpected value
+  return 'allowlist';
+}
 
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 4_000_000;
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
@@ -231,6 +274,7 @@ export class MCPServerConfig {
     readonly includeTools?: string[],
     readonly excludeTools?: string[],
     readonly extensionName?: string,
+    readonly extension?: GeminiCLIExtension,
     // OAuth configuration
     readonly oauth?: MCPOAuthConfig,
     readonly authProviderType?: AuthProviderType,
@@ -293,7 +337,7 @@ export interface ConfigParameters {
   debugMode: boolean;
   outputFormat?: OutputFormat;
   question?: string;
-  fullContext?: boolean;
+
   coreTools?: string[];
   allowedTools?: string[];
   excludeTools?: string[];
@@ -334,6 +378,10 @@ export interface ConfigParameters {
   providerManager?: ProviderManager;
   provider?: string;
   extensions?: GeminiCLIExtension[];
+  extensionLoader?: ExtensionLoader;
+  enabledExtensions?: string[];
+  enableExtensionReloading?: boolean;
+  allowedMcpServers?: string[];
   blockedMcpServers?: Array<{ name: string; extensionName: string }>;
   noBrowser?: boolean;
   summarizeToolOutput?: Record<string, SummarizeToolOutputSettings>;
@@ -344,10 +392,14 @@ export interface ConfigParameters {
   loadMemoryFromIncludeDirectories?: boolean;
   chatCompression?: ChatCompressionSettings;
   interactive?: boolean;
-  shellReplacement?: boolean;
+  shellReplacement?: 'allowlist' | 'all' | 'none' | boolean;
   trustedFolder?: boolean;
   useRipgrep?: boolean;
   shouldUseNodePtyShell?: boolean;
+  allowPtyThemeOverride?: boolean;
+  ptyScrollbackLimit?: number;
+  ptyTerminalWidth?: number;
+  ptyTerminalHeight?: number;
   skipNextSpeakerCheck?: boolean;
   extensionManagement?: boolean;
   enablePromptCompletion?: boolean;
@@ -359,10 +411,20 @@ export interface ConfigParameters {
   enableToolOutputTruncation?: boolean;
   continueOnFailedApiCall?: boolean;
   enableShellOutputEfficiency?: boolean;
+  continueSession?: boolean;
+  disableYoloMode?: boolean;
+  enableMessageBusIntegration?: boolean;
+  enableHooks?: boolean;
+  hooks?: {
+    [K in HookEventName]?: HookDefinition[];
+  };
 }
 
 export class Config {
   private toolRegistry!: ToolRegistry;
+  private mcpClientManager?: McpClientManager;
+  private allowedMcpServers: string[];
+  private blockedMcpServers: Array<{ name: string; extensionName: string }>;
   private promptRegistry!: PromptRegistry;
   private readonly sessionId: string;
   private readonly settingsService: SettingsService;
@@ -375,14 +437,14 @@ export class Config {
   private readonly debugMode: boolean;
   private readonly outputFormat: OutputFormat;
   private readonly question: string | undefined;
-  private readonly fullContext: boolean;
+
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
-  private readonly mcpServers: Record<string, MCPServerConfig> | undefined;
+  private mcpServers: Record<string, MCPServerConfig> | undefined;
   private userMemory: string;
   private llxprtMdFileCount: number;
   private llxprtMdFilePaths: string[];
@@ -419,11 +481,8 @@ export class Config {
   private readonly maxSessionTurns: number;
   private readonly _activeExtensions: ActiveExtension[];
   private readonly listExtensions: boolean;
-  private readonly _extensions: GeminiCLIExtension[];
-  private readonly _blockedMcpServers: Array<{
-    name: string;
-    extensionName: string;
-  }>;
+  private readonly _extensionLoader: ExtensionLoader;
+  private readonly enableExtensionReloading: boolean;
   private providerManager?: ProviderManager;
   private profileManager?: ProfileManager;
   private subagentManager?: SubagentManager;
@@ -504,11 +563,15 @@ export class Config {
   private readonly trustedFolder: boolean | undefined;
   private readonly useRipgrep: boolean;
   private readonly shouldUseNodePtyShell: boolean;
+  private readonly allowPtyThemeOverride: boolean;
+  private readonly ptyScrollbackLimit: number;
+  private ptyTerminalWidth?: number;
+  private ptyTerminalHeight?: number;
   private readonly skipNextSpeakerCheck: boolean;
   private readonly extensionManagement: boolean;
   private readonly enablePromptCompletion: boolean = false;
   private initialized: boolean = false;
-  private readonly shellReplacement: boolean = false;
+  private readonly shellReplacement: 'allowlist' | 'all' | 'none' = 'allowlist';
   readonly storage: Storage;
   private readonly fileExclusions: FileExclusions;
   private readonly eventEmitter?: EventEmitter;
@@ -519,6 +582,12 @@ export class Config {
   enableToolOutputTruncation: boolean;
   private readonly continueOnFailedApiCall: boolean;
   private readonly enableShellOutputEfficiency: boolean;
+  private readonly continueSession: boolean;
+  private readonly disableYoloMode: boolean;
+  private readonly enableHooks: boolean;
+  private readonly hooks:
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined;
 
   constructor(params: ConfigParameters) {
     const providedSettingsService = params.settingsService;
@@ -570,7 +639,7 @@ export class Config {
     this.debugMode = params.debugMode;
     this.outputFormat = params.outputFormat ?? OutputFormat.TEXT;
     this.question = params.question;
-    this.fullContext = params.fullContext ?? false;
+
     this.coreTools = params.coreTools;
     this.allowedTools = params.allowedTools;
     this.excludeTools = params.excludeTools;
@@ -578,6 +647,8 @@ export class Config {
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
     this.mcpServers = params.mcpServers;
+    this.allowedMcpServers = params.allowedMcpServers ?? [];
+    this.blockedMcpServers = params.blockedMcpServers ?? [];
     this.userMemory = params.userMemory ?? '';
     this.llxprtMdFileCount = params.llxprtMdFileCount ?? 0;
     this.llxprtMdFilePaths = params.llxprtMdFilePaths ?? [];
@@ -627,8 +698,9 @@ export class Config {
     this._activeExtensions = params.activeExtensions ?? [];
     this.providerManager = params.providerManager;
     this.provider = params.provider;
-    this._extensions = params.extensions ?? [];
-    this._blockedMcpServers = params.blockedMcpServers ?? [];
+    this._extensionLoader =
+      params.extensionLoader ??
+      new SimpleExtensionLoader(params.extensions ?? []);
     this.noBrowser = params.noBrowser ?? false;
     this.summarizeToolOutput = params.summarizeToolOutput;
     this.folderTrust = params.folderTrust ?? false;
@@ -642,10 +714,14 @@ export class Config {
       params.loadMemoryFromIncludeDirectories ?? false;
     this.chatCompression = params.chatCompression;
     this.interactive = params.interactive ?? false;
-    this.shellReplacement = params.shellReplacement ?? false;
+    this.shellReplacement = normalizeShellReplacement(params.shellReplacement);
     this.trustedFolder = params.trustedFolder;
     this.useRipgrep = params.useRipgrep ?? false;
     this.shouldUseNodePtyShell = params.shouldUseNodePtyShell ?? false;
+    this.allowPtyThemeOverride = params.allowPtyThemeOverride ?? false;
+    this.ptyScrollbackLimit = params.ptyScrollbackLimit ?? 600000;
+    this.ptyTerminalWidth = params.ptyTerminalWidth;
+    this.ptyTerminalHeight = params.ptyTerminalHeight;
     this.skipNextSpeakerCheck = params.skipNextSpeakerCheck ?? false;
     this.truncateToolOutputThreshold =
       params.truncateToolOutputThreshold ??
@@ -656,7 +732,9 @@ export class Config {
     this.continueOnFailedApiCall = params.continueOnFailedApiCall ?? true;
     this.enableShellOutputEfficiency =
       params.enableShellOutputEfficiency ?? true;
+    this.continueSession = params.continueSession ?? false;
     this.extensionManagement = params.extensionManagement ?? false;
+    this.enableExtensionReloading = params.enableExtensionReloading ?? false;
     this.storage = new Storage(this.targetDir);
     this.enablePromptCompletion = params.enablePromptCompletion ?? false;
     this.fileExclusions = new FileExclusions(this);
@@ -667,6 +745,27 @@ export class Config {
     this.messageBus = new MessageBus(this.policyEngine, this.debugMode);
 
     this.runtimeState = createAgentRuntimeStateFromConfig(this);
+    this.disableYoloMode = params.disableYoloMode ?? false;
+    this.enableHooks = params.enableHooks ?? false;
+
+    // Enable MessageBus integration if:
+    // 1. Explicitly enabled via setting, OR
+    // 2. Hooks are enabled and hooks are configured
+    const hasHooks = params.hooks && Object.keys(params.hooks).length > 0;
+    const hooksNeedMessageBus = this.enableHooks && hasHooks;
+    const messageBusEnabled =
+      params.enableMessageBusIntegration ??
+      (hooksNeedMessageBus ? true : false);
+    // Update messageBus initialization to consider hooks
+    if (messageBusEnabled && !this.messageBus) {
+      // MessageBus is already initialized in constructor, just log that hooks may use it
+      const debugLogger = new DebugLogger('llxprt:config');
+      debugLogger.debug(
+        () =>
+          `MessageBus enabled for hooks (enableHooks=${this.enableHooks}, hasHooks=${hasHooks})`,
+      );
+    }
+    this.hooks = params.hooks;
 
     if (params.contextFileName) {
       setLlxprtMdFilename(params.contextFileName);
@@ -690,6 +789,20 @@ export class Config {
       console.log(`[CONFIG] Telemetry disabled`);
     }
 
+    // Set up proxy with error handling
+    const proxy = this.getProxy();
+    if (proxy) {
+      try {
+        setGlobalProxy(proxy);
+      } catch (error) {
+        coreEvents.emitFeedback(
+          'error',
+          'Invalid proxy configuration detected. Check debug drawer for more details (F12)',
+          error,
+        );
+      }
+    }
+
     logCliConfiguration(this, new StartSessionEvent(this));
   }
 
@@ -709,6 +822,15 @@ export class Config {
     }
     this.promptRegistry = new PromptRegistry();
     this.toolRegistry = await this.createToolRegistry();
+    this.mcpClientManager = new McpClientManager(
+      this.toolRegistry,
+      this,
+      this.eventEmitter,
+    );
+    await Promise.all([
+      this.mcpClientManager.startConfiguredMcpServers(),
+      this.getExtensionLoader().start(this),
+    ]);
 
     // Create GeminiClient instance immediately without authentication
     // This ensures geminiClient is available for providers on startup
@@ -718,8 +840,10 @@ export class Config {
     void this._modelSwitchedDuringSession;
   }
 
-  async refreshAuth(authMethod: AuthType) {
-    const logger = new DebugLogger('llxprt:config:refreshAuth');
+  initializeContentGeneratorConfig: () => Promise<void> = async () => {
+    const logger = new DebugLogger(
+      'llxprt:config:initializeContentGeneratorConfig',
+    );
 
     // Save the current conversation history AND HistoryService before creating a new client
     const previousGeminiClient = this.geminiClient;
@@ -732,15 +856,11 @@ export class Config {
       logger.debug('Retrieved existing state', {
         historyLength: existingHistory.length,
         hasHistoryService: !!existingHistoryService,
-        authMethod,
       });
     }
 
     // Create new content generator config
-    const newContentGeneratorConfig = createContentGeneratorConfig(
-      this,
-      authMethod,
-    );
+    const newContentGeneratorConfig = createContentGeneratorConfig(this);
 
     // Add provider manager to the config if available (llxprt multi-provider support)
     if (this.providerManager) {
@@ -751,11 +871,6 @@ export class Config {
       runtimeId: this.runtimeState.runtimeId,
       overrides: {
         model: newContentGeneratorConfig.model,
-        authType:
-          newContentGeneratorConfig.authType ?? this.runtimeState.authType,
-        authPayload: newContentGeneratorConfig.apiKey
-          ? { apiKey: newContentGeneratorConfig.apiKey }
-          : undefined,
         proxyUrl: newContentGeneratorConfig.proxy ?? this.runtimeState.proxyUrl,
       },
     });
@@ -777,8 +892,8 @@ export class Config {
       // Vertex and Genai have incompatible encryption and sending history with
       // throughtSignature from Genai to Vertex will fail, we need to strip them
       const fromGenaiToVertex =
-        this.contentGeneratorConfig?.authType === AuthType.USE_GEMINI &&
-        authMethod === AuthType.LOGIN_WITH_GOOGLE;
+        this.contentGeneratorConfig?.vertexai === false &&
+        newContentGeneratorConfig.vertexai === true;
 
       logger.debug('Storing history for later use', {
         historyLength: existingHistory.length,
@@ -850,10 +965,22 @@ export class Config {
 
     // Reset the session flag since we're explicitly changing auth and using default model
     this.inFallbackMode = false;
+  };
+
+  async refreshAuth(authMethod?: string) {
+    const logger = new DebugLogger('llxprt:config:refreshAuth');
+    logger.debug(
+      () => `refreshAuth invoked (authMethod=${authMethod ?? 'default'})`,
+    );
+    await this.initializeContentGeneratorConfig();
   }
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  isContinueSession(): boolean {
+    return this.continueSession;
   }
 
   shouldLoadMemoryFromIncludeDirectories(): boolean {
@@ -895,7 +1022,11 @@ export class Config {
       this.contentGeneratorConfig.model = newModel;
     }
     // Also update the base model so it persists across refreshAuth
-    this.model = newModel;
+    if (this.model !== newModel || this.inFallbackMode) {
+      this.model = newModel;
+      coreEvents.emitModelChanged(newModel);
+    }
+    this.setFallbackMode(false);
   }
 
   isInFallbackMode(): boolean {
@@ -968,10 +1099,6 @@ export class Config {
     return this.question;
   }
 
-  getFullContext(): boolean {
-    return this.fullContext;
-  }
-
   getCoreTools(): string[] | undefined {
     return this.coreTools;
   }
@@ -980,8 +1107,23 @@ export class Config {
     return this.allowedTools;
   }
 
+  /**
+   * All the excluded tools from static configuration, loaded extensions, or
+   * other sources.
+   *
+   * May change over time.
+   */
   getExcludeTools(): string[] | undefined {
-    return this.excludeTools;
+    const excludeToolsSet = new Set([...(this.excludeTools ?? [])]);
+    for (const extension of this.getExtensionLoader().getExtensions()) {
+      if (!extension.isActive) {
+        continue;
+      }
+      for (const tool of extension.excludeTools || []) {
+        excludeToolsSet.add(tool);
+      }
+    }
+    return [...excludeToolsSet];
   }
 
   getToolDiscoveryCommand(): string | undefined {
@@ -996,8 +1138,31 @@ export class Config {
     return this.mcpServerCommand;
   }
 
+  /**
+   * The user configured MCP servers (via gemini settings files).
+   *
+   * Does NOT include mcp servers configured by extensions.
+   */
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
     return this.mcpServers;
+  }
+
+  getMcpClientManager(): McpClientManager | undefined {
+    return this.mcpClientManager;
+  }
+
+  getAllowedMcpServers(): string[] | undefined {
+    return this.allowedMcpServers;
+  }
+
+  getBlockedMcpServers():
+    | Array<{ name: string; extensionName: string }>
+    | undefined {
+    return this.blockedMcpServers;
+  }
+
+  setMcpServers(mcpServers: Record<string, MCPServerConfig>): void {
+    this.mcpServers = mcpServers;
   }
 
   getUserMemory(): string {
@@ -1043,6 +1208,10 @@ export class Config {
 
   getPolicyEngine(): PolicyEngine {
     return this.policyEngine;
+  }
+
+  isYoloModeDisabled(): boolean {
+    return this.disableYoloMode || !this.isTrustedFolder();
   }
 
   getShowMemoryUsage(): boolean {
@@ -1274,16 +1443,36 @@ export class Config {
     return this.extensionManagement;
   }
 
+  getExtensionLoader(): ExtensionLoader {
+    return this._extensionLoader;
+  }
+
   getExtensions(): GeminiCLIExtension[] {
-    return this._extensions;
+    return this._extensionLoader.getExtensions();
   }
 
   getActiveExtensions(): ActiveExtension[] {
     return this._activeExtensions;
   }
 
-  getBlockedMcpServers(): Array<{ name: string; extensionName: string }> {
-    return this._blockedMcpServers;
+  /**
+   * Check if an extension is enabled (i.e., isActive in the extension loader).
+   * Returns true for unknown extensions to avoid filtering valid commands.
+   */
+  isExtensionEnabled(extensionName: string): boolean {
+    const extension = this._extensionLoader
+      .getExtensions()
+      .find((ext) => ext.name === extensionName);
+    // If extension not found, default to true to avoid filtering
+    return extension ? extension.isActive : true;
+  }
+
+  getEnableExtensionReloading(): boolean {
+    return this.enableExtensionReloading;
+  }
+
+  getExtensionEvents(): EventEmitter | undefined {
+    return this.eventEmitter;
   }
 
   getProvider(): string | undefined {
@@ -1550,11 +1739,13 @@ export class Config {
     return Array.from(this.alwaysAllowedCommands);
   }
 
-  getShellReplacement(): boolean {
+  getShellReplacement(): ShellReplacementMode {
     // Check ephemeral setting first, fall back to constructor value
     const ephemeralValue = this.getEphemeralSetting('shell-replacement');
-    if (ephemeralValue === true) {
-      return true;
+    if (ephemeralValue !== undefined) {
+      return normalizeShellReplacement(
+        ephemeralValue as ShellReplacementMode | boolean,
+      );
     }
     return this.shellReplacement;
   }
@@ -1565,6 +1756,48 @@ export class Config {
 
   getShouldUseNodePtyShell(): boolean {
     return this.shouldUseNodePtyShell;
+  }
+
+  getAllowPtyThemeOverride(): boolean {
+    return this.allowPtyThemeOverride;
+  }
+
+  getPtyScrollbackLimit(): number {
+    return this.ptyScrollbackLimit;
+  }
+
+  getPtyTerminalWidth(): number | undefined {
+    return this.ptyTerminalWidth;
+  }
+
+  getPtyTerminalHeight(): number | undefined {
+    return this.ptyTerminalHeight;
+  }
+
+  setPtyTerminalSize(
+    width: number | undefined,
+    height: number | undefined,
+  ): void {
+    if (typeof width === 'number' && Number.isFinite(width) && width > 0) {
+      this.ptyTerminalWidth = Math.floor(width);
+    } else {
+      this.ptyTerminalWidth = undefined;
+    }
+
+    if (typeof height === 'number' && Number.isFinite(height) && height > 0) {
+      this.ptyTerminalHeight = Math.floor(height);
+    } else {
+      this.ptyTerminalHeight = undefined;
+    }
+  }
+
+  getShellExecutionConfig(): ShellExecutionConfig {
+    return {
+      terminalWidth: this.getPtyTerminalWidth(),
+      terminalHeight: this.getPtyTerminalHeight(),
+      showColor: this.getAllowPtyThemeOverride(),
+      scrollback: this.getPtyScrollbackLimit(),
+    };
   }
 
   getSkipNextSpeakerCheck(): boolean {
@@ -1623,7 +1856,7 @@ export class Config {
           : [],
         this.getDebugMode(),
         this.getFileService(),
-        this.getExtensionContextFilePaths(),
+        this.getExtensions(),
         this.getFolderTrust(),
       );
 
@@ -1631,11 +1864,17 @@ export class Config {
     this.setLlxprtMdFileCount(fileCount);
     this.setLlxprtMdFilePaths(filePaths);
 
+    coreEvents.emit(CoreEvent.MemoryChanged, {
+      memoryContent,
+      fileCount,
+      filePaths,
+    });
+
     return { memoryContent, fileCount, filePaths };
   }
 
   async createToolRegistry(): Promise<ToolRegistry> {
-    const registry = new ToolRegistry(this, this.eventEmitter);
+    const registry = new ToolRegistry(this);
 
     const baseCoreTools = this.getCoreTools();
     const effectiveCoreTools =
@@ -1727,10 +1966,12 @@ export class Config {
 
     registerCoreTool(GlobTool, this);
     registerCoreTool(EditTool, this);
+    registerCoreTool(ASTEditTool, this);
     registerCoreTool(WriteFileTool, this);
     registerCoreTool(GoogleWebFetchTool, this);
     registerCoreTool(ReadManyFilesTool, this);
     registerCoreTool(ReadLineRangeTool, this);
+    registerCoreTool(ASTReadFileTool, this);
     registerCoreTool(DeleteLineRangeTool, this);
     registerCoreTool(InsertAtLineTool, this);
     registerCoreTool(ShellTool, this);
@@ -1806,6 +2047,7 @@ export class Config {
     }
 
     await registry.discoverAllTools();
+    registry.sortTools();
     return registry;
   }
 
@@ -1825,6 +2067,40 @@ export class Config {
       unregistered: this.allPotentialTools.filter((t) => !t.isRegistered),
     };
   }
+
+  async getOrCreateScheduler(
+    sessionId: string,
+    callbacks: SchedulerCallbacks,
+  ): Promise<import('../core/coreToolScheduler.js').CoreToolScheduler> {
+    return _getOrCreateScheduler(this, sessionId, callbacks);
+  }
+
+  disposeScheduler(sessionId: string): void {
+    _disposeScheduler(sessionId);
+  }
+
+  getEnableHooks(): boolean {
+    return this.enableHooks;
+  }
+
+  /**
+   * Get hooks configuration
+   */
+  getHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    return this.hooks;
+  }
+
+  /**
+   * Check if interactive shell is enabled.
+   * Returns true if the shouldUseNodePtyShell setting is enabled.
+   */
+  getEnableInteractiveShell(): boolean {
+    return this.shouldUseNodePtyShell;
+  }
 }
+
+// Re-export SchedulerCallbacks for external use
+export { type SchedulerCallbacks };
+
 // Export model constants for use in CLI
 export { DEFAULT_GEMINI_FLASH_MODEL };

@@ -6,8 +6,8 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, vi, Mock, beforeEach } from 'vitest';
-import { renderHook, act, waitFor } from '@testing-library/react';
-import React from 'react';
+import React, { act } from 'react';
+import { renderHook, waitFor } from '../../test-utils/render.js';
 import * as ReactDOM from 'react-dom';
 import { useGeminiStream } from './useGeminiStream.js';
 import {
@@ -18,7 +18,6 @@ import {
 import {
   Config,
   GeminiClient,
-  AuthType,
   EditorType,
   AnyToolInvocation,
 } from '@vybestack/llxprt-code-core';
@@ -165,7 +164,6 @@ describe('useGeminiStream subagent isolation', () => {
       model: 'test-model',
       apiKey: 'test-key',
       vertexai: false,
-      authType: AuthType.USE_GEMINI,
     };
 
     const mockGetGeminiClient = vi.fn().mockImplementation(() => {
@@ -180,7 +178,6 @@ describe('useGeminiStream subagent isolation', () => {
       targetDir: '/tmp/project',
       debugMode: false,
       question: undefined,
-      fullContext: false,
       coreTools: [],
       toolDiscoveryCommand: undefined,
       toolCallCommand: undefined,

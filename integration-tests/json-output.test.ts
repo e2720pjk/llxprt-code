@@ -6,6 +6,7 @@
 
 import { expect, describe, it, beforeEach, afterEach } from 'vitest';
 import { TestRig } from './test-helper.js';
+import { join } from 'node:path';
 
 describe('JSON output', () => {
   let rig: TestRig;
@@ -35,60 +36,17 @@ describe('JSON output', () => {
     expect(typeof parsed.stats).toBe('object');
   });
 
-  it('should return a JSON error for enforced auth mismatch before running', async () => {
-    process.env['GOOGLE_GENAI_USE_GCA'] = 'true';
-    await rig.cleanup();
-    await rig.setup('json-output-auth-mismatch', {
-      settings: {
-        security: { auth: { enforcedType: 'gemini-api-key' } },
-      },
-    });
-
-    let thrown: Error | undefined;
-    try {
-      await rig.run('Hello', '--output-format', 'json');
-      expect.fail('Expected process to exit with error');
-    } catch (e) {
-      thrown = e as Error;
-    } finally {
-      delete process.env['GOOGLE_GENAI_USE_GCA'];
-    }
-
-    expect(thrown).toBeDefined();
-    const message = (thrown as Error).message;
-
-    // Use a regex to find the first complete JSON object in the string
-    const jsonMatch = message.match(/{[\s\S]*}/);
-
-    // Fail if no JSON-like text was found
-    expect(
-      jsonMatch,
-      'Expected to find a JSON object in the error output',
-    ).toBeTruthy();
-
-    let payload;
-    try {
-      // Parse the matched JSON string
-      payload = JSON.parse(jsonMatch![0]);
-    } catch (parseError) {
-      console.error('Failed to parse the following JSON:', jsonMatch![0]);
-      throw new Error(
-        `Test failed: Could not parse JSON from error message. Details: ${parseError}`,
-      );
-    }
-
-    expect(payload.error).toBeDefined();
-    expect(payload.error.type).toBe('Error');
-    expect(payload.error.code).toBe(1);
-    expect(payload.error.message).toContain(
-      'configured auth type is gemini-api-key',
-    );
-    expect(payload.error.message).toContain(
-      'current auth type is oauth-personal',
-    );
-  });
+  // REMOVED (issue #443): Enforced auth type mismatch test removed.
+  // The enforced auth type checking was vestigial code that caused
+  // more problems than it solved. Providers now handle auth internally.
 
   it('should not exit on tool errors and allow model to self-correct in JSON mode', async () => {
+    rig.setup('json-output-error', {
+      fakeResponsesPath: join(
+        import.meta.dirname,
+        'json-output.error.responses',
+      ),
+    });
     const result = await rig.run(
       `Read the contents of ${rig.testDir}/path/to/nonexistent/file.txt and tell me what it says. ` +
         'On error, respond to the user with exactly the text "File not found".',

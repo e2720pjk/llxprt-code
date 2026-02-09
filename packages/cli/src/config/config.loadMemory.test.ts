@@ -72,6 +72,7 @@ vi.mock('@vybestack/llxprt-code-core', async (importOriginal) => {
         getLlxprtMdFileCount: vi.fn(() => llxprtMdFileCount),
       };
     }),
+    isRipgrepAvailable: vi.fn().mockResolvedValue(true),
   };
 });
 
@@ -186,7 +187,6 @@ vi.mock('../runtime/runtimeSettings.js', () => {
     infoMessages: [],
     warnings: [],
     providerChanged: false,
-    authType: undefined,
     didFallback: false,
     requestedProvider: 'openai',
   }));
@@ -199,7 +199,6 @@ vi.mock('../runtime/runtimeSettings.js', () => {
     previousProvider: null,
     nextProvider: 'openai',
     infoMessages: [],
-    authType: undefined,
   }));
   const applyCliArgumentOverrides = vi.fn(async () => {});
   const registerCliProviderInfrastructure = vi.fn();
@@ -288,11 +287,13 @@ describe('loadCliConfig memory discovery', () => {
       model: undefined,
       sandbox: undefined,
       sandboxImage: undefined,
+      sandboxEngine: undefined,
+      sandboxProfileLoad: undefined,
       debug: false,
       prompt: undefined,
       promptInteractive: undefined,
       outputFormat: undefined,
-      allFiles: false,
+
       showMemoryUsage: false,
       yolo: false,
       approvalMode: undefined,
@@ -323,10 +324,12 @@ describe('loadCliConfig memory discovery', () => {
       promptWords: [],
       set: undefined,
       query: undefined,
+      continue: undefined,
     };
 
-    const { ExtensionEnablementManager, ExtensionStorage } =
-      await import('./extension.js');
+    const { ExtensionEnablementManager, ExtensionStorage } = await import(
+      './extension.js'
+    );
     const config = await loadCliConfig(
       settings,
       [],

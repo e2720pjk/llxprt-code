@@ -15,7 +15,11 @@ import * as os from 'node:os';
 import * as https from 'node:https';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { EXTENSIONS_CONFIG_FILENAME, loadExtension } from '../extension.js';
+import {
+  EXTENSIONS_CONFIG_FILENAME,
+  EXTENSIONS_CONFIG_FILENAME_FALLBACK,
+  loadExtension,
+} from '../extension.js';
 import * as tar from 'tar';
 import extract from 'extract-zip';
 
@@ -273,8 +277,11 @@ export async function downloadFromGitHubRelease(
     let archiveUrl: string | undefined;
     let isTar = false;
     let isZip = false;
+    let fileName: string | undefined;
+
     if (asset) {
-      archiveUrl = asset.browser_download_url;
+      archiveUrl = asset.url;
+      fileName = asset.name;
     } else {
       if (releaseData.tarball_url) {
         archiveUrl = releaseData.tarball_url;
@@ -289,10 +296,10 @@ export async function downloadFromGitHubRelease(
         `No assets found for release with tag ${releaseData.tag_name}`,
       );
     }
-    let downloadedAssetPath = path.join(
-      destination,
-      path.basename(new URL(archiveUrl).pathname),
-    );
+    if (!fileName) {
+      fileName = path.basename(new URL(archiveUrl).pathname);
+    }
+    let downloadedAssetPath = path.join(destination, fileName);
     if (isTar && !downloadedAssetPath.endsWith('.tar.gz')) {
       downloadedAssetPath += '.tar.gz';
     } else if (isZip && !downloadedAssetPath.endsWith('.zip')) {
@@ -315,9 +322,16 @@ export async function downloadFromGitHubRelease(
       const lonelyDir = entries.find((entry) => entry.isDirectory());
       if (
         lonelyDir &&
-        fs.existsSync(
+        (fs.existsSync(
           path.join(destination, lonelyDir.name, EXTENSIONS_CONFIG_FILENAME),
-        )
+        ) ||
+          fs.existsSync(
+            path.join(
+              destination,
+              lonelyDir.name,
+              EXTENSIONS_CONFIG_FILENAME_FALLBACK,
+            ),
+          ))
       ) {
         const dirPathToExtract = path.join(destination, lonelyDir.name);
         const extractedDirFiles = await fs.promises.readdir(dirPathToExtract);
@@ -352,7 +366,7 @@ interface GithubReleaseData {
 
 interface Asset {
   name: string;
-  browser_download_url: string;
+  url: string;
 }
 
 export function findReleaseAsset(assets: Asset[]): Asset | undefined {
@@ -420,8 +434,13 @@ async function fetchJson<T>(url: string): Promise<T> {
 }
 
 async function downloadFile(url: string, dest: string): Promise<void> {
-  const headers: { 'User-agent': string; Authorization?: string } = {
+  const headers: {
+    'User-agent': string;
+    Accept: string;
+    Authorization?: string;
+  } = {
     'User-agent': 'gemini-cli',
+    Accept: 'application/octet-stream',
   };
   const token = getGitHubToken();
   if (token) {

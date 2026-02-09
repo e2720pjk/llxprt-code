@@ -19,6 +19,8 @@ export interface ReadonlySettingsSnapshot {
   contextLimit?: number;
   /** Preserve threshold for compression (0.0-1.0), default 0.2 */
   preserveThreshold?: number;
+  /** Preserve threshold for top of conversation (0.0-1.0), default 0.2 */
+  topPreserveThreshold?: number;
   /** Override for tool format string, optional */
   toolFormatOverride?: string;
   /** Telemetry configuration */
@@ -32,6 +34,8 @@ export interface ReadonlySettingsSnapshot {
     allowed?: string[];
     disabled?: string[];
   };
+  /** Emoji filter mode for subagent output */
+  emojifilter?: 'allowed' | 'auto' | 'warn' | 'error';
   /** @plan PLAN-20251202-THINKING.P03b @requirement REQ-THINK-006.1 */
   'reasoning.enabled'?: boolean;
   /** @plan PLAN-20251202-THINKING.P03b @requirement REQ-THINK-006.2 */
@@ -46,6 +50,8 @@ export interface ReadonlySettingsSnapshot {
   'reasoning.effort'?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   /** @plan PLAN-20251202-THINKING.P03b @requirement REQ-THINK-006.7 */
   'reasoning.maxTokens'?: number;
+  /** @issue #1307 - Anthropic adaptive thinking toggle for Opus 4.6+ */
+  'reasoning.adaptiveThinking'?: boolean;
 }
 
 /**
@@ -111,7 +117,6 @@ export interface ApiRequestEvent {
   sessionId?: string;
   runtimeId?: string;
   provider?: string;
-  authType?: string;
   timestamp?: number;
 }
 
@@ -125,7 +130,6 @@ export interface ApiResponseEvent {
   model: string;
   promptId?: string;
   durationMs: number;
-  authType?: string;
   sessionId?: string;
   runtimeId?: string;
   provider?: string;
@@ -151,7 +155,6 @@ export interface ApiErrorEvent {
   promptId?: string;
   durationMs: number;
   error: string;
-  authType?: string;
   errorType?: string;
   statusCode?: number | string;
   sessionId?: string;
@@ -181,6 +184,7 @@ export interface AgentRuntimeContext {
     compressionThreshold(): number;
     contextLimit(): number;
     preserveThreshold(): number;
+    topPreserveThreshold(): number;
     toolFormatOverride(): string | undefined;
     /**
      * @plan PLAN-20251202-THINKING.P03b
@@ -194,6 +198,7 @@ export interface AgentRuntimeContext {
       stripFromContext(): 'all' | 'allButLast' | 'none';
       effort(): 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | undefined;
       maxTokens(): number | undefined;
+      adaptiveThinking(): boolean | undefined;
     };
   };
 

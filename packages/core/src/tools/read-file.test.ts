@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ReadFileTool, ReadFileToolParams } from './read-file.js';
 import path from 'path';
 import os from 'os';
@@ -16,6 +16,14 @@ import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { ToolInvocation, ToolResult } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
+
+interface ReadFileParameterSchema {
+  properties: {
+    absolute_path: {
+      description: string;
+    };
+  };
+}
 
 describe('ReadFileTool', () => {
   let tempRootDir: string;
@@ -33,6 +41,7 @@ describe('ReadFileTool', () => {
       getTargetDir: () => tempRootDir,
       getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
       getConversationLoggingEnabled: () => false,
+      getEphemeralSettings: () => ({}),
     } as unknown as Config;
     tool = new ReadFileTool(mockConfigInstance);
   });
@@ -125,6 +134,38 @@ describe('ReadFileTool', () => {
       const params = { offset: 0 } as unknown as ReadFileToolParams;
       expect(() => tool.build(params)).toThrow(
         `Either 'absolute_path' or 'file_path' parameter must be provided and non-empty.`,
+      );
+    });
+  });
+
+  describe('constructor', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('should use windows-style path examples on windows', () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+
+      const tool = new ReadFileTool({} as unknown as Config);
+      const schema = tool.schema;
+      expect(
+        (schema.parametersJsonSchema as ReadFileParameterSchema).properties
+          .absolute_path.description,
+      ).toBe(
+        "The absolute path to the file to read (e.g., 'C:\\Users\\project\\file.txt'). Relative paths are not supported. You must provide an absolute path.",
+      );
+    });
+
+    it('should use unix-style path examples on non-windows platforms', () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+
+      const tool = new ReadFileTool({} as unknown as Config);
+      const schema = tool.schema;
+      expect(
+        (schema.parametersJsonSchema as ReadFileParameterSchema).properties
+          .absolute_path.description,
+      ).toBe(
+        "The absolute path to the file to read (e.g., '/home/user/project/file.txt'). Relative paths are not supported. You must provide an absolute path.",
       );
     });
   });
@@ -332,6 +373,204 @@ Action: To read more of the file, you can use the 'offset' and 'limit' parameter
         ].join('\n');
 
         expect(result.llmContent).toEqual(expectedLlmContent);
+      });
+
+      it('should include a warning (but still return content) when showGitChanges is enabled and file is not in a git repo', async () => {
+        const filePath = path.join(tempRootDir, 'textfile.txt');
+        const fileContent = ['Line 1', 'Line 2'].join('\n');
+        await fsp.writeFile(filePath, fileContent, 'utf-8');
+
+        const params: ReadFileToolParams = {
+          absolute_path: filePath,
+          showGitChanges: true,
+        };
+        const invocation = tool.build(params) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >;
+
+        const result = await invocation.execute(abortSignal);
+        expect(typeof result.llmContent).toBe('string');
+        expect(result.llmContent).toContain(
+          'NOTE: Failed to read git change status',
+        );
+        expect(result.llmContent).toContain('Git changes legend');
+        expect(result.llmContent).toContain('Line 1');
+        expect(result.llmContent).toContain('Line 2');
+      });
+
+      it('should show N markers when showGitChanges is enabled in a git repo', async () => {
+        const repoDir = path.join(tempRootDir, 'repo-n');
+        await fsp.mkdir(repoDir, { recursive: true });
+
+        const filePath = path.join(repoDir, 'file.txt');
+
+        const runGit = async (args: string[]) => {
+          const { spawn } = await import('child_process');
+          return await new Promise<void>((resolve, reject) => {
+            const child = spawn('git', args, {
+              cwd: repoDir,
+              windowsHide: true,
+            });
+            let stderr = '';
+            child.stderr.on('data', (d) => {
+              stderr += d.toString('utf8');
+            });
+            child.on('error', (err) => reject(err));
+            child.on('close', (code) => {
+              if (code === 0) resolve();
+              else
+                reject(
+                  new Error(stderr.trim() || `git exited with code ${code}`),
+                );
+            });
+          });
+        };
+
+        await runGit(['init']);
+        await runGit(['config', 'user.email', 'test@example.com']);
+        await runGit(['config', 'user.name', 'Test User']);
+
+        await fsp.writeFile(filePath, ['new'].join('\n'), 'utf-8');
+        await runGit(['add', 'file.txt']);
+        await runGit(['commit', '-m', 'init']);
+
+        await fsp.appendFile(filePath, '\nnew');
+
+        const params: ReadFileToolParams = {
+          absolute_path: filePath,
+          showGitChanges: true,
+        };
+
+        const invocation = tool.build(params) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >;
+        const result = await invocation.execute(abortSignal);
+
+        expect(typeof result.llmContent).toBe('string');
+        expect(result.llmContent).toContain('Git changes legend');
+        expect(result.llmContent).toContain('Nnew');
+        expect(result.llmContent).not.toContain(
+          'NOTE: Failed to read git change status',
+        );
+      });
+
+      it('should show M markers when showGitChanges is enabled in a git repo', async () => {
+        const repoDir = path.join(tempRootDir, 'repo-m');
+        await fsp.mkdir(repoDir, { recursive: true });
+
+        const filePath = path.join(repoDir, 'file.txt');
+        await fsp.writeFile(filePath, ['one', 'two'].join('\n'), 'utf-8');
+
+        const runGit = async (args: string[]) => {
+          const { spawn } = await import('child_process');
+          return await new Promise<void>((resolve, reject) => {
+            const child = spawn('git', args, {
+              cwd: repoDir,
+              windowsHide: true,
+            });
+            let stderr = '';
+            child.stderr.on('data', (d) => {
+              stderr += d.toString('utf8');
+            });
+            child.on('error', (err) => reject(err));
+            child.on('close', (code) => {
+              if (code === 0) resolve();
+              else
+                reject(
+                  new Error(stderr.trim() || `git exited with code ${code}`),
+                );
+            });
+          });
+        };
+
+        await runGit(['init']);
+        await runGit(['config', 'user.email', 'test@example.com']);
+        await runGit(['config', 'user.name', 'Test User']);
+        await runGit(['add', 'file.txt']);
+        await runGit(['commit', '-m', 'init']);
+
+        await fsp.writeFile(filePath, ['one', 'TWO'].join('\n'), 'utf-8');
+
+        const params: ReadFileToolParams = {
+          absolute_path: filePath,
+          showGitChanges: true,
+        };
+
+        const invocation = tool.build(params) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >;
+        const result = await invocation.execute(abortSignal);
+
+        expect(typeof result.llmContent).toBe('string');
+        expect(result.llmContent).toContain('Git changes legend');
+        expect(result.llmContent).toContain('MTWO');
+        expect(result.llmContent).not.toContain(
+          'NOTE: Failed to read git change status',
+        );
+      });
+
+      it('should show D markers when showGitChanges is enabled in a git repo', async () => {
+        const repoDir = path.join(tempRootDir, 'repo-d');
+        await fsp.mkdir(repoDir, { recursive: true });
+
+        const filePath = path.join(repoDir, 'file.txt');
+        await fsp.writeFile(
+          filePath,
+          ['one', 'two', 'three'].join('\n'),
+          'utf-8',
+        );
+
+        const runGit = async (args: string[]) => {
+          const { spawn } = await import('child_process');
+          return await new Promise<void>((resolve, reject) => {
+            const child = spawn('git', args, {
+              cwd: repoDir,
+              windowsHide: true,
+            });
+            let stderr = '';
+            child.stderr.on('data', (d) => {
+              stderr += d.toString('utf8');
+            });
+            child.on('error', (err) => reject(err));
+            child.on('close', (code) => {
+              if (code === 0) resolve();
+              else
+                reject(
+                  new Error(stderr.trim() || `git exited with code ${code}`),
+                );
+            });
+          });
+        };
+
+        await runGit(['init']);
+        await runGit(['config', 'user.email', 'test@example.com']);
+        await runGit(['config', 'user.name', 'Test User']);
+        await runGit(['add', 'file.txt']);
+        await runGit(['commit', '-m', 'init']);
+
+        await fsp.writeFile(filePath, ['one', 'two'].join('\n'), 'utf-8');
+
+        const params: ReadFileToolParams = {
+          absolute_path: filePath,
+          showGitChanges: true,
+        };
+
+        const invocation = tool.build(params) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >;
+        const result = await invocation.execute(abortSignal);
+
+        expect(typeof result.llmContent).toBe('string');
+        expect(result.llmContent).toContain('Git changes legend');
+        expect(result.llmContent).toContain('Dtwo');
+        expect(result.llmContent).toMatch(/^Dtwo$/m);
+        expect(result.llmContent).not.toContain(
+          'NOTE: Failed to read git change status',
+        );
       });
 
       describe('with .llxprtignore', () => {

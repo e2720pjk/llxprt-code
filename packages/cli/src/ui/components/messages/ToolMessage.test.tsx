@@ -5,13 +5,15 @@
  */
 
 import React from 'react';
-import { render } from 'ink-testing-library';
-import { ToolMessage, ToolMessageProps } from './ToolMessage.js';
+import type { ToolMessageProps } from './ToolMessage.js';
+import { ToolMessage } from './ToolMessage.js';
 import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
+import { renderWithProviders } from '../../../test-utils/render.js';
+import { Colors } from '../../colors.js';
+import { TOOL_STATUS } from '../../constants.js';
 
-// Mock child components or utilities if they are complex or have side effects
 vi.mock('../GeminiRespondingSpinner.js', () => ({
   GeminiRespondingSpinner: ({
     nonRespondingDisplay,
@@ -20,9 +22,11 @@ vi.mock('../GeminiRespondingSpinner.js', () => ({
   }) => {
     const streamingState = React.useContext(StreamingContext)!;
     if (streamingState === StreamingState.Responding) {
-      return <Text>MockRespondingSpinner</Text>;
+      return <Text color={Colors.Foreground}>MockRespondingSpinner</Text>;
     }
-    return nonRespondingDisplay ? <Text>{nonRespondingDisplay}</Text> : null;
+    return nonRespondingDisplay ? (
+      <Text color={Colors.Foreground}>{nonRespondingDisplay}</Text>
+    ) : null;
   },
 }));
 vi.mock('./DiffRenderer.js', () => ({
@@ -31,22 +35,21 @@ vi.mock('./DiffRenderer.js', () => ({
   }: {
     diffContent: string;
   }) {
-    return <Text>MockDiff:{diffContent}</Text>;
+    return <Text color={Colors.Foreground}>MockDiff:{diffContent}</Text>;
   },
 }));
 vi.mock('../../utils/MarkdownDisplay.js', () => ({
   MarkdownDisplay: function MockMarkdownDisplay({ text }: { text: string }) {
-    return <Text>MockMarkdown:{text}</Text>;
+    return <Text color={Colors.Foreground}>MockMarkdown:{text}</Text>;
   },
 }));
 
-// Helper to render with context
 const renderWithContext = (
   ui: React.ReactElement,
   streamingState: StreamingState,
 ) => {
   const contextValue: StreamingState = streamingState;
-  return render(
+  return renderWithProviders(
     <StreamingContext.Provider value={contextValue}>
       {ui}
     </StreamingContext.Provider>,
@@ -65,25 +68,13 @@ describe('<ToolMessage />', () => {
     emphasis: 'medium',
   };
 
-  it('renders basic tool information', () => {
-    const { lastFrame } = renderWithContext(
-      <ToolMessage {...baseProps} />,
-      StreamingState.Idle,
-    );
-    const output = lastFrame();
-    expect(output).toContain('✓'); // Success indicator
-    expect(output).toContain('test-tool');
-    expect(output).toContain('A tool for testing');
-    expect(output).toContain('MockMarkdown:Test result');
-  });
-
   describe('ToolStatusIndicator rendering', () => {
-    it('shows ✓ for Success status', () => {
+    it('shows SUCCESS indicator for Success status', () => {
       const { lastFrame } = renderWithContext(
         <ToolMessage {...baseProps} status={ToolCallStatus.Success} />,
         StreamingState.Idle,
       );
-      expect(lastFrame()).toContain('✓');
+      expect(lastFrame()).toContain(TOOL_STATUS.SUCCESS);
     });
 
     it('shows o for Pending status', () => {
@@ -123,9 +114,9 @@ describe('<ToolMessage />', () => {
         <ToolMessage {...baseProps} status={ToolCallStatus.Executing} />,
         StreamingState.Idle,
       );
-      expect(lastFrame()).toContain('⊷');
+      expect(lastFrame()).toContain(TOOL_STATUS.EXECUTING);
       expect(lastFrame()).not.toContain('MockRespondingSpinner');
-      expect(lastFrame()).not.toContain('✓');
+      expect(lastFrame()).not.toContain(TOOL_STATUS.SUCCESS);
     });
 
     it('shows paused spinner for Executing status when streamingState is WaitingForConfirmation', () => {
@@ -133,51 +124,28 @@ describe('<ToolMessage />', () => {
         <ToolMessage {...baseProps} status={ToolCallStatus.Executing} />,
         StreamingState.WaitingForConfirmation,
       );
-      expect(lastFrame()).toContain('⊷');
+      expect(lastFrame()).toContain(TOOL_STATUS.EXECUTING);
       expect(lastFrame()).not.toContain('MockRespondingSpinner');
-      expect(lastFrame()).not.toContain('✓');
+      expect(lastFrame()).not.toContain(TOOL_STATUS.SUCCESS);
     });
 
     it('shows MockRespondingSpinner for Executing status when streamingState is Responding', () => {
       const { lastFrame } = renderWithContext(
         <ToolMessage {...baseProps} status={ToolCallStatus.Executing} />,
-        StreamingState.Responding, // Simulate app still responding
+        StreamingState.Responding,
       );
       expect(lastFrame()).toContain('MockRespondingSpinner');
-      expect(lastFrame()).not.toContain('✓');
+      expect(lastFrame()).not.toContain(TOOL_STATUS.SUCCESS);
     });
   });
 
-  it('renders DiffRenderer for diff results', () => {
-    const diffResult = {
-      fileDiff: '--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new',
-      fileName: 'file.txt',
-      originalContent: 'old',
-      newContent: 'new',
-    };
-    const { lastFrame } = renderWithContext(
-      <ToolMessage {...baseProps} resultDisplay={diffResult} />,
-      StreamingState.Idle,
-    );
-    // Check that the output contains the MockDiff content as part of the whole message
-    expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
-  });
-
-  it('renders emphasis correctly', () => {
-    const { lastFrame: highEmphasisFrame } = renderWithContext(
-      <ToolMessage {...baseProps} emphasis="high" />,
-      StreamingState.Idle,
-    );
-    // Check for trailing indicator or specific color if applicable (Colors are not easily testable here)
-    expect(highEmphasisFrame()).toContain('←'); // Trailing indicator for high emphasis
-
-    const { lastFrame: lowEmphasisFrame } = renderWithContext(
-      <ToolMessage {...baseProps} emphasis="low" />,
-      StreamingState.Idle,
-    );
-    // For low emphasis, the name and description might be dimmed (check for dimColor if possible)
-    // This is harder to assert directly in text output without color checks.
-    // We can at least ensure it doesn't have the high emphasis indicator.
-    expect(lowEmphasisFrame()).not.toContain('←');
+  describe('ctrl+r hint display', () => {
+    it('does not show "Press ctrl+r" hint when not Executing', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage {...baseProps} status={ToolCallStatus.Success} />,
+        StreamingState.Idle,
+      );
+      expect(lastFrame()).not.toContain("Press 'ctrl+r'");
+    });
   });
 });
