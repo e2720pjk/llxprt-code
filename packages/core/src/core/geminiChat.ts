@@ -7,6 +7,8 @@
 // DISCLAIMER: This is a copied version of https://github.com/googleapis/js-genai/blob/main/src/chats.ts with the intention of working around a key bug
 // where function responses are not treated as "valid" responses: https://b.corp.google.com/issues/420354090
 
+import os from 'node:os';
+import path from 'node:path';
 import {
   GenerateContentResponse,
   type Content,
@@ -48,8 +50,13 @@ import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { isStructuredError } from '../utils/quotaErrorDetection.js';
 import { DebugLogger } from '../debug/index.js';
-import { getCompressionPrompt } from './prompts.js';
 import { estimateTokens as estimateTextTokens } from '../utils/toolOutputLimiter.js';
+import {
+  getCompressionStrategy,
+  parseCompressionStrategyName,
+} from './compression/compressionStrategyFactory.js';
+import type { CompressionContext, DensityConfig } from './compression/types.js';
+import { PromptResolver } from '../prompt-config/prompt-resolver.js';
 import { tokenLimit } from './tokenLimits.js';
 import type { AgentRuntimeState } from '../runtime/AgentRuntimeState.js';
 import type {
@@ -389,6 +396,27 @@ export class GeminiChat {
   private compressionPromise: Promise<void> | null = null;
   private logger = new DebugLogger('llxprt:gemini:chat');
   private lastPromptTokenCount: number | null = null;
+
+  /**
+   * Optional callback that supplies formatted active todo items for compression.
+   * Set by the owning client so the compression context can include todo awareness
+   * without GeminiChat depending on the todo system directly.
+   */
+  private activeTodosProvider?: () => Promise<string | undefined>;
+
+  /**
+   * Density dirty flag — tracks whether new content has been added since last optimization.
+   * @plan PLAN-20260211-HIGHDENSITY.P20
+   * @requirement REQ-HD-002.6, REQ-HD-002.7
+   */
+  private densityDirty: boolean = true;
+
+  /**
+   * Suppresses densityDirty from being set during compression rebuilds.
+   * @plan PLAN-20260211-HIGHDENSITY.P20
+   * @requirement REQ-HD-002.6
+   */
+  private _suppressDensityDirty: boolean = false;
   private readonly generationConfig: GenerateContentConfig;
 
   /**
@@ -432,6 +460,21 @@ export class GeminiChat {
     this.historyService = view.history;
     this.generationConfig = generationConfig;
     void contentGenerator;
+
+    // @plan PLAN-20260211-HIGHDENSITY.P20
+    // @requirement REQ-HD-002.6
+    // Wrap historyService.add to set densityDirty on turn-loop content adds.
+    // Compression rebuilds suppress this via _suppressDensityDirty.
+    if (typeof this.historyService.add === 'function') {
+      const originalAdd = this.historyService.add.bind(this.historyService);
+      this.historyService.add = (...args: Parameters<typeof originalAdd>) => {
+        const result = originalAdd(...args);
+        if (!this._suppressDensityDirty) {
+          this.densityDirty = true;
+        }
+        return result;
+      };
+    }
 
     validateHistory(initialHistory);
 
@@ -1659,6 +1702,14 @@ export class GeminiChat {
   }
 
   /**
+   * Register a callback that provides formatted active todo items.
+   * Called during compression to supply todo context to the summarizer.
+   */
+  setActiveTodosProvider(provider: () => Promise<string | undefined>): void {
+    this.activeTodosProvider = provider;
+  }
+
+  /**
    * Calculate effective token count based on reasoning settings.
    * This accounts for whether reasoning will be included in API calls.
    *
@@ -1718,6 +1769,72 @@ export class GeminiChat {
   }
 
   /**
+   * Run density optimization if the active strategy supports it and new content exists.
+   * Called before the threshold check in ensureCompressionBeforeSend and enforceContextWindow.
+   *
+   * @plan PLAN-20260211-HIGHDENSITY.P20
+   * @requirement REQ-HD-002.1, REQ-HD-002.2, REQ-HD-002.3, REQ-HD-002.4, REQ-HD-002.5, REQ-HD-002.7, REQ-HD-002.9
+   * @pseudocode orchestration.md lines 50-99
+   */
+  private async ensureDensityOptimized(): Promise<void> {
+    // REQ-HD-002.3: Skip if no new content since last optimization
+    if (!this.densityDirty) {
+      return;
+    }
+
+    try {
+      // Step 1: Resolve the active compression strategy
+      const strategyName = parseCompressionStrategyName(
+        this.runtimeContext.ephemerals.compressionStrategy(),
+      );
+      const strategy = getCompressionStrategy(strategyName);
+
+      // REQ-HD-002.2: If strategy has no optimize method or trigger isn't continuous, skip
+      if (!strategy.optimize || strategy.trigger?.mode !== 'continuous') {
+        return;
+      }
+
+      // Step 2: Build DensityConfig from ephemerals
+      const config: DensityConfig = {
+        readWritePruning:
+          this.runtimeContext.ephemerals.densityReadWritePruning(),
+        fileDedupe: this.runtimeContext.ephemerals.densityFileDedupe(),
+        recencyPruning: this.runtimeContext.ephemerals.densityRecencyPruning(),
+        recencyRetention:
+          this.runtimeContext.ephemerals.densityRecencyRetention(),
+        workspaceRoot: process.cwd(),
+      };
+
+      // Step 3: Get raw history (REQ-HD-002.9)
+      const history = this.historyService.getRawHistory();
+
+      // Step 4: Run optimization
+      const result = strategy.optimize(history, config);
+
+      // REQ-HD-002.5: Short-circuit if no changes
+      if (result.removals.length === 0 && result.replacements.size === 0) {
+        this.logger.debug(
+          () => '[GeminiChat] Density optimization produced no changes',
+        );
+        return;
+      }
+
+      // Step 5: Apply result (REQ-HD-002.4)
+      this.logger.debug(() => '[GeminiChat] Applying density optimization', {
+        removals: result.removals.length,
+        replacements: result.replacements.size,
+        metadata: result.metadata,
+      });
+
+      await this.historyService.applyDensityResult(result);
+      await this.historyService.waitForTokenUpdates();
+    } finally {
+      // REQ-HD-002.7: Always clear dirty flag, even on error or no-op
+      this.densityDirty = false;
+    }
+  }
+
+  /**
    * Check if compression is needed based on token count.
    *
    * Token calculation includes system prompt in both paths:
@@ -1727,7 +1844,7 @@ export class GeminiChat {
    *    which adds baseTokenOffset (system prompt tokens) to history tokens
    *
    * NOTE: System prompt is NEVER compressed - it is static and critical. Only conversation
-   * history is subject to compression via getCompressionSplit().
+   * history is subject to compression via the configured compression strategy.
    *
    * @plan PLAN-20251028-STATELESS6.P10
    * @requirement REQ-STAT6-002.2
@@ -1782,6 +1899,10 @@ export class GeminiChat {
     }
 
     await this.historyService.waitForTokenUpdates();
+
+    // @plan PLAN-20260211-HIGHDENSITY.P18
+    // @requirement REQ-HD-002.1
+    await this.ensureDensityOptimized();
 
     if (this.shouldCompress(pendingTokens)) {
       const triggerMessage =
@@ -1970,6 +2091,25 @@ export class GeminiChat {
       },
     );
 
+    // @plan PLAN-20260211-HIGHDENSITY.P18
+    // @requirement REQ-HD-002.8
+    await this.ensureDensityOptimized();
+    await this.historyService.waitForTokenUpdates();
+
+    // Re-check after density optimization — may have freed enough space
+    const postOptProjected =
+      this.getEffectiveTokenCount() +
+      Math.max(0, pendingTokens) +
+      completionBudget;
+
+    if (postOptProjected <= marginAdjustedLimit) {
+      this.logger.debug(
+        () => '[GeminiChat] Density optimization reduced tokens below limit',
+        { postOptProjected, marginAdjustedLimit },
+      );
+      return;
+    }
+
     await this.performCompression(promptId);
     await this.historyService.waitForTokenUpdates();
 
@@ -1995,341 +2135,89 @@ export class GeminiChat {
   }
 
   /**
-   * Perform compression of chat history
-   * Made public to allow manual compression triggering
+   * Perform compression of chat history.
+   * Delegates to the configured compression strategy via the strategy pattern.
+   *
+   * @plan PLAN-20260211-COMPRESSION.P14
+   * @requirement REQ-CS-006.1, REQ-CS-002.9
    */
   async performCompression(prompt_id: string): Promise<void> {
     this.logger.debug('Starting compression');
-
-    // Lock history service
     this.historyService.startCompression();
-
+    // @plan PLAN-20260211-HIGHDENSITY.P20
+    // @requirement REQ-HD-002.6
+    // Suppress densityDirty during compression rebuild (clear+add loop)
+    this._suppressDensityDirty = true;
     try {
-      // Get compression split
-      const { toKeepTop, toCompress, toKeepBottom } =
-        this.getCompressionSplit();
+      const strategyName = parseCompressionStrategyName(
+        this.runtimeContext.ephemerals.compressionStrategy(),
+      );
+      const strategy = getCompressionStrategy(strategyName);
+      const context = await this.buildCompressionContext(prompt_id);
+      const result = await strategy.compress(context);
 
-      if (toCompress.length === 0) {
-        this.logger.debug('Nothing to compress');
-        return;
+      // Apply result: clear history, add each entry from newHistory
+      this.historyService.clear();
+      for (const content of result.newHistory) {
+        this.historyService.add(content, this.runtimeState.model);
       }
 
-      // Perform direct compression API call
-      const summary = await this.directCompressionCall(toCompress, prompt_id);
-
-      // Apply compression atomically
-      this.applyCompression(summary, toKeepTop, toKeepBottom);
-
-      this.logger.debug('Compression completed successfully');
+      this.logger.debug('Compression completed', result.metadata);
     } catch (error) {
       this.logger.error('Compression failed:', error);
       throw error;
     } finally {
-      // Always unlock - this flushes pendingOperations which includes
-      // all the add() calls from applyCompression()
+      this._suppressDensityDirty = false;
       this.historyService.endCompression();
     }
 
-    // Wait for token estimates to complete AFTER endCompression() has
-    // flushed the pending operations. The add() calls during compression
-    // were queued to pendingOperations, not tokenizerLock, so we must
-    // wait after they're flushed.
     await this.historyService.waitForTokenUpdates();
   }
 
   /**
-   * Get the split point for compression
-   * Implements sandwich compression: preserve top and bottom, compress middle
+   * Build the {@link CompressionContext} that strategies receive.
+   * Keeps historyService out of the strategy boundary.
+   *
+   * @plan PLAN-20260211-COMPRESSION.P14
+   * @requirement REQ-CS-001.6
    */
-  private getCompressionSplit(): {
-    toKeepTop: IContent[];
-    toCompress: IContent[];
-    toKeepBottom: IContent[];
-  } {
-    const curated = this.historyService.getCurated();
+  private async buildCompressionContext(
+    promptId: string,
+  ): Promise<CompressionContext> {
+    const promptResolver = new PromptResolver();
+    const promptBaseDir = path.join(os.homedir(), '.llxprt', 'prompts');
 
-    // Get thresholds
-    const preserveThreshold =
-      this.runtimeContext.ephemerals.preserveThreshold();
-    const topPreserveThreshold =
-      this.runtimeContext.ephemerals.topPreserveThreshold();
-
-    // Calculate split points
-    let topSplitIndex = Math.ceil(curated.length * topPreserveThreshold);
-    let bottomSplitIndex = Math.floor(curated.length * (1 - preserveThreshold));
-
-    // Ensure minimum messages to compress
-    if (bottomSplitIndex - topSplitIndex < 4) {
-      // Not enough to compress, preserve everything in top
-      return {
-        toKeepTop: curated,
-        toCompress: [],
-        toKeepBottom: [],
-      };
-    }
-
-    // Adjust for tool call boundaries
-    topSplitIndex = this.adjustForToolCallBoundary(curated, topSplitIndex);
-    bottomSplitIndex = this.adjustForToolCallBoundary(
-      curated,
-      bottomSplitIndex,
-    );
-
-    // Handle edge case: overlap after boundary adjustment
-    if (topSplitIndex >= bottomSplitIndex) {
-      // Split points overlap, preserve everything
-      return {
-        toKeepTop: curated,
-        toCompress: [],
-        toKeepBottom: [],
-      };
+    let activeTodos: string | undefined;
+    if (this.activeTodosProvider) {
+      try {
+        activeTodos = await this.activeTodosProvider();
+      } catch (error) {
+        this.logger.debug(
+          'Failed to fetch active todos for compression',
+          error,
+        );
+      }
     }
 
     return {
-      toKeepTop: curated.slice(0, topSplitIndex),
-      toCompress: curated.slice(topSplitIndex, bottomSplitIndex),
-      toKeepBottom: curated.slice(bottomSplitIndex),
-    };
-  }
-
-  /**
-   * Adjust compression boundary to not split tool call/response pairs.
-   * This method searches for a valid split point that doesn't break
-   * tool call/response pairs. If the initial index lands inside a tool
-   * response sequence, it first tries moving forward, then searches
-   * backward for a valid boundary.
-   */
-  private adjustForToolCallBoundary(
-    history: IContent[],
-    index: number,
-  ): number {
-    if (index <= 0 || history.length === 0) {
-      return index;
-    }
-
-    const originalIndex = index;
-
-    index = this.findForwardValidSplitPoint(history, index);
-
-    if (index >= history.length) {
-      this.logger.debug(
-        'Forward adjustment reached end of history, searching backward',
-        { originalIndex, historyLength: history.length },
-      );
-      index = this.findBackwardValidSplitPoint(history, originalIndex);
-    }
-
-    return index;
-  }
-
-  private findForwardValidSplitPoint(
-    history: IContent[],
-    index: number,
-  ): number {
-    while (index < history.length && history[index].speaker === 'tool') {
-      index++;
-    }
-
-    if (index > 0 && index < history.length) {
-      const prev = history[index - 1];
-      if (prev.speaker === 'ai') {
-        const toolCalls = prev.blocks.filter((b) => b.type === 'tool_call');
-        if (toolCalls.length > 0) {
-          const keptHistory = history.slice(index);
-          const hasMatchingResponses = toolCalls.every((call) => {
-            const toolCall = call as ToolCallBlock;
-            return keptHistory.some(
-              (msg) =>
-                msg.speaker === 'tool' &&
-                msg.blocks.some(
-                  (b) =>
-                    b.type === 'tool_response' &&
-                    (b as ToolResponseBlock).callId === toolCall.id,
-                ),
-            );
-          });
-
-          if (!hasMatchingResponses) {
-            return index - 1;
-          }
-        }
-      }
-    }
-
-    return index;
-  }
-
-  private findBackwardValidSplitPoint(
-    history: IContent[],
-    startIndex: number,
-  ): number {
-    for (let i = startIndex - 1; i >= 0; i--) {
-      const current = history[i];
-
-      if (current.speaker === 'tool') {
-        continue;
-      }
-
-      if (current.speaker === 'ai') {
-        const toolCalls = current.blocks.filter((b) => b.type === 'tool_call');
-        if (toolCalls.length > 0) {
-          const remainingHistory = history.slice(i + 1);
-          const allCallsHaveResponses = toolCalls.every((call) => {
-            const toolCall = call as ToolCallBlock;
-            return remainingHistory.some(
-              (msg) =>
-                msg.speaker === 'tool' &&
-                msg.blocks.some(
-                  (b) =>
-                    b.type === 'tool_response' &&
-                    (b as ToolResponseBlock).callId === toolCall.id,
-                ),
-            );
-          });
-
-          if (allCallsHaveResponses) {
-            return i + 1;
-          }
-          continue;
-        }
-      }
-
-      return i + 1;
-    }
-
-    return startIndex;
-  }
-
-  /**
-   * Direct API call for compression, bypassing normal message flow
-   */
-  private async directCompressionCall(
-    historyToCompress: IContent[],
-    _prompt_id: string,
-  ): Promise<string> {
-    const provider = this.resolveProviderForRuntime('compression');
-
-    if (!this.providerSupportsIContent(provider)) {
-      throw new Error('Provider does not support compression');
-    }
-
-    const providerBaseUrl = this.resolveProviderBaseUrl(provider);
-
-    // Build compression request with system prompt and user history
-    const compressionRequest: IContent[] = [
-      // Add system instruction as the first message
-      {
-        speaker: 'human',
-        blocks: [
-          {
-            type: 'text',
-            text: getCompressionPrompt(),
-          },
-        ],
-      },
-      // Add the history to compress
-      ...historyToCompress,
-      // Add the trigger instruction
-      {
-        speaker: 'human',
-        blocks: [
-          {
-            type: 'text',
-            text: 'First, reason in your scratchpad. Then, generate the <state_snapshot>.',
-          },
-        ],
-      },
-    ];
-
-    // Direct provider call without tools for compression
-    this.logger.debug(
-      () =>
-        '[GeminiChat] Calling provider.generateChatCompletion (directCompression)',
-      {
-        providerName: provider.name,
+      history: this.historyService.getCurated(),
+      runtimeContext: this.runtimeContext,
+      runtimeState: this.runtimeState,
+      estimateTokens: (contents) =>
+        this.historyService.estimateTokensForContents(contents as IContent[]),
+      currentTokenCount: this.historyService.getTotalTokens(),
+      logger: this.logger,
+      resolveProvider: (profileName?) =>
+        this.resolveProviderForRuntime(profileName ?? 'compression'),
+      promptResolver,
+      promptBaseDir,
+      promptContext: {
+        provider: this.runtimeState.provider,
         model: this.runtimeState.model,
-        historyLength: compressionRequest.length,
-        baseUrl: providerBaseUrl,
       },
-    );
-    const runtimeContext = this.buildProviderRuntime(
-      'GeminiChat.directCompression',
-      { historyLength: compressionRequest.length },
-    );
-
-    const stream = provider.generateChatCompletion!({
-      contents: compressionRequest,
-      tools: undefined,
-      config: runtimeContext.config,
-      runtime: runtimeContext,
-      settings: runtimeContext.settingsService,
-      metadata: runtimeContext.metadata,
-      userMemory: runtimeContext.config?.getUserMemory?.(),
-    });
-
-    // Collect response
-    let summary = '';
-    let lastBlockWasNonText = false;
-    for await (const chunk of stream) {
-      if (chunk.blocks) {
-        const result = aggregateTextWithSpacing(
-          chunk.blocks,
-          summary,
-          lastBlockWasNonText,
-        );
-        summary = result.text;
-        lastBlockWasNonText = result.lastBlockWasNonText;
-      }
-    }
-
-    return summary;
-  }
-
-  /**
-   * Apply compression results to history
-   */
-  private applyCompression(
-    summary: string,
-    toKeepTop: IContent[],
-    toKeepBottom: IContent[],
-  ): void {
-    // Clear and rebuild history atomically
-    this.historyService.clear();
-
-    const currentModel = this.runtimeState.model;
-
-    // Add back the top preserved messages (original intent from start of conversation)
-    for (const content of toKeepTop) {
-      this.historyService.add(content, currentModel);
-    }
-
-    // Add compressed summary as user message
-    this.historyService.add(
-      {
-        speaker: 'human',
-        blocks: [{ type: 'text', text: summary }],
-      },
-      currentModel,
-    );
-
-    // Add acknowledgment from AI
-    this.historyService.add(
-      {
-        speaker: 'ai',
-        blocks: [
-          {
-            type: 'text',
-            text: 'Got it. Thanks for the additional context!',
-          },
-        ],
-      },
-      currentModel,
-    );
-
-    // Add back the bottom preserved messages (recent context)
-    for (const content of toKeepBottom) {
-      this.historyService.add(content, currentModel);
-    }
+      promptId,
+      ...(activeTodos ? { activeTodos } : {}),
+    };
   }
 
   getFinalUsageMetadata(

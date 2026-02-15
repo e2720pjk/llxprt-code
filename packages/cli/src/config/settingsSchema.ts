@@ -345,6 +345,16 @@ export const SETTINGS_SCHEMA = {
     description: 'Tool names to exclude from discovery.',
     showInDialog: false,
   },
+  defaultDisabledTools: {
+    type: 'array',
+    label: 'Default Disabled Tools',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: ['google_web_fetch'] as string[] | undefined,
+    description:
+      'Tool names disabled by default. Users can re-enable them with /tools enable.',
+    showInDialog: false,
+  },
   coreToolSettings: {
     type: 'object',
     label: 'Tool Management',
@@ -576,7 +586,7 @@ export const SETTINGS_SCHEMA = {
         label: 'Use Alternate Screen Buffer',
         category: 'UI',
         requiresRestart: true,
-        default: true,
+        default: false,
         description:
           'Use an alternate screen buffer for the UI, preserving shell history.',
         showInDialog: true,
@@ -615,7 +625,7 @@ export const SETTINGS_SCHEMA = {
         label: 'Show Line Numbers',
         category: 'UI',
         requiresRestart: false,
-        default: false,
+        default: true,
         description: 'Show line numbers in the chat.',
         showInDialog: true,
       },
@@ -726,6 +736,16 @@ export const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         description: 'Maximum number of directories to scan for memory files.',
         showInDialog: false,
+      },
+      memoryDiscoveryMaxDepth: {
+        type: 'number',
+        label: 'Memory Discovery Max Depth',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        description:
+          'Maximum directory depth for downward LLXPRT.md search from the current working directory. Does not affect upward traversal or global memory. When unset, searches all depths.',
+        showInDialog: true,
       },
       contextFileName: {
         type: 'string',
@@ -1512,6 +1532,15 @@ export const SETTINGS_SCHEMA = {
     default: false,
     description:
       'Enable AI-powered prompt completion suggestions while typing.',
+    showInDialog: true,
+  },
+  showProfileChangeInChat: {
+    type: 'boolean',
+    label: 'Show Profile Change in Chat',
+    category: 'General',
+    requiresRestart: false,
+    default: true,
+    description: 'Show a message in chat when the active profile changes.',
     showInDialog: true,
   },
   enableFuzzyFiltering: {

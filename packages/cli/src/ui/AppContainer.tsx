@@ -37,7 +37,10 @@ import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useConsoleMessages } from './hooks/useConsoleMessages.js';
 import { useExtensionAutoUpdate } from './hooks/useExtensionAutoUpdate.js';
 import { useExtensionUpdates } from './hooks/useExtensionUpdates.js';
-import { useTodoContinuation } from './hooks/useTodoContinuation.js';
+import {
+  useTodoContinuation,
+  type TodoContinuationHook,
+} from './hooks/useTodoContinuation.js';
 import {
   isMouseEventsActive,
   setMouseEventsActive,
@@ -227,8 +230,13 @@ export const AppContainer = (props: AppContainerProps) => {
   useMemoryMonitor({ addItem });
   const { todos, updateTodos } = useTodoContext();
   const todoPauseController = useMemo(() => new TodoPausePreserver(), []);
+  const todoContinuationRef = useRef<Pick<
+    TodoContinuationHook,
+    'handleTodoPause' | 'clearPause'
+  > | null>(null);
   const registerTodoPause = useCallback(() => {
     todoPauseController.registerTodoPause();
+    todoContinuationRef.current?.handleTodoPause('paused by model');
   }, [todoPauseController]);
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
@@ -1524,13 +1532,21 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Independent input history management (unaffected by /clear)
   const inputHistoryStore = useInputHistoryStore();
+  const lastSubmittedPromptRef = useRef<string>('');
 
-  const handleUserCancel = useCallback(() => {
-    const lastUserMessage = inputHistoryStore.inputHistory.at(-1);
-    if (lastUserMessage) {
-      buffer.setText(lastUserMessage);
-    }
-  }, [buffer, inputHistoryStore.inputHistory]);
+  const handleUserCancel = useCallback(
+    (shouldRestorePrompt?: boolean) => {
+      if (shouldRestorePrompt) {
+        const lastUserMessage = lastSubmittedPromptRef.current;
+        if (lastUserMessage) {
+          buffer.setText(lastUserMessage);
+        }
+      } else {
+        buffer.setText('');
+      }
+    },
+    [buffer],
+  );
 
   const handleOAuthCodeDialogClose = useCallback(() => {
     appDispatch({ type: 'CLOSE_DIALOG', payload: 'oauthCode' });
@@ -1559,6 +1575,7 @@ export const AppContainer = (props: AppContainerProps) => {
     thought,
     cancelOngoingRequest,
     activeShellPtyId: geminiActiveShellPtyId,
+    lastOutputTime,
   } = useGeminiStream(
     config.getGeminiClient(),
     history,
@@ -1578,6 +1595,7 @@ export const AppContainer = (props: AppContainerProps) => {
     stdout?.rows,
     registerTodoPause,
     handleExternalEditorOpen,
+    activeProfileName,
   );
 
   const pendingHistoryItems = useMemo(
@@ -1613,20 +1631,27 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [embeddedShellFocused, anyShellExecuting]);
 
   // Update the cancel handler with message queue support
-  const cancelHandlerRef = useRef<(() => void) | null>(null);
-  cancelHandlerRef.current = useCallback(() => {
-    if (isToolExecuting(pendingHistoryItems)) {
-      buffer.setText(''); // Just clear the prompt
-      return;
-    }
+  const cancelHandlerRef = useRef<
+    ((shouldRestorePrompt?: boolean) => void) | null
+  >(null);
+  cancelHandlerRef.current = useCallback(
+    (shouldRestorePrompt?: boolean) => {
+      if (isToolExecuting(pendingHistoryItems)) {
+        buffer.setText('');
+        return;
+      }
 
-    const lastUserMessage = inputHistoryStore.inputHistory.at(-1);
-    const textToSet = lastUserMessage || '';
-
-    if (textToSet) {
-      buffer.setText(textToSet);
-    }
-  }, [buffer, inputHistoryStore.inputHistory, pendingHistoryItems]);
+      if (shouldRestorePrompt) {
+        const lastUserMessage = lastSubmittedPromptRef.current;
+        if (lastUserMessage) {
+          buffer.setText(lastUserMessage);
+        }
+      } else {
+        buffer.setText('');
+      }
+    },
+    [buffer, pendingHistoryItems],
+  );
 
   // Input handling - queue messages for processing
   const handleFinalSubmit = useCallback(
@@ -1640,7 +1665,10 @@ export const AppContainer = (props: AppContainerProps) => {
          * after user interaction.
          */
         hadToolCallsRef.current = false;
+        todoContinuationRef.current?.clearPause();
 
+        // Capture synchronously before async state updates (prevents race condition on restore)
+        lastSubmittedPromptRef.current = trimmedValue;
         // Add to independent input history
         inputHistoryStore.addInput(trimmedValue);
         submitQuery(trimmedValue);
@@ -1690,6 +1718,8 @@ export const AppContainer = (props: AppContainerProps) => {
       'default',
     settings.merged.ui?.customWittyPhrases ??
       settings.merged.customWittyPhrases,
+    !!activeShellPtyId && !embeddedShellFocused,
+    lastOutputTime,
   );
   const showAutoAcceptIndicator = useAutoAcceptIndicator({ config, addItem });
 
@@ -1735,7 +1765,7 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       if (
-        settings.merged.ui?.useAlternateBuffer &&
+        settings.merged.ui?.useAlternateBuffer === true &&
         keyMatchers[Command.TOGGLE_COPY_MODE](key)
       ) {
         setCopyModeEnabled(true);
@@ -2065,6 +2095,8 @@ export const AppContainer = (props: AppContainerProps) => {
       streamingState === StreamingState.WaitingForConfirmation,
     setDebugMessage,
   );
+
+  todoContinuationRef.current = todoContinuation;
 
   // Track previous streaming state to detect turn completion
   const prevStreamingStateRef = useRef<StreamingState>(streamingState);

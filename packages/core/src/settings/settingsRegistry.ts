@@ -1,4 +1,6 @@
 export const PLAN_MARKER = '@plan:PLAN-20260126-SETTINGS-SEPARATION.P05';
+/** @plan PLAN-20260211-COMPRESSION.P12 */
+import { COMPRESSION_STRATEGIES } from '../core/compression/types.js';
 
 export type SettingCategory =
   | 'model-behavior'
@@ -82,6 +84,14 @@ export const SETTINGS_REGISTRY: readonly SettingSpec[] = [
     key: 'auth-keyfile',
     category: 'provider-config',
     description: 'Auth keyfile alias (saved to profiles for auth persistence)',
+    type: 'string',
+    persistToProfile: true,
+  },
+  {
+    key: 'auth-key-name',
+    category: 'provider-config',
+    description:
+      'Name of a saved API key in the keyring (resolved via /key save)',
     type: 'string',
     persistToProfile: true,
   },
@@ -561,6 +571,19 @@ export const SETTINGS_REGISTRY: readonly SettingSpec[] = [
     persistToProfile: true,
   },
   {
+    key: 'auth.noBrowser',
+    category: 'cli-behavior',
+    description:
+      'Skip automatic browser OAuth flow and prompt for manual code entry',
+    type: 'boolean',
+    default: false,
+    persistToProfile: true,
+    completionOptions: [
+      { value: 'true', description: 'Force manual OAuth code entry' },
+      { value: 'false', description: 'Allow automatic browser launch' },
+    ],
+  },
+  {
     key: 'todo-continuation',
     category: 'cli-behavior',
     description: 'Enable todo continuation mode',
@@ -604,6 +627,44 @@ export const SETTINGS_REGISTRY: readonly SettingSpec[] = [
     persistToProfile: true,
   },
   {
+    key: 'model.canSaveCore',
+    category: 'cli-behavior',
+    description:
+      'Allow the model to save core (system) memories via save_memory tool. ' +
+      'WARNING: Unsafe — the model can override your directives when this is enabled.',
+    type: 'boolean',
+    default: false,
+    persistToProfile: false,
+    completionOptions: [
+      {
+        value: 'true',
+        description:
+          'Enable (unsafe: model can override your system directives)',
+      },
+      { value: 'false', description: 'Disable (default, recommended)' },
+    ],
+  },
+  {
+    key: 'model.allMemoriesAreCore',
+    category: 'cli-behavior',
+    description:
+      'Load LLXPRT.md files as part of the system prompt instead of user context. ' +
+      'Useful for models that strictly follow system directives.',
+    type: 'boolean',
+    default: false,
+    persistToProfile: true,
+    completionOptions: [
+      {
+        value: 'true',
+        description: 'Load LLXPRT.md as system directives',
+      },
+      {
+        value: 'false',
+        description: 'Load LLXPRT.md as user context (default)',
+      },
+    ],
+  },
+  {
     key: 'task-default-timeout-seconds',
     category: 'cli-behavior',
     description: 'Default timeout in seconds for task tool executions',
@@ -634,6 +695,30 @@ export const SETTINGS_REGISTRY: readonly SettingSpec[] = [
         success: false,
         message:
           'task-max-timeout-seconds must be a positive number in seconds or -1 for unlimited',
+      };
+    },
+  },
+  {
+    // @plan PLAN-20260130-ASYNCTASK.P21
+    // @requirement REQ-ASYNC-012
+    key: 'task-max-async',
+    category: 'cli-behavior',
+    description:
+      'Maximum concurrent async tasks. Default 5, use -1 for unlimited.',
+    type: 'number',
+    persistToProfile: true,
+    validate: (value: unknown): ValidationResult => {
+      if (
+        typeof value === 'number' &&
+        Number.isInteger(value) &&
+        (value === -1 || (value >= 1 && value <= 100))
+      ) {
+        return { success: true, value };
+      }
+      return {
+        success: false,
+        message:
+          'task-max-async must be -1 (unlimited) or an integer between 1 and 100',
       };
     },
   },
@@ -928,6 +1013,104 @@ export const SETTINGS_REGISTRY: readonly SettingSpec[] = [
           'circuit_breaker_recovery_timeout_ms must be a positive integer',
       };
     },
+  },
+  /** @plan PLAN-20260211-COMPRESSION.P12 */
+  {
+    key: 'compression.strategy',
+    category: 'cli-behavior',
+    description:
+      'Compression strategy to use (middle-out or top-down-truncation)',
+    type: 'enum',
+    enumValues: [...COMPRESSION_STRATEGIES],
+    default: 'middle-out',
+    persistToProfile: true,
+  },
+  /** @plan PLAN-20260211-COMPRESSION.P12 */
+  {
+    key: 'compression.profile',
+    category: 'cli-behavior',
+    description: 'Profile name for compression LLM calls',
+    type: 'string',
+    persistToProfile: true,
+  },
+  /**
+   * @plan PLAN-20260211-HIGHDENSITY.P15
+   * @requirement REQ-HD-009.1, REQ-HD-009.2, REQ-HD-009.3, REQ-HD-009.4
+   * @pseudocode settings-factory.md lines 14-51
+   */
+  {
+    key: 'compression.density.readWritePruning',
+    category: 'cli-behavior',
+    description: 'Enable READ→WRITE pair pruning in high-density strategy',
+    type: 'boolean',
+    default: true,
+    persistToProfile: true,
+  },
+  {
+    key: 'compression.density.fileDedupe',
+    category: 'cli-behavior',
+    description: 'Enable duplicate @ file inclusion deduplication',
+    type: 'boolean',
+    default: true,
+    persistToProfile: true,
+  },
+  {
+    key: 'compression.density.recencyPruning',
+    category: 'cli-behavior',
+    description:
+      'Enable tool result recency pruning (keep last N per tool type)',
+    type: 'boolean',
+    default: false,
+    persistToProfile: true,
+  },
+  {
+    key: 'compression.density.recencyRetention',
+    category: 'cli-behavior',
+    description: 'Number of recent results to keep per tool type',
+    type: 'number',
+    default: 3,
+    persistToProfile: true,
+    validate: (value: unknown): ValidationResult => {
+      if (typeof value === 'number' && Number.isInteger(value) && value >= 1) {
+        return { success: true, value };
+      }
+      return {
+        success: false,
+        message:
+          'compression.density.recencyRetention must be a positive integer (>= 1)',
+      };
+    },
+  },
+  {
+    key: 'compression.density.compressHeadroom',
+    category: 'cli-behavior',
+    description:
+      'Headroom multiplier for compression target tokens (0 < value <= 1)',
+    type: 'number',
+    default: 0.6,
+    persistToProfile: true,
+    validate: (value: unknown): ValidationResult => {
+      if (typeof value === 'number' && value > 0 && value <= 1) {
+        return { success: true, value };
+      }
+      return {
+        success: false,
+        message:
+          'compression.density.compressHeadroom must be a number > 0 and <= 1',
+      };
+    },
+  },
+  {
+    key: 'auth.noBrowser',
+    category: 'cli-behavior',
+    description: 'Skip automatic browser OAuth flow and use manual code entry',
+    type: 'boolean',
+    default: false,
+    persistToProfile: true,
+    completionOptions: [
+      { value: 'true', description: 'Disable browser auto-launch for OAuth' },
+      { value: 'false', description: 'Allow browser auto-launch for OAuth' },
+    ],
   },
 ];
 

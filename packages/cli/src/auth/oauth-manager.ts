@@ -235,6 +235,10 @@ export class OAuthManager {
   private getMessageBus?: () => MessageBus | undefined;
   // Getter function for config (lazy resolution for bucket failover handler)
   private getConfig?: () => Config | undefined;
+  // Session-scoped flag: user dismissed the BucketAuthConfirmation dialog.
+  // When true, subsequent auth attempts skip the dialog and proceed directly
+  // (i.e. "don't bother me again" rather than "block auth").
+  private userDismissedAuthPrompt = false;
 
   constructor(tokenStore: TokenStore, settings?: LoadedSettings) {
     this.providers = new Map();
@@ -667,6 +671,31 @@ export class OAuthManager {
       return token.access_token;
     }
 
+    // @fix issue1191: Try bucket failover before triggering full OAuth re-authentication
+    const failoverConfig = this.getConfig?.();
+    const failoverHandler = failoverConfig?.getBucketFailoverHandler?.();
+    if (failoverHandler?.isEnabled()) {
+      logger.debug(
+        () =>
+          `[issue1191] Session bucket has no token for ${providerName}, attempting bucket failover before OAuth`,
+      );
+      const failoverResult = await failoverHandler.tryFailover();
+      if (failoverResult) {
+        const failoverToken = await this.getOAuthToken(providerName);
+        if (failoverToken) {
+          logger.debug(
+            () =>
+              `[issue1191] Bucket failover succeeded for ${providerName}, returning token`,
+          );
+          return failoverToken.access_token;
+        }
+      }
+      logger.debug(
+        () =>
+          `[issue1191] Bucket failover did not yield a token for ${providerName}, falling through to OAuth`,
+      );
+    }
+
     // For other providers, trigger OAuth flow
     // Check if the current profile has multiple buckets - if so, use MultiBucketAuthenticator
     // Issue 913: Also check if auth-bucket-prompt is enabled for single/default buckets
@@ -706,6 +735,42 @@ export class OAuthManager {
           );
           return diskToken.access_token;
         }
+
+        // @fix issue1317: Expired disk token with refresh_token — attempt refresh
+        // before falling through to full OAuth re-authentication
+        if (
+          diskToken &&
+          typeof diskToken.refresh_token === 'string' &&
+          diskToken.refresh_token !== ''
+        ) {
+          const provider = this.providers.get(providerName);
+          if (provider) {
+            try {
+              const refreshedToken = await provider.refreshToken(diskToken);
+              if (refreshedToken) {
+                const mergedToken = mergeRefreshedToken(
+                  diskToken as OAuthTokenWithExtras,
+                  refreshedToken as OAuthTokenWithExtras,
+                );
+                await this.tokenStore.saveToken(
+                  providerName,
+                  mergedToken,
+                  bucketToCheck,
+                );
+                logger.debug(
+                  () =>
+                    `[issue1317] Refreshed expired disk token for ${providerName}, skipping OAuth`,
+                );
+                return mergedToken.access_token;
+              }
+            } catch (refreshError) {
+              logger.debug(
+                () =>
+                  `[issue1317] Disk token refresh failed for ${providerName}: ${refreshError instanceof Error ? refreshError.message : refreshError}`,
+              );
+            }
+          }
+        }
       } finally {
         await this.tokenStore.releaseRefreshLock(providerName, bucketToCheck);
       }
@@ -727,7 +792,7 @@ export class OAuthManager {
       }
     }
 
-    // No valid token on disk, proceed with OAuth flow
+    // No valid token on disk (or refresh failed), proceed with OAuth flow
     try {
       const buckets = await this.getProfileBuckets(providerName);
 
@@ -2016,6 +2081,15 @@ export class OAuthManager {
       provider: string,
       bucket: string,
     ): Promise<boolean> => {
+      // If user already dismissed in this session, skip the dialog and proceed directly
+      if (this.userDismissedAuthPrompt) {
+        logger.debug(
+          'User previously dismissed auth prompt in this session, proceeding directly',
+          { provider, bucket },
+        );
+        return true;
+      }
+
       // Check if prompt mode is enabled FIRST - this determines timeout behavior
       // Issue 913: When prompt mode is enabled, wait indefinitely for user approval
       const showPrompt = getEphemeralSetting<boolean>('auth-bucket-prompt');
@@ -2049,6 +2123,9 @@ export class OAuthManager {
             logger.debug('User responded to bucket auth confirmation', {
               result,
             });
+            if (!result) {
+              this.userDismissedAuthPrompt = true;
+            }
             return result;
           }
 
@@ -2065,6 +2142,9 @@ export class OAuthManager {
             logger.debug('TUI responded to bucket auth confirmation', {
               result,
             });
+            if (!result) {
+              this.userDismissedAuthPrompt = true;
+            }
             return result;
           }
           // TUI didn't respond in time - fall back to delay

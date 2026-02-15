@@ -154,6 +154,18 @@ In addition to a project settings file, a project's `.llxprt` directory can cont
   - **Default:** `undefined`
   - **Requires restart:** Yes
 
+#### `defaultDisabledTools`
+
+- **`defaultDisabledTools`** (array):
+  - **Description:** Tool names disabled by default. Users can re-enable them with /tools enable.
+  - **Default:**
+
+    ```json
+    ["google_web_fetch"]
+    ```
+
+  - **Requires restart:** Yes
+
 #### `coreToolSettings`
 
 - **`coreToolSettings`** (object):
@@ -252,7 +264,7 @@ In addition to a project settings file, a project's `.llxprt` directory can cont
 
 - **`ui.useAlternateBuffer`** (boolean):
   - **Description:** Use an alternate screen buffer for the UI, preserving shell history.
-  - **Default:** `true`
+  - **Default:** `false`
   - **Requires restart:** Yes
 
 - **`ui.incrementalRendering`** (boolean):
@@ -271,7 +283,7 @@ In addition to a project settings file, a project's `.llxprt` directory can cont
 
 - **`ui.showLineNumbers`** (boolean):
   - **Description:** Show line numbers in the chat.
-  - **Default:** `false`
+  - **Default:** `true`
 
 - **`ui.showCitations`** (boolean):
   - **Description:** Show citations for generated text in the chat.
@@ -317,6 +329,10 @@ In addition to a project settings file, a project's `.llxprt` directory can cont
 
 - **`ui.memoryDiscoveryMaxDirs`** (number):
   - **Description:** Maximum number of directories to scan for memory files.
+  - **Default:** `undefined`
+
+- **`ui.memoryDiscoveryMaxDepth`** (number):
+  - **Description:** Maximum directory depth for downward LLXPRT.md search from the current working directory. Does not affect upward traversal or global memory. When unset, searches all depths.
   - **Default:** `undefined`
 
 - **`ui.contextFileName`** (string | string[]):
@@ -525,7 +541,11 @@ In addition to a project settings file, a project's `.llxprt` directory can cont
 
 - **`excludedProjectEnvVars`** (array):
   - **Description:** Environment variables to exclude from project context.
-  - **Default:** `["DEBUG","DEBUG_MODE"]`
+  - **Default:**
+
+    ```json
+    ["DEBUG", "DEBUG_MODE"]
+    ```
 
 #### `disableUpdateNag`
 
@@ -670,6 +690,12 @@ In addition to a project settings file, a project's `.llxprt` directory can cont
   - **Description:** Enable AI-powered prompt completion suggestions while typing.
   - **Default:** `false`
   - **Requires restart:** Yes
+
+#### `showProfileChangeInChat`
+
+- **`showProfileChangeInChat`** (boolean):
+  - **Description:** Show a message in chat when the active profile changes.
+  - **Default:** `true`
 
 #### `enableFuzzyFiltering`
 

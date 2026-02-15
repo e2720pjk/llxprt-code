@@ -40,6 +40,19 @@ export * from './confirmation-bus/message-bus.js';
 // Export services
 export * from './services/git-stats-service.js';
 
+// @plan PLAN-20260130-ASYNCTASK.P09
+// Export async task management types and services
+export {
+  AsyncTaskManager,
+  AsyncTaskInfo,
+  AsyncTaskStatus,
+  RegisterTaskInput,
+} from './services/asyncTaskManager.js';
+export { AsyncTaskReminderService } from './services/asyncTaskReminderService.js';
+export { AsyncTaskAutoTrigger } from './services/asyncTaskAutoTrigger.js';
+// Export SubagentTerminateMode for OutputObject types
+export { SubagentTerminateMode } from './core/subagent.js';
+
 // Export types
 export * from './types/modelParams.js';
 
@@ -60,6 +73,7 @@ export * from './core/geminiRequest.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export type { SubagentSchedulerFactory } from './core/subagentScheduler.js';
+export { buildContinuationDirective } from './core/compression/utils.js';
 
 export * from './code_assist/codeAssist.js';
 export * from './code_assist/oauth2.js';
@@ -68,6 +82,7 @@ export * from './code_assist/types.js';
 
 // Export utilities
 export * from './utils/paths.js';
+export * from './utils/shellPathCompletion.js';
 export * from './utils/ripgrepPathResolver.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/errors.js';
@@ -112,6 +127,7 @@ export {
   type OAuthTokenRequestMetadata,
 } from './auth/precedence.js';
 export * from './auth/token-store.js';
+export { KeyringTokenStore } from './auth/keyring-token-store.js';
 export * from './auth/types.js';
 export * from './auth/qwen-device-flow.js';
 export * from './auth/anthropic-device-flow.js';
@@ -132,6 +148,7 @@ export * from './ide/ide-installer.js';
 export {
   IDE_DEFINITIONS,
   detectIdeFromEnv,
+  isCloudShell,
   type IdeInfo,
 } from './ide/detect-ide.js';
 export * from './ide/constants.js';
@@ -179,6 +196,22 @@ export * from './tools/todo-store.js';
 export * from './tools/todo-events.js';
 export * from './tools/list-subagents.js';
 export * from './tools/task.js';
+export * from './tools/tool-key-storage.js';
+export {
+  ProviderKeyStorage,
+  getProviderKeyStorage,
+  resetProviderKeyStorage,
+  validateKeyName,
+  KEY_NAME_REGEX,
+} from './storage/provider-key-storage.js';
+export {
+  SecureStore,
+  SecureStoreError,
+  createDefaultKeyringAdapter,
+  type KeyringAdapter,
+  type SecureStoreErrorCode,
+  type SecureStoreOptions,
+} from './storage/secure-store.js';
 export * from './todo/todoFormatter.js';
 
 // MCP OAuth
@@ -237,7 +270,13 @@ export { OpenAIVercelProvider } from './providers/openai-vercel/index.js';
 export { AnthropicProvider } from './providers/anthropic/AnthropicProvider.js';
 export * from './providers/anthropic/usageInfo.js';
 export * from './providers/openai/codexUsageInfo.js';
+export * from './providers/zai/usageInfo.js';
+export * from './providers/synthetic/usageInfo.js';
+export * from './providers/chutes/usageInfo.js';
+export * from './providers/kimi/usageInfo.js';
+export * from './providers/apiKeyQuotaResolver.js';
 export { GeminiProvider } from './providers/gemini/GeminiProvider.js';
+export { FakeProvider } from './providers/fake/FakeProvider.js';
 export * from './providers/ProviderManager.js';
 export * from './providers/errors.js';
 export {
@@ -260,6 +299,8 @@ export * from './providers/tokenizers/OpenAITokenizer.js';
 export * from './providers/tokenizers/AnthropicTokenizer.js';
 export * from './utils/browser.js';
 export * from './utils/generateContentResponseUtilities.js';
+export * from './utils/stdio.js';
+export * from './utils/terminal.js';
 
 // Export adapters
 export * from './adapters/IStreamAdapter.js';

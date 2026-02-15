@@ -215,17 +215,19 @@ export const useGeminiStream = (
   onAuthError: () => void,
   performMemoryRefresh: () => Promise<void>,
   onEditorClose: () => void,
-  onCancelSubmit: () => void,
+  onCancelSubmit: (shouldRestorePrompt?: boolean) => void,
   setShellInputFocused: (value: boolean) => void,
   terminalWidth?: number,
   terminalHeight?: number,
   onTodoPause?: () => void,
   onEditorOpen: () => void = () => {},
+  activeProfileName: string | null = null,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const turnCancelledRef = useRef(false);
   const [isResponding, setIsResponding] = useState<boolean>(false);
+  const lastProfileNameRef = useRef<string | undefined>(undefined);
   // Issue #1113: Track tool completions that happened while isResponding was true
   // This handles the race condition where fast tools complete before the stream ends
   // We store the actual completed tools because useReactToolScheduler clears toolCalls
@@ -284,7 +286,7 @@ export const useGeminiStream = (
       }
 
       const sanitized =
-        typeof result.filtered === 'string' ? (result.filtered as string) : '';
+        typeof result.filtered === 'string' ? result.filtered : '';
 
       return {
         text: sanitized,
@@ -367,6 +369,7 @@ export const useGeminiStream = (
     scheduleToolCalls,
     markToolsAsSubmitted,
     cancelAllToolCalls,
+    lastToolOutputTime,
   ] = useReactToolScheduler(
     async (schedulerId, completedToolCallsFromScheduler, { isPrimary }) => {
       if (completedToolCallsFromScheduler.length === 0) {
@@ -440,18 +443,19 @@ export const useGeminiStream = (
     await done;
     setIsResponding(false);
   }, []);
-  const { handleShellCommand, activeShellPtyId } = useShellCommandProcessor(
-    addItem,
-    setPendingHistoryItem,
-    onExec,
-    onDebugMessage,
-    config,
-    geminiClient,
-    setShellInputFocused,
-    terminalWidth,
-    terminalHeight,
-    pendingHistoryItemRef,
-  );
+  const { handleShellCommand, activeShellPtyId, lastShellOutputTime } =
+    useShellCommandProcessor(
+      addItem,
+      setPendingHistoryItem,
+      onExec,
+      onDebugMessage,
+      config,
+      geminiClient,
+      setShellInputFocused,
+      terminalWidth,
+      terminalHeight,
+      pendingHistoryItemRef,
+    );
 
   const streamingState = useMemo(() => {
     if (toolCalls.some((tc) => tc.status === 'awaiting_approval')) {
@@ -767,16 +771,15 @@ export const useGeminiStream = (
           },
           userMessageTimestamp,
         );
+
+        // Clear thinking blocks after committing to prevent duplication
+        // on subsequent gemini_content items (#1272)
+        thinkingBlocksRef.current = [];
       }
 
-      // @plan:PLAN-20251202-THINKING-UI.P08
-      // Preserve thinkingBlocks in continuation pending item
       setPendingHistoryItem({
         type: 'gemini_content',
         text: afterText,
-        ...(thinkingBlocksRef.current.length > 0
-          ? { thinkingBlocks: [...thinkingBlocksRef.current] }
-          : {}),
       });
       return afterText;
     },
@@ -907,6 +910,9 @@ export const useGeminiStream = (
           'Response stopped due to image safety violations.',
         [FinishReason.UNEXPECTED_TOOL_CALL]:
           'Response stopped due to unexpected tool call.',
+        [FinishReason.IMAGE_PROHIBITED_CONTENT]:
+          'Response stopped due to prohibited content.',
+        [FinishReason.NO_IMAGE]: 'Response stopped due to no image.',
       };
 
       const message = finishReasonMessages[finishReason];
@@ -963,7 +969,7 @@ export const useGeminiStream = (
 
   const handleContextWindowWillOverflowEvent = useCallback(
     (estimatedRequestTokenCount: number, remainingTokenCount: number) => {
-      onCancelSubmit();
+      onCancelSubmit(true);
 
       const limit = tokenLimit(config.getModel());
 
@@ -1193,6 +1199,30 @@ export const useGeminiStream = (
           { type: MessageType.USER, text: trimmedQuery },
           userMessageTimestamp,
         );
+
+        // Profile change detection
+        // Read the showProfileChangeInChat setting
+        const showProfileChangeInChat =
+          settings?.merged?.showProfileChangeInChat ?? true;
+
+        if (
+          showProfileChangeInChat &&
+          activeProfileName &&
+          lastProfileNameRef.current !== undefined &&
+          activeProfileName !== lastProfileNameRef.current
+        ) {
+          // Profile changed since last turn
+          addItem(
+            {
+              type: 'profile_change',
+              profileName: activeProfileName,
+            } as Omit<HistoryItem, 'id'>,
+            userMessageTimestamp,
+          );
+        }
+
+        // Always update lastProfileNameRef on new turns
+        lastProfileNameRef.current = activeProfileName ?? undefined;
       }
 
       const { queryToSend, shouldProceed } = await prepareQueryForGemini(
@@ -1278,6 +1308,8 @@ export const useGeminiStream = (
       handleLoopDetectedEvent,
       flushPendingHistoryItem,
       scheduleNextQueuedSubmission,
+      activeProfileName,
+      settings?.merged?.showProfileChangeInChat,
     ],
   );
 
@@ -1290,6 +1322,25 @@ export const useGeminiStream = (
       scheduleNextQueuedSubmission();
     }
   }, [streamingState, scheduleNextQueuedSubmission]);
+
+  // Wire up async task auto-trigger
+  // @plan PLAN-20260130-ASYNCTASK.P22
+  useEffect(() => {
+    const isAgentBusy = () => streamingState !== StreamingState.Idle;
+    const triggerAgentTurn = async (message: string) => {
+      queuedSubmissionsRef.current.push({ query: [{ text: message }] });
+      scheduleNextQueuedSubmission();
+    };
+
+    const unsubscribe = config.setupAsyncTaskAutoTrigger(
+      isAgentBusy,
+      triggerAgentTurn,
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, [config, streamingState, scheduleNextQueuedSubmission]);
 
   // Issue #1113: When isResponding becomes false, process any tool completions
   // that we stored while the stream was active. We store the actual tools because
@@ -1348,17 +1399,64 @@ export const useGeminiStream = (
       // if the turn has been cancelled. Mark the tools as submitted to
       // prevent them from being reprocessed, but don't send to Gemini.
       if (turnCancelledRef.current) {
-        const callIds = completedToolCallsFromScheduler
-          .filter(
+        const completedToolsWithResponses =
+          completedToolCallsFromScheduler.filter(
             (tc): tc is TrackedCompletedToolCall | TrackedCancelledToolCall =>
               (tc.status === 'success' ||
                 tc.status === 'error' ||
                 tc.status === 'cancelled') &&
               (tc as TrackedCompletedToolCall | TrackedCancelledToolCall)
                 .response?.responseParts !== undefined,
-          )
-          .map((tc) => tc.request.callId);
+          );
+        const callIds = completedToolsWithResponses.map(
+          (tc) => tc.request.callId,
+        );
         if (callIds.length > 0) {
+          if (geminiClient) {
+            // Similar to the allToolsCancelled branch, we need to properly separate
+            // functionCall and functionResponse parts. Unlike the original broken code
+            // that filtered out functionCall parts entirely, we need to preserve both.
+            const allParts = completedToolsWithResponses.flatMap(
+              (toolCall) => toolCall.response.responseParts,
+            );
+
+            // Separate parts by type to maintain proper tool usage pattern
+            const functionCalls: Part[] = [];
+            const functionResponses: Part[] = [];
+            const otherParts: Part[] = [];
+
+            for (const part of allParts) {
+              if (part && typeof part === 'object' && 'functionCall' in part) {
+                functionCalls.push(part);
+                continue;
+              }
+              if (
+                part &&
+                typeof part === 'object' &&
+                'functionResponse' in part
+              ) {
+                functionResponses.push(part);
+                continue;
+              }
+              otherParts.push(part);
+            }
+
+            // Add function calls as 'model' role (tool_use blocks)
+            if (functionCalls.length > 0) {
+              geminiClient.addHistory({
+                role: 'model',
+                parts: functionCalls,
+              });
+            }
+
+            // Add function responses and other parts as 'user' role (tool_result blocks)
+            if (functionResponses.length > 0 || otherParts.length > 0) {
+              geminiClient.addHistory({
+                role: 'user',
+                parts: [...functionResponses, ...otherParts],
+              });
+            }
+          }
           markToolsAsSubmitted(callIds);
         }
         return;
@@ -1687,6 +1785,11 @@ export const useGeminiStream = (
     storage,
   ]);
 
+  const lastOutputTime = Math.max(
+    lastToolOutputTime ?? 0,
+    lastShellOutputTime ?? 0,
+  );
+
   return {
     streamingState,
     submitQuery,
@@ -1695,5 +1798,6 @@ export const useGeminiStream = (
     thought,
     cancelOngoingRequest,
     activeShellPtyId,
+    lastOutputTime,
   };
 };

@@ -5,6 +5,12 @@
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
+import type {
+  jsonSchemaValidator,
+  JsonSchemaType,
+  JsonSchemaValidator,
+} from '@modelcontextprotocol/sdk/validation/types.js';
 import type { SSEClientTransportOptions } from '@modelcontextprotocol/sdk/client/sse.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -16,9 +22,8 @@ import type {
   Prompt,
 } from '@modelcontextprotocol/sdk/types.js';
 import {
-  GetPromptResultSchema,
-  ListPromptsResultSchema,
   ListRootsRequestSchema,
+  type Tool as McpTool,
 } from '@modelcontextprotocol/sdk/types.js';
 import { parse } from 'shell-quote';
 import type { Config, MCPServerConfig } from '../config/config.js';
@@ -27,8 +32,7 @@ import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-provider.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 
-import type { FunctionDeclaration } from '@google/genai';
-import { mcpToTool } from '@google/genai';
+import type { CallableTool, FunctionCall, Part, Tool } from '@google/genai';
 import { basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
@@ -120,7 +124,14 @@ export class McpClient {
         }
         if (originalOnError) originalOnError(error);
         console.error(`MCP ERROR (${this.serverName}):`, error.toString());
+        this.toolRegistry.removeMcpToolsByServer(this.serverName);
+        this.promptRegistry.removePromptsByServer(this.serverName);
+        const client = this.client;
+        this.client = undefined;
         this.updateStatus(MCPServerStatus.DISCONNECTED);
+        if (client) {
+          client.close().catch(() => {});
+        }
       };
       this.updateStatus(MCPServerStatus.CONNECTED);
     } catch (error) {
@@ -481,6 +492,39 @@ export async function discoverMcpTools(
   }
 }
 
+/**
+ * A tolerant JSON Schema validator for MCP tool output schemas.
+ *
+ * Some MCP servers (e.g. third‑party extensions) return complex schemas that
+ * include `$defs` / `$ref` chains which can occasionally trip AJV's resolver,
+ * causing discovery to fail. This wrapper keeps the default AJV validator for
+ * normal operation but falls back to a no‑op validator any time schema
+ * compilation throws, so we can still list and use the tool while emitting a
+ * debug log.
+ */
+class LenientJsonSchemaValidator implements jsonSchemaValidator {
+  private readonly ajvValidator = new AjvJsonSchemaValidator();
+  private readonly debugLogger = new DebugLogger('llxprt:mcp:schema');
+
+  getValidator<T>(schema: JsonSchemaType): JsonSchemaValidator<T> {
+    try {
+      return this.ajvValidator.getValidator<T>(schema);
+    } catch (error) {
+      this.debugLogger.warn(
+        `Failed to compile MCP tool output schema (${
+          (schema as Record<string, unknown>)?.['$id'] ?? '<no $id>'
+        }): ${error instanceof Error ? error.message : String(error)}. ` +
+          'Skipping output validation for this tool.',
+      );
+      return (input: unknown) => ({
+        valid: true as const,
+        data: input as T,
+        errorMessage: undefined,
+      });
+    }
+  }
+}
+
 /** Visible for Testing */
 export function populateMcpServerCommand(
   mcpServers: Record<string, MCPServerConfig>,
@@ -533,7 +577,12 @@ export async function connectAndDiscover(
 
     mcpClient.onerror = (error) => {
       console.error(`MCP ERROR (${mcpServerName}):`, error.toString());
+      if (!mcpClient) return;
+      toolRegistry.removeMcpToolsByServer(mcpServerName);
+      promptRegistry.removePromptsByServer(mcpServerName);
       updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
+      mcpClient.close().catch(() => {});
+      mcpClient = undefined;
     };
 
     // Attempt to discover both prompts and tools
@@ -564,7 +613,7 @@ export async function connectAndDiscover(
     toolRegistry.sortTools();
   } catch (error) {
     if (mcpClient) {
-      mcpClient.close();
+      mcpClient.close().catch(() => {});
     }
     console.error(
       `Error connecting to MCP server '${mcpServerName}': ${getErrorMessage(
@@ -600,42 +649,33 @@ export async function discoverTools(
     // Only request tools if the server supports them.
     if (mcpClient.getServerCapabilities()?.tools == null) return [];
 
-    const mcpCallableTool = mcpToTool(mcpClient, {
-      timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
-    });
-    debug.log(`Created mcpCallableTool for ${mcpServerName}`);
-    const tool = await mcpCallableTool.tool();
-    debug.log(`Tool response for ${mcpServerName}:`, tool);
-
-    if (!Array.isArray(tool.functionDeclarations)) {
-      // This is a valid case for a prompt-only server
-      debug.log(
-        `No functionDeclarations array for ${mcpServerName}, returning empty array`,
-      );
-      return [];
-    }
-
-    debug.log(
-      `Found ${tool.functionDeclarations.length} tools for ${mcpServerName}`,
-    );
+    const response = await mcpClient.listTools({});
+    debug.log(`Found ${response.tools.length} tools for ${mcpServerName}`);
 
     const discoveredTools: DiscoveredMCPTool[] = [];
-    for (const funcDecl of tool.functionDeclarations) {
+    for (const toolDef of response.tools) {
       try {
-        debug.log(`Processing tool: ${funcDecl.name}`);
+        debug.log(`Processing tool: ${toolDef.name}`);
 
-        if (!isEnabled(funcDecl, mcpServerName, mcpServerConfig)) {
-          debug.log(`Tool ${funcDecl.name} is disabled by configuration`);
+        if (!isEnabled(toolDef, mcpServerName, mcpServerConfig)) {
+          debug.log(`Tool ${toolDef.name} is disabled by configuration`);
           continue;
         }
+
+        const mcpCallableTool = new McpCallableTool(
+          mcpClient,
+          toolDef,
+          mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
+        );
+        debug.log(`Created McpCallableTool for ${toolDef.name}`);
 
         discoveredTools.push(
           new DiscoveredMCPTool(
             mcpCallableTool,
             mcpServerName,
-            funcDecl.name!,
-            funcDecl.description ?? '',
-            funcDecl.parametersJsonSchema ?? { type: 'object', properties: {} },
+            toolDef.name,
+            toolDef.description ?? '',
+            toolDef.inputSchema ?? { type: 'object', properties: {} },
             mcpServerConfig.trust,
             undefined,
             cliConfig,
@@ -644,7 +684,7 @@ export async function discoverTools(
       } catch (error) {
         console.error(
           `Error discovering tool: '${
-            funcDecl.name
+            toolDef.name
           }' from MCP server '${mcpServerName}': ${(error as Error).message}`,
         );
       }
@@ -668,6 +708,69 @@ export async function discoverTools(
   }
 }
 
+class McpCallableTool implements CallableTool {
+  constructor(
+    private readonly client: Client,
+    private readonly toolDef: McpTool,
+    private readonly timeout: number,
+  ) {}
+
+  async tool(): Promise<Tool> {
+    return {
+      functionDeclarations: [
+        {
+          name: this.toolDef.name,
+          description: this.toolDef.description,
+          parametersJsonSchema: this.toolDef.inputSchema,
+        },
+      ],
+    };
+  }
+
+  async callTool(functionCalls: FunctionCall[]): Promise<Part[]> {
+    // We only expect one function call at a time for MCP tools in this context
+    if (functionCalls.length !== 1) {
+      throw new Error('McpCallableTool only supports single function call');
+    }
+    const call = functionCalls[0];
+
+    try {
+      const result = await this.client.callTool(
+        {
+          name: call.name!,
+          arguments: call.args as Record<string, unknown>,
+        },
+        undefined,
+        { timeout: this.timeout },
+      );
+
+      return [
+        {
+          functionResponse: {
+            name: call.name,
+            response: result,
+          },
+        },
+      ];
+    } catch (error) {
+      // Return error in the format expected by DiscoveredMCPTool
+      return [
+        {
+          functionResponse: {
+            name: call.name,
+            response: {
+              error: {
+                message: error instanceof Error ? error.message : String(error),
+                isError: true,
+              },
+            },
+          },
+        },
+      ];
+    }
+  }
+}
+
 /**
  * Discovers and logs prompts from a connected MCP client.
  * It retrieves prompt declarations from the client and logs their names.
@@ -684,10 +787,7 @@ export async function discoverPrompts(
     // Only request prompts if the server supports them.
     if (mcpClient.getServerCapabilities()?.prompts == null) return [];
 
-    const response = await mcpClient.request(
-      { method: 'prompts/list', params: {} },
-      ListPromptsResultSchema,
-    );
+    const response = await mcpClient.listPrompts({});
 
     for (const prompt of response.prompts) {
       promptRegistry.registerPrompt({
@@ -731,16 +831,17 @@ export async function invokeMcpPrompt(
   promptParams: Record<string, unknown>,
 ): Promise<GetPromptResult> {
   try {
-    const response = await mcpClient.request(
-      {
-        method: 'prompts/get',
-        params: {
-          name: promptName,
-          arguments: promptParams,
-        },
-      },
-      GetPromptResultSchema,
-    );
+    const sanitizedParams: Record<string, string> = {};
+    for (const [key, value] of Object.entries(promptParams)) {
+      if (value !== undefined && value !== null) {
+        sanitizedParams[key] = String(value);
+      }
+    }
+
+    const response = await mcpClient.getPrompt({
+      name: promptName,
+      arguments: sanitizedParams,
+    });
 
     return response;
   } catch (error) {
@@ -784,10 +885,16 @@ export async function connectToMcpServer(
   debugMode: boolean,
   workspaceContext: WorkspaceContext,
 ): Promise<Client> {
-  const mcpClient = new Client({
-    name: 'gemini-cli-mcp-client',
-    version: '0.0.1',
-  });
+  const mcpClient = new Client(
+    {
+      name: 'gemini-cli-mcp-client',
+      version: '0.0.1',
+    },
+    {
+      // Use a tolerant validator so bad output schemas don't block discovery.
+      jsonSchemaValidator: new LenientJsonSchemaValidator(),
+    },
+  );
 
   mcpClient.registerCapabilities({
     roots: {
@@ -1356,9 +1463,13 @@ export async function createTransport(
   );
 }
 
+interface NamedTool {
+  name?: string;
+}
+
 /** Visible for testing */
 export function isEnabled(
-  funcDecl: FunctionDeclaration,
+  funcDecl: NamedTool,
   mcpServerName: string,
   mcpServerConfig: MCPServerConfig,
 ): boolean {

@@ -65,6 +65,8 @@ export interface EphemeralSettings {
   'auth-key'?: string;
   /** Path to key file */
   'auth-keyfile'?: string;
+  /** Named key reference for keyring lookup @plan PLAN-20260211-SECURESTORE.P16 @requirement R21.2 */
+  'auth-key-name'?: string;
   /** API base URL */
   'base-url'?: string;
   /** Tool format override */
@@ -191,6 +193,21 @@ export interface EphemeralSettings {
   'reasoning.stripFromContext'?: 'all' | 'allButLast' | 'none';
   /** API format for reasoning (native/field) */
   'reasoning.format'?: 'native' | 'field';
+
+  /** @plan PLAN-20260211-COMPRESSION.P12 - Compression strategy override */
+  'compression.strategy'?: string;
+  /** @plan PLAN-20260211-COMPRESSION.P12 - Compression profile name for LLM calls */
+  'compression.profile'?: string;
+
+  /**
+   * @plan PLAN-20260211-HIGHDENSITY.P15
+   * @requirement REQ-HD-009.6
+   */
+  'compression.density.readWritePruning'?: boolean;
+  'compression.density.fileDedupe'?: boolean;
+  'compression.density.recencyPruning'?: boolean;
+  'compression.density.recencyRetention'?: number;
+  'compression.density.compressHeadroom'?: number;
 }
 
 /**

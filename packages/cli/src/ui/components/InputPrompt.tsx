@@ -21,6 +21,7 @@ import chalk from 'chalk';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
+import { useShellPathCompletion } from '../hooks/useShellPathCompletion.js';
 import { useKeypress, Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
@@ -38,6 +39,10 @@ import {
 } from '../utils/clipboardUtils.js';
 import * as path from 'path';
 import { SCREEN_READER_USER_PREFIX } from '../textConstants.js';
+import { secureInputHandler } from '../utils/secureInputHandler.js';
+import { useMouse } from '../hooks/useMouse.js';
+import type { MouseEvent } from '../hooks/useMouse.js';
+import clipboardy from 'clipboardy';
 
 const LARGE_PASTE_LINE_THRESHOLD = 4;
 const LARGE_PASTE_CHAR_THRESHOLD = 1000;
@@ -170,17 +175,28 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     historyData,
     reverseSearchActive,
   );
+
+  const shellPathCompletion = useShellPathCompletion(
+    buffer,
+    config.getTargetDir(),
+    shellModeActive,
+    reverseSearchActive,
+  );
+
   const resetCompletionState = completion.resetCompletionState;
   const resetReverseSearchCompletionState =
     reverseSearchCompletion.resetCompletionState;
 
   useEffect(() => {
     onSuggestionsVisibilityChange?.(
-      completion.showSuggestions || reverseSearchActive,
+      completion.showSuggestions ||
+        reverseSearchActive ||
+        shellPathCompletion.showSuggestions,
     );
   }, [
     completion.showSuggestions,
     reverseSearchActive,
+    shellPathCompletion.showSuggestions,
     onSuggestionsVisibilityChange,
   ]);
 
@@ -318,8 +334,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     }
   }, [buffer.text]);
 
-  // Handle clipboard image pasting with Ctrl+V
-  const handleClipboardImage = useCallback(async () => {
+  // Handle clipboard pasting with Ctrl+V or right-click
+  const handleClipboardPaste = useCallback(async () => {
     try {
       if (await clipboardHasImage()) {
         const imagePath = await saveClipboardImage(config.getTargetDir());
@@ -338,11 +354,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           const [row, col] = buffer.cursor;
 
           // Calculate offset from row/col
-          let offset = 0;
-          for (let i = 0; i < row; i++) {
-            offset += buffer.lines[i].length + 1; // +1 for newline
-          }
-          offset += col;
+          const offset = logicalPosToOffset(buffer.lines, row, col);
 
           // Add spaces around the path if needed
           let textToInsert = insertText;
@@ -360,9 +372,22 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // Insert at cursor position
           buffer.replaceRangeByOffset(offset, offset, textToInsert);
         }
+        return;
+      }
+
+      // Fallback: try text paste
+      try {
+        const text = await clipboardy.read();
+        if (text) {
+          const [row, col] = buffer.cursor;
+          const offset = logicalPosToOffset(buffer.lines, row, col);
+          buffer.replaceRangeByOffset(offset, offset, text);
+        }
+      } catch {
+        // Silent no-op: clipboard read can fail on Wayland, SSH, headless, etc.
       }
     } catch (error) {
-      console.error('Error handling clipboard image:', error);
+      console.error('Error handling clipboard paste:', error);
     }
   }, [buffer, config]);
 
@@ -454,6 +479,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             cursorPosition[1],
           );
           buffer.moveToOffset(offset);
+          return;
+        }
+        if (shellModeActive && shellPathCompletion.showSuggestions) {
+          shellPathCompletion.resetCompletionState();
+          resetEscapeState();
           return;
         }
         if (shellModeActive) {
@@ -616,8 +646,30 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           inputHistory.navigateDown();
           return;
         }
-      } else {
-        // Shell History Navigation
+      } else if (shellPathCompletion.showSuggestions) {
+        // Shell path completion — when suggestions are showing
+        if (shellPathCompletion.suggestions.length > 1) {
+          if (keyMatchers[Command.COMPLETION_UP](key)) {
+            shellPathCompletion.navigateUp();
+            return;
+          }
+          if (keyMatchers[Command.COMPLETION_DOWN](key)) {
+            shellPathCompletion.navigateDown();
+            return;
+          }
+        }
+        if (key.name === 'tab') {
+          const idx =
+            shellPathCompletion.activeSuggestionIndex === -1
+              ? 0
+              : shellPathCompletion.activeSuggestionIndex;
+          if (idx < shellPathCompletion.suggestions.length) {
+            shellPathCompletion.handleAutocomplete(idx);
+          }
+          return;
+        }
+      } else if (shellModeActive) {
+        // Shell History Navigation — only when NO path suggestions showing
         if (keyMatchers[Command.NAVIGATION_UP](key)) {
           const prevCommand = shellHistory.getPreviousCommand();
           if (prevCommand !== null) buffer.setText(prevCommand);
@@ -690,9 +742,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return;
       }
 
-      // Ctrl+V for clipboard image paste
-      if (keyMatchers[Command.PASTE_CLIPBOARD_IMAGE](key)) {
-        handleClipboardImage();
+      // Ctrl+V for clipboard paste
+      if (keyMatchers[Command.PASTE_CLIPBOARD](key)) {
+        handleClipboardPaste();
         return;
       }
 
@@ -722,7 +774,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       handleSubmit,
       shellHistory,
       reverseSearchCompletion,
-      handleClipboardImage,
+      shellPathCompletion,
+      handleClipboardPaste,
       resetCompletionState,
       showEscapePrompt,
       resetEscapeState,
@@ -737,6 +790,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   useKeypress(handleInput, {
     isActive: true,
   });
+
+  const handleMousePaste = useCallback(
+    (event: MouseEvent) => {
+      if (!focus || isEmbeddedShellFocused) return;
+      if (event.name === 'right-release') {
+        handleClipboardPaste();
+      }
+    },
+    [focus, isEmbeddedShellFocused, handleClipboardPaste],
+  );
+
+  useMouse(handleMousePaste, { isActive: focus && !isEmbeddedShellFocused });
 
   const linesToRender = buffer.viewportVisualLines;
   const [cursorVisualRowAbsolute, cursorVisualColAbsolute] =
@@ -856,19 +921,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const { inlineGhost, additionalLines } = getGhostTextLines();
 
-  const completionSuggestionsNode = completion.showSuggestions ? (
-    <Box paddingRight={2}>
-      <SuggestionsDisplay
-        suggestions={completion.suggestions}
-        activeIndex={completion.activeSuggestionIndex}
-        isLoading={completion.isLoadingSuggestions}
-        width={suggestionsWidth}
-        scrollOffset={completion.visibleStartIndex}
-        userInput={buffer.text}
-        activeHint={completion.activeHint}
-      />
-    </Box>
-  ) : null;
+  const completionSuggestionsNode =
+    completion.showSuggestions && !shellModeActive ? (
+      <Box paddingRight={2}>
+        <SuggestionsDisplay
+          suggestions={completion.suggestions}
+          activeIndex={completion.activeSuggestionIndex}
+          isLoading={completion.isLoadingSuggestions}
+          width={suggestionsWidth}
+          scrollOffset={completion.visibleStartIndex}
+          userInput={buffer.text}
+          activeHint={completion.activeHint}
+        />
+      </Box>
+    ) : null;
 
   const reverseSearchSuggestionsNode = reverseSearchActive ? (
     <Box paddingRight={2}>
@@ -883,8 +949,23 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     </Box>
   ) : null;
 
+  const shellPathSuggestionsNode = shellPathCompletion.showSuggestions ? (
+    <Box paddingRight={2}>
+      <SuggestionsDisplay
+        suggestions={shellPathCompletion.suggestions}
+        activeIndex={shellPathCompletion.activeSuggestionIndex}
+        isLoading={shellPathCompletion.isLoadingSuggestions}
+        width={suggestionsWidth}
+        scrollOffset={shellPathCompletion.visibleStartIndex}
+        userInput={buffer.text}
+      />
+    </Box>
+  ) : null;
+
   const suggestionsNode =
-    completionSuggestionsNode ?? reverseSearchSuggestionsNode;
+    completionSuggestionsNode ??
+    shellPathSuggestionsNode ??
+    reverseSearchSuggestionsNode;
 
   return (
     <>
@@ -939,10 +1020,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
                 let charCount = 0;
                 let hasVisibleContent = false;
                 const [logicalLineIdx, logicalStartCol] = mapEntry ?? [0, 0];
-                const logicalLine =
+                const rawLogicalLine =
                   mapEntry && buffer.lines[logicalLineIdx]
                     ? buffer.lines[logicalLineIdx]
                     : lineText;
+                // Apply live masking for /key and /toolkey commands.
+                // processInput returns same-length text with sensitive chars
+                // replaced by '*', so cursor positioning stays correct.
+                const logicalLine =
+                  logicalLineIdx === 0
+                    ? secureInputHandler.processInput(rawLogicalLine)
+                    : rawLogicalLine;
                 const tokens = parseInputForHighlighting(
                   logicalLine,
                   logicalLineIdx,

@@ -10,8 +10,8 @@ import { act } from 'react';
 import type { InputPromptProps } from './InputPrompt.js';
 import { InputPrompt } from './InputPrompt.js';
 import type { TextBuffer } from './shared/text-buffer.js';
-import type { Config } from '@google/gemini-cli-core';
-import { ApprovalMode } from '@google/gemini-cli-core';
+import type { Config } from '@vybestack/llxprt-code-core';
+import { ApprovalMode } from '@vybestack/llxprt-code-core';
 import * as path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
@@ -204,7 +204,6 @@ describe('InputPrompt', () => {
     );
 
     mockedUseKittyKeyboardProtocol.mockReturnValue({
-      supported: false,
       enabled: false,
       checking: false,
     });
@@ -1200,7 +1199,6 @@ describe('InputPrompt', () => {
     beforeEach(() => {
       vi.useFakeTimers();
       mockedUseKittyKeyboardProtocol.mockReturnValue({
-        supported: false,
         enabled: false,
         checking: false,
       });
@@ -1284,7 +1282,6 @@ describe('InputPrompt', () => {
         name: 'kitty',
         setup: () =>
           mockedUseKittyKeyboardProtocol.mockReturnValue({
-            supported: true,
             enabled: true,
             checking: false,
           }),
@@ -2241,6 +2238,41 @@ describe('InputPrompt', () => {
         unmount();
       },
     );
+  });
+
+  describe('shell path completion', () => {
+    // User-visible behavior tests
+    it.todo(
+      'should show path suggestions when typing a tilde path in shell mode',
+    );
+    it.todo('should accept path suggestion on Tab in shell mode');
+    it.todo(
+      'should navigate path suggestions with Up/Down when suggestions are visible',
+    );
+    it.todo(
+      'should navigate shell history with Up/Down when NO suggestions are visible',
+    );
+    it.todo('should clear path suggestions when exiting shell mode via Escape');
+    it.todo('should not show path suggestions when reverse search is active');
+    it.todo('should not interfere with @ completion in normal mode');
+    it.todo(
+      'should not show path suggestions for non-path tokens in shell mode',
+    );
+
+    // Key precedence matrix tests
+    it.todo(
+      'Tab in shell mode with path suggestions: accepts suggestion (not submit)',
+    );
+    it.todo(
+      'Enter in shell mode with path suggestions: submits command (not accept suggestion)',
+    );
+    it.todo(
+      'Up/Down in shell mode with path suggestions: navigates suggestions (not history)',
+    );
+    it.todo(
+      'Up/Down in shell mode without suggestions: navigates shell history',
+    );
+    it.todo('Escape in shell mode with path suggestions: exits shell mode');
   });
 });
 

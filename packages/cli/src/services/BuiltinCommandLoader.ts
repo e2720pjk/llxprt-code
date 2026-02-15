@@ -40,6 +40,8 @@ import { providerCommand } from '../ui/commands/providerCommand.js';
 import { modelCommand } from '../ui/commands/modelCommand.js';
 import { keyCommand } from '../ui/commands/keyCommand.js';
 import { keyfileCommand } from '../ui/commands/keyfileCommand.js';
+import { toolkeyCommand } from '../ui/commands/toolkeyCommand.js';
+import { toolkeyfileCommand } from '../ui/commands/toolkeyfileCommand.js';
 import { baseurlCommand } from '../ui/commands/baseurlCommand.js';
 import { toolformatCommand } from '../ui/commands/toolformatCommand.js';
 import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
@@ -55,6 +57,7 @@ import { policiesCommand } from '../ui/commands/policiesCommand.js';
 import { dumpcontextCommand } from '../ui/commands/dumpcontextCommand.js';
 import { todoCommand } from '../ui/commands/todoCommand.js';
 import { setupCommand } from '../ui/commands/setupCommand.js';
+import { tasksCommands } from '../ui/commands/tasksCommand.js';
 
 /**
  * Loads the core, hard-coded slash commands that are an integral part
@@ -147,6 +150,8 @@ export class BuiltinCommandLoader implements ICommandLoader {
       modelCommand,
       keyCommand,
       keyfileCommand,
+      toolkeyCommand, // @plan PLAN-20260206-TOOLKEY.P09 @requirement REQ-002
+      toolkeyfileCommand, // @plan PLAN-20260206-TOOLKEY.P09 @requirement REQ-003
       baseurlCommand,
       toolformatCommand,
       setupGithubCommand,
@@ -162,6 +167,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       dumpcontextCommand,
       todoCommand,
       setupCommand,
+      ...tasksCommands,
     ];
 
     return allDefinitions.filter((cmd): cmd is SlashCommand => cmd !== null);
