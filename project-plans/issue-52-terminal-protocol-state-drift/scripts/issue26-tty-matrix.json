@@ -1,0 +1,123 @@
+{
+  "initialWaitMs": 5000,
+  "tmux": {
+    "cols": 120,
+    "rows": 40,
+    "historyLimit": 60000,
+    "scrollbackLines": 8000
+  },
+  "scenarios": [
+    {
+      "id": "english_normal_exit",
+      "description": "Pure English path: submit text then exit normally.",
+      "timeoutMs": 60000,
+      "steps": [
+        {
+          "type": "line",
+          "text": "/profile load synthetic",
+          "submitKeys": ["Escape", "Enter"],
+          "waitMs": 2500
+        },
+        {
+          "type": "line",
+          "text": "hi",
+          "waitMs": 1200
+        },
+        {
+          "type": "line",
+          "text": "/quit",
+          "submitKeys": ["Escape", "Enter"],
+          "waitMs": 1200
+        },
+        {
+          "type": "key",
+          "key": "C-c",
+          "waitMs": 700
+        },
+        {
+          "type": "key",
+          "key": "C-c",
+          "waitMs": 700
+        }
+      ]
+    },
+    {
+      "id": "chinese_input_interrupt",
+      "description": "Chinese input then Ctrl-C; includes unfinished IME-like roman buffer.",
+      "timeoutMs": 60000,
+      "steps": [
+        {
+          "type": "line",
+          "text": "/profile load synthetic",
+          "submitKeys": ["Escape", "Enter"],
+          "waitMs": 2500
+        },
+        {
+          "type": "line",
+          "text": "測試",
+          "waitMs": 1200
+        },
+        {
+          "type": "text",
+          "text": "nihao",
+          "waitMs": 300
+        },
+        {
+          "type": "key",
+          "key": "C-c",
+          "waitMs": 500
+        },
+        {
+          "type": "line",
+          "text": "/quit",
+          "submitKeys": ["Escape", "Enter"],
+          "waitMs": 1200
+        },
+        {
+          "type": "key",
+          "key": "C-c",
+          "waitMs": 700
+        },
+        {
+          "type": "key",
+          "key": "C-c",
+          "waitMs": 700
+        }
+      ]
+    },
+    {
+      "id": "control_key_hijack_exit",
+      "description": "Exit flow focused on post-exit control-key responsiveness probes.",
+      "timeoutMs": 60000,
+      "steps": [
+        {
+          "type": "line",
+          "text": "/profile load synthetic",
+          "submitKeys": ["Escape", "Enter"],
+          "waitMs": 2500
+        },
+        {
+          "type": "line",
+          "text": "hello",
+          "waitMs": 1000
+        },
+        {
+          "type": "line",
+          "text": "/quit",
+          "submitKeys": ["Escape", "Enter"],
+          "waitMs": 1200
+        },
+        {
+          "type": "key",
+          "key": "C-c",
+          "waitMs": 700
+        },
+        {
+          "type": "key",
+          "key": "C-c",
+          "waitMs": 700
+        }
+      ]
+    }
+  ]
+}
